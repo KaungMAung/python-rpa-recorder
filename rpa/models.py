@@ -1,0 +1,201 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any
+from uuid import uuid4
+
+FORMAT_NAME = "python-rpa-recorder"
+FORMAT_VERSION = 1
+
+
+class RecorderState(str, Enum):
+    IDLE = "idle"
+    RECORDING = "recording"
+    PAUSED = "paused"
+    STOPPING = "stopping"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class TimingMode(str, Enum):
+    OPTIMIZED = "optimized"
+    RECORDED = "recorded"
+    NONE = "none"
+
+
+class ActionType(str, Enum):
+    CLICK_IMAGE = "click_image"
+    DOUBLE_CLICK_IMAGE = "double_click_image"
+    TYPE_TEXT = "type_text"
+    PRESS_KEY = "press_key"
+    HOTKEY = "hotkey"
+    SCROLL = "scroll"
+    WAIT = "wait"
+    OPEN_FILE = "open_file"
+    RUN_PYTHON = "run_python"
+    PYTHON_CODE = "python_code"
+    CLICK_COORDINATE = "click_coordinate"
+
+
+class ActionStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+@dataclass
+class ProjectSettings:
+    timing_mode: str = TimingMode.RECORDED.value
+    crop_width: int = 180
+    crop_height: int = 120
+    default_confidence: float = 0.86
+    default_timeout: float = 10.0
+    text_flush_timeout: float = 0.7
+    double_click_interval: float = 0.35
+    coordinate_fallback: bool = True
+    typing_interval: float = 0.02
+    start_delay: float = 3.0
+    pre_click_pause: float = 0.10
+    ignore_application_window: bool = True
+    pyautogui_failsafe: bool = True
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "ProjectSettings":
+        if not data:
+            return cls()
+        fields = cls().__dict__.keys()
+        return cls(**{key: data[key] for key in fields if key in data})
+
+
+@dataclass
+class RpaAction:
+    action: str
+    data: dict[str, Any] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: str(uuid4()))
+    name: str = ""
+    enabled: bool = True
+    delay_before: float = 0.0
+    recorded_delay: float = 0.0
+    status: str = ActionStatus.PENDING.value
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RpaAction":
+        return cls(
+            id=data.get("id") or str(uuid4()),
+            name=data.get("name", ""),
+            action=data["action"],
+            enabled=bool(data.get("enabled", True)),
+            delay_before=float(data.get("delay_before", 0.0) or 0.0),
+            recorded_delay=float(data.get("recorded_delay", 0.0) or 0.0),
+            status=data.get("status", ActionStatus.PENDING.value),
+            data=dict(data.get("data") or {}),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self, mask_secrets: bool = True) -> str:
+        data = self.data
+        if self.name.strip():
+            return self.name.strip()
+        if self.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value):
+            target = data.get("target_name") or "screen target"
+            verb = "Double-click" if self.action == ActionType.DOUBLE_CLICK_IMAGE.value else "Click"
+            return f"{verb} {target}"
+        if self.action == ActionType.TYPE_TEXT.value:
+            if data.get("masked") and mask_secrets:
+                return "Type protected text"
+            text = str(data.get("text", ""))
+            text = text.replace("\r", " ").replace("\n", " ").strip()
+            if not text:
+                return "Type text"
+            shortened = text if len(text) <= 48 else text[:45] + "..."
+            return f'Type "{shortened}"'
+        if self.action == ActionType.PRESS_KEY.value:
+            key = str(data.get("key", "")).replace("_", " ").title()
+            count = int(data.get("count", 1) or 1)
+            return f"Press {key}" if count == 1 else f"Press {key} {count} times"
+        if self.action == ActionType.HOTKEY.value:
+            keys = "+".join(str(key).title() for key in data.get("keys", []))
+            return f"Press {keys}"
+        if self.action == ActionType.SCROLL.value:
+            amount = int(data.get("amount", 0) or 0)
+            return f"Scroll {'up' if amount > 0 else 'down'} {abs(amount)}"
+        if self.action == ActionType.WAIT.value:
+            return f"Wait {float(data.get('seconds', self.delay_before) or 0):.2f} seconds"
+        if self.action == ActionType.OPEN_FILE.value:
+            path = str(data.get("path", ""))
+            return f"Open {path}" if path else "Open a file"
+        if self.action == ActionType.RUN_PYTHON.value:
+            return "Run Python code"
+        if self.action == ActionType.PYTHON_CODE.value:
+            name = data.get("name") or self.name or "Python Code"
+            return str(name)
+        if self.action == ActionType.CLICK_COORDINATE.value:
+            return f"Click original position ({data.get('x')}, {data.get('y')})"
+        return self.action
+
+    def friendly_name(self) -> str:
+        return FRIENDLY_ACTION_NAMES.get(self.action, self.action.replace("_", " ").title())
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+@dataclass
+class ProjectMeta:
+    id: str = field(default_factory=lambda: str(uuid4()))
+    name: str = "Untitled Recording"
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+
+
+@dataclass
+class RpaProject:
+    project: ProjectMeta = field(default_factory=ProjectMeta)
+    settings: ProjectSettings = field(default_factory=ProjectSettings)
+    variables: dict[str, str] = field(default_factory=dict)
+    actions: list[RpaAction] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RpaProject":
+        if data.get("format") != FORMAT_NAME:
+            raise ValueError("Invalid project format")
+        if int(data.get("format_version", 0)) != FORMAT_VERSION:
+            raise ValueError("Unsupported project format version")
+        return cls(
+            project=ProjectMeta(**data.get("project", {})),
+            settings=ProjectSettings.from_dict(data.get("settings")),
+            variables=dict(data.get("variables") or {}),
+            actions=[RpaAction.from_dict(item) for item in data.get("actions", [])],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format": FORMAT_NAME,
+            "format_version": FORMAT_VERSION,
+            "project": asdict(self.project),
+            "settings": asdict(self.settings),
+            "variables": self.variables,
+            "actions": [action.to_dict() for action in self.actions],
+        }
+
+
+FRIENDLY_ACTION_NAMES = {
+    ActionType.CLICK_IMAGE.value: "Click",
+    ActionType.DOUBLE_CLICK_IMAGE.value: "Double Click",
+    ActionType.TYPE_TEXT.value: "Type Text",
+    ActionType.PRESS_KEY.value: "Press Key",
+    ActionType.HOTKEY.value: "Keyboard Shortcut",
+    ActionType.SCROLL.value: "Scroll",
+    ActionType.WAIT.value: "Wait",
+    ActionType.OPEN_FILE.value: "Open File",
+    ActionType.RUN_PYTHON.value: "Run Python",
+    ActionType.PYTHON_CODE.value: "Python Code",
+    ActionType.CLICK_COORDINATE.value: "Click Position",
+}
