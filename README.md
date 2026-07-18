@@ -87,7 +87,7 @@ Use **Add Step** to configure an action in plain language. Click, double-click, 
 
 For clicks, choose coordinate-only execution or capture/select an image target. Captured targets use image matching first and retain the selected coordinate as a fallback. Scroll uses direction and amount, typing accepts multiline text and variable insertion, waiting accepts milliseconds, keyboard steps offer common keys/shortcuts, and file/application steps use Browse.
 
-During Run, Run From Here, Run Until Here, and Test Step, the recorder hides by default and a floating **Stop Run** control remains available. It is restored when execution ends; turn this off in Settings with **Hide recorder while running**.
+During Run, Run From Here, Run Until Here, and Test Step, the recorder hides by default, Windows shows the desktop (minimizing other windows), and a floating **Stop Run** control remains available. The recorder is restored when execution ends; other windows remain minimized. Turn this off in Settings with **Hide recorder while running**.
 
 ## Log Viewer
 

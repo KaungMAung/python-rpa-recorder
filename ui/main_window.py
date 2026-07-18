@@ -1040,6 +1040,10 @@ class MainWindow(QMainWindow):
             self.execution_floating.adjustSize()
             self.execution_floating.move(bounds.left() + (bounds.width() - self.execution_floating.width()) // 2, bounds.bottom() - self.execution_floating.height() - 16)
         self.hide()
+        # Prepare a clean desktop before replay begins. The always-on-top stop
+        # control remains available, and other windows are intentionally not
+        # restored after the run.
+        self._show_windows_desktop()
 
     def _restore_after_replay(self) -> None:
         if self.execution_floating:
