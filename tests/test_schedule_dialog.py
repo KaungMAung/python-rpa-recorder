@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -167,4 +168,92 @@ def test_duration_is_formatted_for_display(tmp_path: Path) -> None:
     dialog.reload()
     item = dialog.table.item(0, 4)
     assert item.text() == "2m 05s"
+    dialog.close()
+
+
+def test_summary_counts_schedule_states_and_running_result(tmp_path: Path) -> None:
+    for name in ("enabled", "paused", "disabled", "running"):
+        _make_flow(tmp_path, name)
+    dialog, store, _settings = make_dialog(tmp_path)
+    enabled = store.get("enabled")
+    enabled.enabled = True
+    paused = store.get("paused")
+    paused.enabled = True
+    paused.paused = True
+    running = store.get("running")
+    running.enabled = True
+    running.last_status = "Running"
+    for schedule in (enabled, paused, running):
+        store.set(schedule)
+    store.save()
+
+    dialog.reload()
+    assert dialog.summary_labels["Enabled"].text() == "Enabled  2"
+    assert dialog.summary_labels["Paused"].text() == "Paused  1"
+    assert dialog.summary_labels["Disabled"].text() == "Disabled  1"
+    assert dialog.summary_labels["Running"].text() == "Running  1"
+    dialog.close()
+
+
+def test_search_and_status_filters_narrow_the_table(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "invoice_export")
+    _make_flow(tmp_path, "daily_backup")
+    dialog, store, _settings = make_dialog(tmp_path)
+    schedule = store.get("invoice_export")
+    schedule.enabled = True
+    store.set(schedule)
+    store.save()
+
+    dialog.search_box.setText("invoice")
+    assert dialog.table.rowCount() == 1
+    assert dialog.table.item(0, COLUMN_FLOW).text() == "invoice_export"
+    dialog.search_box.clear()
+    dialog.status_filter.setCurrentText("Disabled")
+    assert dialog.table.rowCount() == 1
+    assert dialog.table.item(0, COLUMN_FLOW).text() == "daily_backup"
+    dialog.close()
+
+
+def test_empty_state_is_shown_when_filter_has_no_matches(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "flow_a")
+    dialog, _store, _settings = make_dialog(tmp_path)
+    dialog.search_box.setText("missing")
+    assert dialog.table.rowCount() == 0
+    assert not dialog.empty_label.isHidden()
+    assert dialog.table.isHidden()
+    dialog.close()
+
+
+def test_selecting_row_populates_editable_details_panel(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, _settings = make_dialog(tmp_path)
+    schedule = store.get("flow_a")
+    schedule.enabled = True
+    schedule.interval_minutes = 120
+    schedule.last_error = "sample error"
+    store.set(schedule)
+    store.save()
+
+    dialog.reload()
+    dialog.table.setCurrentCell(0, COLUMN_FLOW)
+    assert dialog.detail_name.text() == "flow_a"
+    assert dialog.detail_state.text() == "Enabled"
+    assert dialog.detail_interval.currentData() == 120
+    assert dialog.detail_values["error"].text() == "sample error"
+    dialog.close()
+
+
+def test_times_use_friendly_relative_text(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, _settings = make_dialog(tmp_path)
+    schedule = store.get("flow_a")
+    schedule.enabled = True
+    schedule.last_run_at = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    schedule.next_run_at = (datetime.now(timezone.utc) + timedelta(minutes=12)).isoformat()
+    store.set(schedule)
+    store.save()
+
+    dialog.reload()
+    assert dialog.table.item(0, 3).text() in {"1 min ago", "2 min ago"}
+    assert dialog.table.item(0, 6).text() in {"in 11 min", "in 12 min"}
     dialog.close()

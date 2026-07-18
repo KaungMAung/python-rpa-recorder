@@ -52,26 +52,26 @@ Right-click a step to test only that step, run from it, run until it, enable or 
 
 ## Scheduling Flows
 
-Open `Schedule Flows` (Execution toolbar group or menu, `⏱`) to see every saved flow and manage its automatic schedule. Click the `?` button in the dialog for an in-app explanation of every column and button; every control also has a hover tooltip.
+Open `Schedule Flows` (Execution toolbar group or menu, `⏱`) to see every saved flow and manage its automatic schedule. The header summarizes enabled, paused, disabled, and currently running flows. Search by flow name or filter by schedule/run status; a clear empty state explains when nothing matches.
 
 Columns:
 
 - **Flow** - the automation's name.
-- **Enabled** - `Enabled`, `Paused`, or `Disabled`.
+- **State** - color-coded `Enabled`, `Paused`, or `Disabled`.
 - **Run every** - the interval (15 minutes up to 24 hours).
-- **Last run** - when the flow last started.
+- **Last run** - a friendly relative time such as `2 min ago` (hover for the exact timestamp).
 - **Duration** - how long the last run took.
 - **Last status** - `Success`, `Failed`, `Running`, or a `Skipped (...)` reason.
-- **Next run** - when the flow will run next (or `Paused`/`Disabled`).
+- **Next run** - a countdown such as `in 12 min` (or `Paused`/`Disabled`; hover for the exact timestamp).
 
-Row actions:
+Select a row to open its Details panel. The panel shows the last run, duration, result, error, next run, and schedule interval. Change the interval or enabled/paused state there without adding controls to every table row. The row's labeled **Actions** menu provides:
 
 - **Run Now** - runs the flow immediately without affecting its schedule or next run time.
 - **Pause / Resume** - temporarily stops automatic runs while keeping the interval configuration intact. No confirmation needed.
 - **Enable / Disable** - fully turns the schedule on or off. Disabling asks for confirmation first.
-- **Details** - shows full last-run information, including the failure reason if the last run failed (also available as a tooltip on the Last status cell).
+- **Details** - selects the row and opens full run information in the side panel (failure details also remain available on the Last status tooltip).
 
-The table refreshes automatically every 5 seconds so a `Running` status and countdowns stay current, and can be refreshed manually with `Refresh`. Click `Flow`, `Last run`, `Next run`, or `Last status` headers to sort (click again to reverse); column widths and the chosen sort order are remembered between openings.
+The header shows the auto-refresh state and refreshes every 5 seconds so `Running` status and countdowns stay current; use **Refresh** or `F5` for an immediate update. Click `Flow`, `Last run`, `Next run`, or `Last status` headers to sort (click again to reverse); column widths and the chosen sort order are remembered between openings. Row selection and all controls support keyboard navigation.
 
 Only one flow runs at a time: if a different flow is already running, new runs are queued until it finishes; if the *same* flow is asked to run again while its own previous run hasn't finished, that attempt is skipped and marked `Skipped (Already Running)`. Schedules are stored permanently in `flows/schedules.json` and persist across app restarts.
 
