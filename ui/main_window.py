@@ -199,6 +199,13 @@ class MainWindow(QMainWindow):
         ]
         groups[2] = (groups[2][0], [item for item in groups[2][1] if item[0] not in ("Variables", "Settings")])
         groups[2][1].insert(7, ("Enable/Disable", "Enable/Disable"))
+        # Keep the toolbar focused on the most common step actions. Insertion,
+        # reordering and deselection remain available in the Step Editing menu
+        # and the table context menu, where they are easier to discover without
+        # turning the primary workspace into a wall of buttons.
+        groups[2] = (groups[2][0], [item for item in groups[2][1] if item[0] in (
+            "Add Manual Action", "Duplicate", "Delete Action", "Enable/Disable",
+        )])
         compact_labels = {
             "Add Manual Action": "+ Add",
             "Insert Before": "Before",
@@ -390,21 +397,16 @@ class MainWindow(QMainWindow):
         self.menu_actions["Generate Python"].triggered.connect(self.generate_python)
         self.buttons["Add Manual Action"].clicked.connect(self.add_manual_action)
         self.menu_actions["Add Manual Action"].triggered.connect(self.add_manual_action)
-        self.buttons["Insert Before"].clicked.connect(lambda: self.add_manual_action("before"))
         self.menu_actions["Insert Before"].triggered.connect(lambda: self.add_manual_action("before"))
-        self.buttons["Insert After"].clicked.connect(lambda: self.add_manual_action("after"))
         self.menu_actions["Insert After"].triggered.connect(lambda: self.add_manual_action("after"))
         self.buttons["Duplicate"].clicked.connect(self.duplicate_action)
         self.menu_actions["Duplicate"].triggered.connect(self.duplicate_action)
         self.buttons["Delete Action"].clicked.connect(self.delete_action)
         self.menu_actions["Delete Action"].triggered.connect(self.delete_action)
-        self.buttons["Move Up"].clicked.connect(lambda: self.move_action(-1))
         self.menu_actions["Move Up"].triggered.connect(lambda: self.move_action(-1))
-        self.buttons["Move Down"].clicked.connect(lambda: self.move_action(1))
         self.menu_actions["Move Down"].triggered.connect(lambda: self.move_action(1))
         self.buttons["Enable/Disable"].clicked.connect(self.toggle_selected_action)
         self.menu_actions["Enable/Disable"].triggered.connect(self.toggle_selected_action)
-        self.buttons["Deselect All"].clicked.connect(self.clear_step_selection)
         self.menu_actions["Deselect All"].triggered.connect(self.clear_step_selection)
         self.menu_actions["Variables"].triggered.connect(self.variables_dialog)
         self.menu_actions["Settings"].triggered.connect(self.settings_dialog)
@@ -458,7 +460,8 @@ class MainWindow(QMainWindow):
             self.menu_actions[name].setEnabled(self.buttons[name].isEnabled())
         selected = self.table.selected_index() >= 0
         for name in ("Insert Before", "Insert After", "Duplicate", "Delete Action", "Move Up", "Move Down", "Enable/Disable", "Deselect All"):
-            self.buttons[name].setEnabled(selected)
+            if name in self.buttons:
+                self.buttons[name].setEnabled(selected)
             self.menu_actions[name].setEnabled(selected)
         for name in ("Test This Step", "Run From Here", "Run Until Here"):
             self.menu_actions[name].setEnabled(selected and not recording and not paused and not running)
