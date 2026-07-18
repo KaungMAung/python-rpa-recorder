@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QSettings, QTimer, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialogButtonBox, QPlainTextEdit
+from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QPlainTextEdit
 
 from rpa.models import ActionType, ProjectSettings, RpaAction, RpaProject
 from rpa.project_manager import ProjectManager
@@ -134,6 +134,13 @@ def test_manual_drag_form_creates_picked_positions() -> None:
     assert action.action == ActionType.DRAG.value
     assert action.data["start_x"] == -120
     assert action.data["end_y"] == 160
+
+
+def test_manual_dialog_visible_confirmation_returns_accepted() -> None:
+    app()
+    dialog = ManualActionDialog(ProjectSettings(), {}, None)
+    QTimer.singleShot(0, lambda: QTest.mouseClick(dialog.confirm_button, Qt.LeftButton))
+    assert dialog.exec() == QDialog.DialogCode.Accepted
 
 
 def test_log_viewer_adds_level_and_step_context() -> None:

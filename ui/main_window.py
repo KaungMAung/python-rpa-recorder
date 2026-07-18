@@ -1318,8 +1318,7 @@ class MainWindow(QMainWindow):
         self.log(f"[Add Step] opening dialog; project has {before_count} steps")
         dialog = ManualActionDialog(self.project.settings, self.project.variables, self)
         dialog.screen_pick_requested.connect(lambda role: self._begin_manual_target_capture(dialog, role))
-        dialog.accepted.connect(lambda: self.log("[Add Step] Add Step button accepted"))
-        dialog.rejected.connect(lambda: self.log("[Add Step] dialog dismissed before adding a step"))
+        dialog.diagnostic.connect(self.log)
         result = dialog.exec()
         self.log(f"[Add Step] dialog result: {'accepted' if result == QDialog.Accepted else 'cancelled'}")
         if result != QDialog.Accepted:
@@ -1330,7 +1329,7 @@ class MainWindow(QMainWindow):
         if action.action == ActionType.PYTHON_CODE.value and not self.confirm_python_code_warning():
             return
         self.insert_action(action, position)
-        self.log(f"[Add Step] inserted; project now has {len(self.project.actions)} steps")
+        self.log(f"[Add Step] project steps: {before_count} -> {len(self.project.actions)}")
         self.update_status("Manual step added")
 
     def _materialize_manual_image(self, action: RpaAction) -> None:

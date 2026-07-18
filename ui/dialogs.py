@@ -47,6 +47,7 @@ class ManualActionDialog(QDialog):
     """Plain-language step builder. Screen capture is delegated to MainWindow."""
 
     screen_pick_requested = Signal(str)
+    diagnostic = Signal(str)
 
     def __init__(self, settings: ProjectSettings, variables: dict[str, str], parent=None) -> None:
         super().__init__(parent)
@@ -77,11 +78,15 @@ class ManualActionDialog(QDialog):
         self.summary.setWordWrap(True)
         self.summary.setStyleSheet("background: #f1f5f9; color: #334155; padding: 8px; border: 1px solid #d8dee8;")
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Add Step")
+        self.confirm_button = buttons.button(QDialogButtonBox.Ok)
+        self.confirm_button.setText("Add Step")
         buttons.button(QDialogButtonBox.Cancel).setText("Discard")
-        buttons.button(QDialogButtonBox.Ok).setDefault(True)
-        buttons.button(QDialogButtonBox.Ok).setToolTip("Add this configured step to the current flow")
-        buttons.accepted.connect(self.accept)
+        self.confirm_button.setDefault(True)
+        self.confirm_button.setToolTip("Add this configured step to the current flow")
+        # Wire the visible primary button directly. Do not also connect the
+        # button-box accepted signal, which can obscure which path closed the
+        # dialog when diagnosing a rejected result.
+        self.confirm_button.clicked.connect(self._confirm)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
         top = QFormLayout()
@@ -210,22 +215,37 @@ class ManualActionDialog(QDialog):
         try: self.summary.setText(self.action().summary())
         except Exception: self.summary.setText("Complete the fields above to configure this step.")
 
-    def accept(self) -> None:
+    def _validation_error(self) -> str | None:
         action = self.action()
         data = action.data
         if action.action == ActionType.TYPE_TEXT.value and not str(data.get("text", "")).strip():
-            QMessageBox.warning(self, "Text is required", "Enter the text this step should type.")
-            return
+            return "Enter the text this step should type."
         if action.action == ActionType.OPEN_FILE.value and not str(data.get("path", "")).strip():
-            QMessageBox.warning(self, "Application or file is required", "Use Browse to select an application or file.")
-            return
+            return "Use Browse to select an application or file."
         if action.action == ActionType.PRESS_KEY.value and not str(data.get("key", "")).strip():
-            QMessageBox.warning(self, "Key is required", "Choose or enter a key to press.")
-            return
+            return "Choose or enter a key to press."
         if action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value) and not str(data.get("image", "")).strip():
-            QMessageBox.warning(self, "Target image is required", "Use Pick on Screen or Choose Image to set the target image.")
+            return "Use Pick on Screen or Choose Image to set the target image."
+        return None
+
+    def _confirm(self) -> None:
+        self.diagnostic.emit("[Add Step] confirmation clicked")
+        error = self._validation_error()
+        if error:
+            self.diagnostic.emit(f"[Add Step] validation failed: {error}")
+            QMessageBox.warning(self, "Step needs more information", error)
             return
-        super().accept()
+        self.diagnostic.emit("[Add Step] validation passed")
+        self.diagnostic.emit("[Add Step] accept() called")
+        QDialog.accept(self)
+
+    def accept(self) -> None:
+        """Keep Enter/default-button acceptance on the same validated path."""
+        self._confirm()
+
+    def reject(self) -> None:
+        self.diagnostic.emit("[Add Step] reject() called")
+        QDialog.reject(self)
 
     def action(self) -> RpaAction:
         kind = self.type_box.currentData()
