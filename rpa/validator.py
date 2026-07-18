@@ -9,7 +9,7 @@ import shutil
 from typing import Any
 
 from .models import ActionType, RpaAction, RpaProject, RuntimeInputDefinition
-from .control_flow import CONTROL_TYPES, parse_control_flow, range_structure_issues
+from .control_flow import CONTROL_TYPES, METADATA_TYPES, parse_control_flow, range_structure_issues
 from .utils import MissingPlaceholderError, resolve_placeholders_strict
 from .variables import VARIABLE_NAME_PATTERN, built_in_variables
 from .windowing import normalize_window_target
@@ -92,7 +92,7 @@ def validate_project_detailed(
             target = _integer(action.data.get("failure_jump_step"))
             if target and 1 <= target <= len(project.actions):
                 target_index = target - 1
-                if flow.depths[index] != flow.depths[target_index] or project.actions[target_index].action in CONTROL_TYPES:
+                if flow.execution_depths[index] != flow.execution_depths[target_index] or project.actions[target_index].action in CONTROL_TYPES:
                     issues.append(ValidationIssue(
                         LEVEL_ERROR, index + 1, _step_name(action),
                         "failure jump target cannot enter, leave, or land on a control block",
@@ -122,6 +122,14 @@ def validate_project_detailed(
             continue
         if not isinstance(action.data, dict):
             issues.append(ValidationIssue(LEVEL_ERROR, step_number, name, "action data is corrupted; expected an object"))
+            continue
+        if action.action == ActionType.COMMENT.value and not str(action.data.get("text", "")).strip():
+            issues.append(ValidationIssue(LEVEL_WARNING, step_number, name, "comment is empty"))
+            continue
+        if action.action == ActionType.GROUP_START.value and not str(action.data.get("name", "")).strip():
+            issues.append(ValidationIssue(LEVEL_ERROR, step_number, name, "group name is required"))
+            continue
+        if action.action in METADATA_TYPES:
             continue
 
         try:

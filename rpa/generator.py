@@ -238,12 +238,22 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
     indent_level = 1
     for action_index, action in enumerate(project.actions):
         index = action_index + 1
+        if action.action == ActionType.COMMENT.value:
+            text = str(action.data.get("text", "")).strip().replace("\n", " | ")
+            lines.append(f"{'    ' * indent_level}# Note: {text}")
+            lines.append(f"{'    ' * indent_level}pass  # Comment step {index}")
+            continue
         if action.action in CONTROL_TYPES:
             if not action.enabled:
                 raise ValueError(f"Control step {index} cannot be disabled")
             prefix = "    " * indent_level
             data = action.data
-            if action.action in (
+            if action.action == ActionType.GROUP_START.value:
+                lines.append(f"{prefix}# region {str(data.get('name') or 'Step group')}")
+                lines.append(f"{prefix}pass  # Group marker step {index}")
+            elif action.action == ActionType.GROUP_END.value:
+                lines.append(f"{prefix}# endregion")
+            elif action.action in (
                 ActionType.IF_IMAGE_EXISTS.value,
                 ActionType.IF_IMAGE_NOT_EXISTS.value,
                 ActionType.IF_WINDOW_EXISTS.value,

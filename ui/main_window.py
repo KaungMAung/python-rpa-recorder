@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from copy import deepcopy
+import json
 import shutil
 from datetime import datetime, timezone
 from html import escape
@@ -10,8 +11,9 @@ import time
 import sys
 import shiboken6
 import weakref
+from uuid import uuid4
 
-from PySide6.QtCore import QObject, QPoint, QRect, QSettings, QThread, QTimer, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QItemSelectionModel, QObject, QPoint, QRect, QSettings, QThread, QTimer, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -41,7 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from rpa.generator import generate_python
-from rpa.control_flow import IF_TYPES, LOOP_TYPES, CONTROL_TYPES, parse_control_flow
+from rpa.control_flow import BLOCK_OPENERS, IF_TYPES, LOOP_TYPES, CONTROL_TYPES, NON_EXECUTABLE_TYPES, parse_control_flow
 from rpa.evidence import RunEvidenceSession
 from rpa.image_matcher import find_image, find_reference_matches, save_crop_from_image, screenshot_image, virtual_screen_origin
 from rpa.models import ActionType, ProjectSettings, RecorderState, RpaAction, RpaProject
@@ -74,6 +76,10 @@ from rpa.variables import (
 from rpa.utils import foreground_elevation_mismatch
 from rpa.windowing import NativeWindowBackend
 from rpa.windows_tasks import WindowsTaskRegistrar
+from rpa.step_editing import (
+    clipboard_payload, complete_contiguous_selection, delete_steps, jump_targets,
+    paste_payload, reorder_steps, restore_jump_targets, validate_structure,
+)
 from ui.action_editor import ActionEditor
 from ui.action_table import ActionTable
 from ui.dialogs import ManualActionDialog, SettingsDialog, VariablesDialog, load_default_project_settings, show_error
@@ -467,7 +473,7 @@ class MainWindow(QMainWindow):
             ("File", ["New", "Open", "Save", "Save As"]),
             ("Record Actions", ["Record", "Pause", "Resume", "Stop"]),
             ("Execution", ["Run", "Run Until Breakpoint", "Validate Flow", "Test This Step", "Run From Here", "Run Until Here", "Stop Run", "Schedule Flows", "Generate Python"]),
-            ("Step Editing", ["Undo", "Redo", "Toggle Breakpoint", "Add Manual Action", "Insert Before", "Insert After", "Duplicate", "Delete Action", "Move Up", "Move Down", "Enable/Disable", "Deselect All"]),
+            ("Step Editing", ["Undo", "Redo", "Copy", "Cut", "Paste", "Toggle Breakpoint", "Add Manual Action", "Add Comment", "Group Selected", "Move Into Group", "Move Out of Group", "Insert Before", "Insert After", "Duplicate", "Delete Action", "Move Up", "Move Down", "Enable Selected", "Disable Selected", "Adjust Wait Before", "Enable/Disable", "Deselect All"]),
             ("Project", ["Variables", "Settings"]),
         ]
         for menu_name, names in menus:
@@ -489,6 +495,10 @@ class MainWindow(QMainWindow):
             "Deselect All": "Esc",
             "Undo": "Ctrl+Z",
             "Redo": "Ctrl+Y",
+            "Copy": "Ctrl+C",
+            "Cut": "Ctrl+X",
+            "Paste": "Ctrl+V",
+            "Duplicate": "Ctrl+D",
             "Toggle Breakpoint": "F9",
         }.get(name, "")
         friendly = {
@@ -504,6 +514,9 @@ class MainWindow(QMainWindow):
         self.menu_actions["Save As"].triggered.connect(self.save_as_project)
         self.menu_actions["Undo"].triggered.connect(self.undo)
         self.menu_actions["Redo"].triggered.connect(self.redo)
+        self.menu_actions["Copy"].triggered.connect(self.copy_steps)
+        self.menu_actions["Cut"].triggered.connect(self.cut_steps)
+        self.menu_actions["Paste"].triggered.connect(self.paste_steps)
         self.buttons["Record"].clicked.connect(self.start_recording)
         self.menu_actions["Record"].triggered.connect(self.start_recording)
         self.buttons["Pause"].clicked.connect(self.pause_recording)
@@ -539,6 +552,13 @@ class MainWindow(QMainWindow):
         self.buttons["Enable/Disable"].clicked.connect(self.toggle_selected_action)
         self.menu_actions["Enable/Disable"].triggered.connect(self.toggle_selected_action)
         self.menu_actions["Toggle Breakpoint"].triggered.connect(self.toggle_breakpoint)
+        self.menu_actions["Add Comment"].triggered.connect(self.add_comment)
+        self.menu_actions["Group Selected"].triggered.connect(self.group_selected_steps)
+        self.menu_actions["Move Into Group"].triggered.connect(self.move_selected_into_group)
+        self.menu_actions["Move Out of Group"].triggered.connect(self.move_selected_out_of_group)
+        self.menu_actions["Enable Selected"].triggered.connect(lambda: self.set_selected_enabled(True))
+        self.menu_actions["Disable Selected"].triggered.connect(lambda: self.set_selected_enabled(False))
+        self.menu_actions["Adjust Wait Before"].triggered.connect(self.adjust_selected_wait)
         self.menu_actions["Deselect All"].triggered.connect(self.clear_step_selection)
         self.menu_actions["Variables"].triggered.connect(self.variables_dialog)
         self.menu_actions["Settings"].triggered.connect(self.settings_dialog)
@@ -553,6 +573,8 @@ class MainWindow(QMainWindow):
         self.table.itemDoubleClicked.connect(lambda _: self.editor.focus_main_field())
         self.table.empty_area_clicked.connect(self.clear_step_selection)
         self.table.context_action_requested.connect(self.handle_table_context_action)
+        self.table.reorder_requested.connect(self.reorder_selected_steps)
+        self.table.structure_changed.connect(self.mark_dirty)
         self.editor.action_changed.connect(self.mark_dirty)
         self.editor.close_requested.connect(self.clear_step_selection)
         self.editor.test_step_requested.connect(self.test_selected_step)
@@ -610,7 +632,7 @@ class MainWindow(QMainWindow):
         for name in ("Pause", "Resume", "Stop", "Run", "Record", "Stop Run"):
             self.menu_actions[name].setEnabled(self.buttons[name].isEnabled())
         selected = self.table.selected_index() >= 0
-        for name in ("Insert Before", "Insert After", "Duplicate", "Delete Action", "Move Up", "Move Down", "Enable/Disable", "Deselect All"):
+        for name in ("Copy", "Cut", "Insert Before", "Insert After", "Duplicate", "Delete Action", "Move Up", "Move Down", "Enable Selected", "Disable Selected", "Adjust Wait Before", "Enable/Disable", "Group Selected", "Move Into Group", "Move Out of Group", "Deselect All"):
             if name in self.buttons:
                 self.buttons[name].setEnabled(selected)
             self.menu_actions[name].setEnabled(selected)
@@ -920,7 +942,7 @@ class MainWindow(QMainWindow):
         selected = self.table.selected_index()
         start = selected if selected >= 0 else 0
         if not any(
-            action.breakpoint and action.action not in CONTROL_TYPES
+            action.breakpoint and action.action not in NON_EXECUTABLE_TYPES
             for action in self.project.actions[start:]
         ):
             QMessageBox.information(
@@ -1454,7 +1476,7 @@ class MainWindow(QMainWindow):
             self._image_match_exclusions(),
             self.active_evidence.folder,
             any(
-                action.breakpoint and action.action not in CONTROL_TYPES
+                action.breakpoint and action.action not in NON_EXECUTABLE_TYPES
                 for action in self.project.actions[start_index:end_index + 1]
             ),
         )
@@ -1539,7 +1561,7 @@ class MainWindow(QMainWindow):
         end = min(self.run_end_index, len(self.project.actions) - 1)
         for index in range(max(0, start), end + 1):
             action = self.project.actions[index]
-            if action.action not in CONTROL_TYPES and action.enabled:
+            if action.action not in NON_EXECUTABLE_TYPES and action.enabled:
                 return index
         return None
 
@@ -1580,7 +1602,7 @@ class MainWindow(QMainWindow):
         if not self.run_start_index <= index <= self.run_end_index:
             QMessageBox.warning(self, "Restart Debugging", "Select a step inside the current run range.")
             return
-        if self.project.actions[index].action in CONTROL_TYPES or not self.project.actions[index].enabled:
+        if self.project.actions[index].action in NON_EXECUTABLE_TYPES or not self.project.actions[index].enabled:
             QMessageBox.warning(self, "Restart Debugging", "Select an enabled executable step, not a block marker.")
             return
         current = self.debug_paused_index
@@ -2361,6 +2383,7 @@ class MainWindow(QMainWindow):
             inserted.append(RpaAction(ActionType.END_IF.value, {}))
         elif action.action in LOOP_TYPES:
             inserted.append(RpaAction(ActionType.END_LOOP.value, {}))
+        targets = jump_targets(self.project.actions)
         prospective = self.project.actions[:insert_at] + inserted + self.project.actions[insert_at:]
         structure = parse_control_flow(prospective)
         if action.action in CONTROL_TYPES and structure.issues:
@@ -2373,6 +2396,7 @@ class MainWindow(QMainWindow):
             self.log(f"[Add Step] control step rejected: {reason}")
             return False
         self.project.actions[insert_at:insert_at] = inserted
+        restore_jump_targets(self.project.actions, targets)
         self.mark_dirty()
         # A filtered list can otherwise make a successfully added step appear
         # to vanish. Show the new work immediately and select it for review.
@@ -2388,73 +2412,197 @@ class MainWindow(QMainWindow):
 
     def delete_action(self) -> None:
         indices = self.table.selected_indices()
-        if indices:
-            index = indices[0]
-            flow = parse_control_flow(self.project.actions)
-            expanded = set(indices)
-            for selected in indices:
-                if selected in flow.group_ends and self.project.actions[selected].action in IF_TYPES | LOOP_TYPES:
-                    expanded.update(range(selected, flow.group_ends[selected] + 1))
-            prospective = [item for row, item in enumerate(self.project.actions) if row not in expanded]
-            issues = parse_control_flow(prospective).issues
-            if issues:
-                show_error(
-                    self, "Cannot delete part of a block",
-                    f"{issues[0].reason}. Select the If or Repeat row to delete its entire block.",
-                )
-                return
-            for selected in sorted(expanded, reverse=True):
-                del self.project.actions[selected]
-            self.mark_dirty()
-            self.refresh()
-            if self.project.actions:
-                self.table.selectRow(min(index, len(self.project.actions) - 1))
-            self.log(f"deleted {len(expanded)} step{'s' if len(expanded) != 1 else ''}")
+        prospective, error = delete_steps(self.project.actions, indices)
+        if error:
+            self._step_edit_error("Cannot Delete Steps", error)
+            return
+        selected = min(indices) if indices else 0
+        self._apply_step_edit(prospective, [min(selected, len(prospective) - 1)] if prospective else [], "deleted selected steps")
 
     def duplicate_action(self) -> None:
-        index = self.table.selected_index()
-        if index < 0:
+        indices = self.table.selected_indices()
+        payload, error = clipboard_payload(self.project.actions, indices)
+        if error:
+            self._step_edit_error("Cannot Duplicate Steps", error)
             return
         flow = parse_control_flow(self.project.actions)
-        source = self.project.actions[index]
-        if source.action in IF_TYPES | LOOP_TYPES and index in flow.group_ends:
-            source_actions = self.project.actions[index:flow.group_ends[index] + 1]
-            insert_at = flow.group_ends[index] + 1
-        elif source.action in CONTROL_TYPES:
-            show_error(self, "Cannot duplicate control marker", "Select the opening If or Repeat row to duplicate the complete block.")
+        insert_at = (
+            flow.group_ends[indices[0]] + 1
+            if len(indices) == 1 and self.project.actions[indices[0]].action in BLOCK_OPENERS
+            and indices[0] in flow.group_ends else max(indices) + 1
+        )
+        prospective, selected, error = paste_payload(self.project.actions, payload, insert_at)
+        if error:
+            self._step_edit_error("Cannot Duplicate Steps", error)
             return
-        else:
-            source_actions = [source]
-            insert_at = index + 1
-        clones = []
-        for original in source_actions:
-            clone = RpaAction.from_dict(deepcopy(original.to_dict()))
-            clones.append(RpaAction(
-                clone.action, deepcopy(clone.data), name=clone.name, enabled=clone.enabled,
-                delay_before=clone.delay_before, recorded_delay=clone.recorded_delay,
-                breakpoint=clone.breakpoint,
-            ))
-        self.project.actions[insert_at:insert_at] = clones
-        self.mark_dirty()
-        self.refresh()
-        self.table.selectRow(insert_at)
+        self._apply_step_edit(prospective, selected, f"duplicated {len(selected)} step(s)")
 
     def move_action(self, delta: int) -> None:
-        index = self.table.selected_index()
-        target = index + delta
-        if index < 0 or target < 0 or target >= len(self.project.actions):
+        indices = self.table.selected_indices()
+        if not indices:
             return
-        if self.project.actions[index].action in CONTROL_TYPES:
-            show_error(self, "Cannot move a block marker", "Move steps within the block, or delete and recreate the complete If/Repeat block at the new position.")
+        destination = (min(indices) - 1) if delta < 0 else (max(indices) + 2)
+        self.reorder_selected_steps(indices, destination)
+
+    def reorder_selected_steps(self, indices: list[int], destination: int) -> None:
+        if self.filter_box.text().strip():
+            self._step_edit_error("Cannot Reorder Filtered Steps", "Clear the step filter before reordering so hidden rows cannot affect placement.")
             return
-        self.project.actions[index], self.project.actions[target] = self.project.actions[target], self.project.actions[index]
+        flow = parse_control_flow(self.project.actions)
+        if len(indices) == 1 and self.project.actions[indices[0]].action in BLOCK_OPENERS and indices[0] in flow.group_ends:
+            indices = list(range(indices[0], flow.group_ends[indices[0]] + 1))
+        prospective, error = reorder_steps(self.project.actions, indices, destination)
+        if error:
+            self._step_edit_error("Cannot Move Steps", error)
+            return
+        moved_ids = {self.project.actions[index].id for index in indices}
+        selected = [index for index, action in enumerate(prospective) if action.id in moved_ids]
+        self._apply_step_edit(prospective, selected, f"moved {len(selected)} step(s)")
+
+    def copy_steps(self) -> bool:
+        payload, error = clipboard_payload(self.project.actions, self.table.selected_indices())
+        if error:
+            self._step_edit_error("Cannot Copy Steps", error)
+            return False
+        QApplication.clipboard().setText(json.dumps(payload))
+        self.log(f"copied {len(payload['actions'])} step(s)")
+        return True
+
+    def cut_steps(self) -> None:
+        if self.copy_steps():
+            self.delete_action()
+
+    def paste_steps(self) -> None:
+        try:
+            payload = json.loads(QApplication.clipboard().text())
+        except (TypeError, json.JSONDecodeError):
+            self._step_edit_error("Cannot Paste Steps", "The clipboard does not contain copied RPA steps.")
+            return
+        indices = self.table.selected_indices()
+        insert_at = max(indices) + 1 if indices else len(self.project.actions)
+        prospective, selected, error = paste_payload(self.project.actions, payload, insert_at)
+        if error:
+            self._step_edit_error("Cannot Paste Steps", error)
+            return
+        if self.filter_box.text():
+            self.filter_box.clear()
+        self._apply_step_edit(prospective, selected, f"pasted {len(selected)} step(s)")
+
+    def add_comment(self) -> None:
+        text, accepted = QInputDialog.getMultiLineText(self, "Add Comment", "Comment or note")
+        if not accepted or not text.strip():
+            return
+        insert_at = max(self.table.selected_indices(), default=len(self.project.actions) - 1) + 1
+        targets = jump_targets(self.project.actions)
+        prospective = list(self.project.actions)
+        prospective.insert(insert_at, RpaAction(ActionType.COMMENT.value, {"text": text.strip()}))
+        restore_jump_targets(prospective, targets)
+        self._apply_step_edit(prospective, [insert_at], "added comment")
+
+    def group_selected_steps(self) -> None:
+        selected, error = complete_contiguous_selection(self.project.actions, self.table.selected_indices())
+        if error:
+            self._step_edit_error("Cannot Group Steps", error)
+            return
+        name, accepted = QInputDialog.getText(self, "Group Steps", "Group name")
+        if not accepted or not name.strip():
+            return
+        group_id = str(uuid4())
+        targets = jump_targets(self.project.actions)
+        prospective = list(self.project.actions)
+        prospective.insert(selected[0], RpaAction(ActionType.GROUP_START.value, {
+            "name": name.strip(), "group_id": group_id, "collapsed": False,
+        }))
+        prospective.insert(selected[-1] + 2, RpaAction(ActionType.GROUP_END.value, {"group_id": group_id}))
+        error = validate_structure(prospective)
+        if error:
+            self._step_edit_error("Cannot Group Steps", error)
+            return
+        restore_jump_targets(prospective, targets)
+        self._apply_step_edit(prospective, [selected[0]], f"grouped {len(selected)} step(s) as {name.strip()}")
+
+    def move_selected_into_group(self) -> None:
+        selected, error = complete_contiguous_selection(self.project.actions, self.table.selected_indices())
+        if error:
+            self._step_edit_error("Cannot Move Into Group", error)
+            return
+        flow = parse_control_flow(self.project.actions)
+        groups = [index for index in flow.group_start_end if index not in selected]
+        if not groups:
+            self._step_edit_error("Cannot Move Into Group", "Create another named group first.")
+            return
+        labels = [f"{self.project.actions[index].summary()} (Step {index + 1})" for index in groups]
+        label, accepted = QInputDialog.getItem(self, "Move Into Group", "Destination group", labels, 0, False)
+        if not accepted:
+            return
+        group_index = groups[labels.index(label)]
+        end_index = flow.group_start_end[group_index]
+        if group_index < selected[0] and selected[-1] < end_index:
+            self._step_edit_error("Cannot Move Into Group", "The selected steps are already inside that group.")
+            return
+        self.reorder_selected_steps(selected, end_index)
+
+    def move_selected_out_of_group(self) -> None:
+        selected, error = complete_contiguous_selection(self.project.actions, self.table.selected_indices())
+        if error:
+            self._step_edit_error("Cannot Move Out of Group", error)
+            return
+        flow = parse_control_flow(self.project.actions)
+        enclosing = [
+            (start, end) for start, end in flow.group_start_end.items()
+            if start < selected[0] and selected[-1] < end
+        ]
+        if not enclosing:
+            self._step_edit_error("Cannot Move Out of Group", "The selected range is not inside a named group.")
+            return
+        _start, end = max(enclosing, key=lambda pair: pair[0])
+        self.reorder_selected_steps(selected, end + 1)
+
+    def adjust_selected_wait(self) -> None:
+        indices = [index for index in self.table.selected_indices() if self.project.actions[index].action not in NON_EXECUTABLE_TYPES]
+        if not indices:
+            return
+        current = self.project.actions[indices[0]].delay_before
+        seconds, accepted = QInputDialog.getDouble(
+            self, "Set Wait Before", "Seconds before each selected step", current, 0.0, 86400.0, 2,
+        )
+        if not accepted:
+            return
+        for index in indices:
+            self.project.actions[index].delay_before = seconds
         self.mark_dirty()
         self.refresh()
-        self.table.selectRow(target)
+        self._select_step_rows(indices)
+        self.log(f"set Wait Before to {seconds:.2f}s for {len(indices)} step(s)")
+
+    def _apply_step_edit(self, actions: list[RpaAction] | None, selected: list[int], message: str) -> None:
+        if actions is None:
+            return
+        self.project.actions = actions
+        self.mark_dirty()
+        self.refresh()
+        self._select_step_rows(selected)
+        self.log(message)
+
+    def _select_step_rows(self, rows: list[int]) -> None:
+        self.table.clearSelection()
+        for row in rows:
+            if 0 <= row < self.table.rowCount():
+                self.table.selectionModel().select(
+                    self.table.model().index(row, 0),
+                    QItemSelectionModel.Select | QItemSelectionModel.Rows,
+                )
+        if rows and 0 <= rows[0] < self.table.rowCount():
+            self.table.setCurrentCell(rows[0], 0, QItemSelectionModel.NoUpdate)
+            self.table.scrollToItem(self.table.item(rows[0], 0))
+
+    def _step_edit_error(self, title: str, reason: str) -> None:
+        show_error(self, title, reason)
+        self.log(f"step editing rejected: {reason}")
 
     def toggle_action(self, index: int, enabled: bool) -> None:
         if 0 <= index < len(self.project.actions):
-            if self.project.actions[index].action in CONTROL_TYPES:
+            if self.project.actions[index].action in NON_EXECUTABLE_TYPES:
                 show_error(self, "Control steps stay enabled", "If, Else, End, Repeat, and Break markers cannot be disabled because they define the flow structure.")
                 return
             self.project.actions[index].enabled = enabled
@@ -2466,16 +2614,26 @@ class MainWindow(QMainWindow):
         indices = self.table.selected_indices()
         if not indices:
             return
-        if any(self.project.actions[index].action in CONTROL_TYPES for index in indices):
-            show_error(self, "Control steps stay enabled", "Remove the complete block instead of disabling one of its structural markers.")
+        executable = [index for index in indices if self.project.actions[index].action not in NON_EXECUTABLE_TYPES]
+        if not executable:
             return
-        enable = not all(self.project.actions[index].enabled for index in indices)
+        enable = not all(self.project.actions[index].enabled for index in executable)
+        self.set_selected_enabled(enable)
+
+    def set_selected_enabled(self, enabled: bool) -> None:
+        indices = [
+            index for index in self.table.selected_indices()
+            if self.project.actions[index].action not in NON_EXECUTABLE_TYPES
+        ]
+        if not indices:
+            self._step_edit_error("No Executable Steps Selected", "Groups, comments, and control markers do not have an enabled state.")
+            return
         for index in indices:
-            self.project.actions[index].enabled = enable
+            self.project.actions[index].enabled = enabled
             self.table.update_action(index, self.project.actions[index])
         self.mark_dirty()
         self.editor.set_action(self.project.actions[indices[0]], self.project_dir)
-        self.log(f"{'enabled' if enable else 'disabled'} {len(indices)} step{'s' if len(indices) != 1 else ''}")
+        self.log(f"{'enabled' if enabled else 'disabled'} {len(indices)} step{'s' if len(indices) != 1 else ''}")
 
     def select_action(self) -> None:
         index = self.table.selected_index()
@@ -2492,7 +2650,7 @@ class MainWindow(QMainWindow):
         indices = self.table.selected_indices()
         if not indices:
             return
-        executable = [index for index in indices if self.project.actions[index].action not in CONTROL_TYPES]
+        executable = [index for index in indices if self.project.actions[index].action not in NON_EXECUTABLE_TYPES]
         if not executable:
             show_error(self, "Breakpoint Not Available", "Breakpoints can be set only on executable steps, not block markers.")
             return
@@ -2738,6 +2896,9 @@ class MainWindow(QMainWindow):
             ("Ctrl+Insert", lambda: self.add_manual_action("before")),
             ("Shift+Insert", lambda: self.add_manual_action("after")),
             ("Ctrl+D", self.duplicate_action),
+            ("Ctrl+C", self.copy_steps),
+            ("Ctrl+X", self.cut_steps),
+            ("Ctrl+V", self.paste_steps),
             ("Alt+Up", lambda: self.move_action(-1)),
             ("Alt+Down", lambda: self.move_action(1)),
             ("Ctrl+G", self.generate_python),
@@ -2763,7 +2924,17 @@ class MainWindow(QMainWindow):
             "run_from": self.run_from_here,
             "run_until": self.run_until_here,
             "toggle_enabled": self.toggle_selected_action,
+            "enable": lambda: self.set_selected_enabled(True),
+            "disable": lambda: self.set_selected_enabled(False),
+            "adjust_wait": self.adjust_selected_wait,
+            "copy": self.copy_steps,
+            "cut": self.cut_steps,
+            "paste": self.paste_steps,
             "add": self.add_manual_action,
+            "comment": self.add_comment,
+            "group": self.group_selected_steps,
+            "move_into_group": self.move_selected_into_group,
+            "move_out_group": self.move_selected_out_of_group,
             "insert_before": lambda: self.add_manual_action("before"),
             "insert_after": lambda: self.add_manual_action("after"),
             "duplicate": self.duplicate_action,

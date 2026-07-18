@@ -13,11 +13,14 @@ IF_TYPES = {
     ActionType.IF_VARIABLE.value,
 }
 LOOP_TYPES = {ActionType.REPEAT_COUNT.value, ActionType.REPEAT_UNTIL.value}
-BLOCK_OPENERS = IF_TYPES | LOOP_TYPES
+GROUP_TYPES = {ActionType.GROUP_START.value, ActionType.GROUP_END.value}
+METADATA_TYPES = GROUP_TYPES | {ActionType.COMMENT.value}
+BLOCK_OPENERS = IF_TYPES | LOOP_TYPES | {ActionType.GROUP_START.value}
 CONTROL_TYPES = BLOCK_OPENERS | {
     ActionType.ELSE.value, ActionType.END_IF.value, ActionType.END_LOOP.value,
-    ActionType.BREAK_LOOP.value,
+    ActionType.BREAK_LOOP.value, ActionType.GROUP_END.value,
 }
+NON_EXECUTABLE_TYPES = CONTROL_TYPES | {ActionType.COMMENT.value}
 
 
 @dataclass(frozen=True)
@@ -30,28 +33,42 @@ class StructureIssue:
 @dataclass
 class ControlFlowMap:
     depths: list[int]
+    execution_depths: list[int] = field(default_factory=list)
     group_ends: dict[int, int] = field(default_factory=dict)
     if_else: dict[int, int] = field(default_factory=dict)
     else_if: dict[int, int] = field(default_factory=dict)
     end_if_start: dict[int, int] = field(default_factory=dict)
     loop_end: dict[int, int] = field(default_factory=dict)
     end_loop_start: dict[int, int] = field(default_factory=dict)
+    group_start_end: dict[int, int] = field(default_factory=dict)
+    group_end_start: dict[int, int] = field(default_factory=dict)
     enclosing_loops: dict[int, list[int]] = field(default_factory=dict)
     issues: list[StructureIssue] = field(default_factory=list)
 
 
 def parse_control_flow(actions: list[RpaAction]) -> ControlFlowMap:
-    result = ControlFlowMap(depths=[0] * len(actions))
+    result = ControlFlowMap(depths=[0] * len(actions), execution_depths=[0] * len(actions))
     stack: list[dict] = []
     for index, action in enumerate(actions):
         kind = action.action
-        is_closer = kind in {ActionType.ELSE.value, ActionType.END_IF.value, ActionType.END_LOOP.value}
+        is_closer = kind in {
+            ActionType.ELSE.value, ActionType.END_IF.value, ActionType.END_LOOP.value,
+            ActionType.GROUP_END.value,
+        }
         result.depths[index] = max(0, len(stack) - (1 if is_closer else 0))
+        semantic_depth = sum(item["kind"] != "group" for item in stack)
+        semantic_closer = kind in {ActionType.ELSE.value, ActionType.END_IF.value, ActionType.END_LOOP.value}
+        result.execution_depths[index] = max(0, semantic_depth - (1 if semantic_closer else 0))
         result.enclosing_loops[index] = [item["index"] for item in stack if item["kind"] == "loop"]
         if kind in IF_TYPES:
             stack.append({"kind": "if", "index": index, "else": None})
         elif kind in LOOP_TYPES:
             stack.append({"kind": "loop", "index": index})
+        elif kind == ActionType.GROUP_START.value:
+            stack.append({
+                "kind": "group", "index": index,
+                "group_id": str(action.data.get("group_id") or action.id),
+            })
         elif kind == ActionType.ELSE.value:
             if not stack or stack[-1]["kind"] != "if":
                 result.issues.append(StructureIssue(index + 1, "Else must be inside an If block"))
@@ -81,10 +98,22 @@ def parse_control_flow(actions: list[RpaAction]) -> ControlFlowMap:
                 result.group_ends[start] = index
                 result.loop_end[start] = index
                 result.end_loop_start[index] = start
+        elif kind == ActionType.GROUP_END.value:
+            if not stack or stack[-1]["kind"] != "group":
+                result.issues.append(StructureIssue(index + 1, "End Group has no matching Group"))
+            else:
+                block = stack.pop()
+                start = block["index"]
+                end_group_id = str(action.data.get("group_id") or "")
+                if end_group_id and end_group_id != block["group_id"]:
+                    result.issues.append(StructureIssue(index + 1, "End Group belongs to a different group"))
+                result.group_ends[start] = index
+                result.group_start_end[start] = index
+                result.group_end_start[index] = start
         elif kind == ActionType.BREAK_LOOP.value and not any(item["kind"] == "loop" for item in stack):
             result.issues.append(StructureIssue(index + 1, "Break Loop must be inside a Repeat block"))
     for block in reversed(stack):
-        label = "End If" if block["kind"] == "if" else "End Loop"
+        label = {"if": "End If", "loop": "End Loop", "group": "End Group"}[block["kind"]]
         result.issues.append(StructureIssue(block["index"] + 1, f"missing {label} for this block"))
     return result
 
@@ -94,6 +123,8 @@ def range_structure_issues(
 ) -> list[StructureIssue]:
     issues: list[StructureIssue] = []
     for opener, closer in flow.group_ends.items():
+        if opener in flow.group_start_end:
+            continue
         opener_in = start_index <= opener <= end_index
         closer_in = start_index <= closer <= end_index
         if opener_in != closer_in:

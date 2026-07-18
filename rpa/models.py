@@ -59,6 +59,9 @@ class ActionType(str, Enum):
     CLOSE_WINDOW = "close_window"
     CLICK_WINDOW_RELATIVE = "click_window_relative"
     MOVE_WINDOW_RELATIVE = "move_window_relative"
+    COMMENT = "comment"
+    GROUP_START = "group_start"
+    GROUP_END = "group_end"
 
 
 class ActionStatus(str, Enum):
@@ -211,6 +214,13 @@ class RpaAction:
             return f"Click ({data.get('relative_x', 0)}, {data.get('relative_y', 0)}) in {_window_target_label(data)}"
         if self.action == ActionType.MOVE_WINDOW_RELATIVE.value:
             return f"Move to ({data.get('relative_x', 0)}, {data.get('relative_y', 0)}) in {_window_target_label(data)}"
+        if self.action == ActionType.COMMENT.value:
+            text = str(data.get("text", "")).replace("\n", " ").strip()
+            return text or "Comment"
+        if self.action == ActionType.GROUP_START.value:
+            return str(data.get("name") or "Step group")
+        if self.action == ActionType.GROUP_END.value:
+            return "End group"
         return self.action
 
     def friendly_name(self) -> str:
@@ -340,6 +350,9 @@ FRIENDLY_ACTION_NAMES = {
     ActionType.CLOSE_WINDOW.value: "Close Window",
     ActionType.CLICK_WINDOW_RELATIVE.value: "Click Relative to Window",
     ActionType.MOVE_WINDOW_RELATIVE.value: "Move Relative to Window",
+    ActionType.COMMENT.value: "Comment / Note",
+    ActionType.GROUP_START.value: "Group",
+    ActionType.GROUP_END.value: "End Group",
 }
 
 

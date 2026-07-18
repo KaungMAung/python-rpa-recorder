@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .image_matcher import find_image, screenshot_image, wait_for_image, wait_for_references
-from .models import ActionType, RpaAction, RpaProject, condition_summary
-from .control_flow import CONTROL_TYPES, IF_TYPES, LOOP_TYPES, parse_control_flow
+from .models import ActionStatus, ActionType, RpaAction, RpaProject, condition_summary
+from .control_flow import CONTROL_TYPES, IF_TYPES, LOOP_TYPES, METADATA_TYPES, parse_control_flow
 from .utils import MissingPlaceholderError, foreground_elevation_mismatch, resolve_placeholders_strict
 from .variables import prepare_runtime_variables
 from .windowing import (
@@ -161,6 +161,13 @@ class ReplayRunner:
             self.current_index = index
             if self.stop_requested():
                 raise StopReplay()
+            if action.action in METADATA_TYPES:
+                action.status = ActionStatus.COMPLETED.value
+                if action_callback:
+                    action_callback(index, "completed")
+                self.log(f"[Step {index + 1}] {action.summary()}")
+                index += 1
+                continue
             if action.action in CONTROL_TYPES:
                 if respect_enabled and not action.enabled:
                     raise ReplayActionError(index, action, ValueError("control steps cannot be disabled"))

@@ -12,6 +12,8 @@ The main workflow is `Record -> Review -> Test -> Run`. The step list remains vi
 - `rpa/project_manager.py` saves and opens folder-based projects.
 - `rpa/recorder.py` uses `pynput` to capture global mouse and keyboard input.
 - `rpa/runner.py` replays actions with `pyautogui` in a worker thread and owns the thread-safe breakpoint gate; UI commands wake its condition without running automation work on the UI thread.
+- `rpa/control_flow.py` validates visual If, loop, and named-group boundaries.
+- `rpa/step_editing.py` applies ID-aware reorder, delete, copy, and paste operations while preserving jump targets.
 - `rpa/image_matcher.py` captures screenshots and locates images with OpenCV.
 - `rpa/windowing.py` discovers, matches, activates, and controls native Windows application windows.
 - `rpa/generator.py` creates `generated/generated_rpa.py`.
@@ -108,6 +110,21 @@ The lower Logs/Status and Validation area has a practical minimum height and rem
 Use **Add Step** to configure an action in plain language. Click, double-click, right-click, mouse move, and drag steps have **Pick on Screen** controls: the recorder hides while a crosshair overlay captures the selected position. Press Esc or right-click to cancel without changing the new step. This works across monitors, including monitors positioned to the left of the primary display.
 
 For clicks, choose coordinate-only execution or capture/select an image target. Captured targets use image matching first and retain the selected coordinate as a fallback. Scroll uses direction and amount, typing accepts multiline text and variable insertion, waiting accepts milliseconds, keyboard steps offer common keys/shortcuts, and file/application steps use Browse.
+
+## Advanced Step Editing and Groups
+
+The step table supports Ctrl-click and Shift-click range selection. Drag selected rows to reorder them; dragging an If, Repeat, or named-group header moves its complete block. Reordering is intentionally unavailable while a step filter is active, preventing hidden rows from producing an unexpected position. Invalid drops that would separate an If/Else/End If, Repeat/End Loop, or Group/End Group pair are rejected without changing the flow.
+
+Use the **Step Editing** menu, keyboard shortcuts, or the table's context menu for:
+
+- **Copy / Cut / Paste** (`Ctrl+C`, `Ctrl+X`, `Ctrl+V`) with new IDs for pasted steps. Complete control blocks are copied as a unit. Failure-action jump targets are tracked by step ID and remapped to the correct step number after insertion or reordering; a cross-flow paste is rejected if its external jump target is unavailable.
+- **Duplicate** (`Ctrl+D`) for one step, several selected executable steps, or a continuous range. Selecting an If, Repeat, or Group header duplicates the complete block after its matching closer.
+- **Enable Selected**, **Disable Selected**, **Delete**, and **Set Wait Before** for bulk changes. Non-executable comments and structural markers are not enabled or disabled. A deletion is blocked when another step still jumps to the selected target.
+- **Add Comment** to place a maintainers' note between steps. Comments are editable in Step Details, do not execute, and become `# Note:` comments in generated Python.
+- **Group Selected** to wrap a structurally complete continuous range in a named section. Click the disclosure arrow on the Group row to collapse or expand it. The group name and collapsed state are saved in `project.json`.
+- **Move Into Group** to append a selected continuous range to a chosen group, or **Move Out of Group** to place it immediately after its nearest enclosing group. Moves that would cut through a condition or loop are rejected.
+
+Every editing command, including collapse/expand, grouping, bulk changes, drag-and-drop, and clipboard operations, participates in Undo/Redo. Search temporarily reveals matching rows inside collapsed groups without changing their saved collapse state. Existing flows load without conversion because groups and comments use optional action records in the existing ordered action list.
 
 ## Advanced Image Targeting
 
@@ -322,6 +339,16 @@ Run these checks on the same Windows account and display configuration that will
 3. Add a 10-second Wait step, run again, click `Stop Run` during the wait, and confirm execution stops promptly.
 4. Test Stop Run while a Click step is searching for an image that is not visible.
 5. With PyAutoGUI failsafe enabled, run and move the pointer into a screen corner. Confirm the run stops with the friendly safety message.
+
+### Step Editing, Groups, and Comments
+
+1. Create six simple steps. Ctrl-click several executable rows, disable and enable them, set their Wait Before value, then use Undo/Redo after each change.
+2. Select a continuous range and choose **Group Selected**. Name it, collapse and expand it, save/reopen the flow, and confirm the name and collapsed state persist.
+3. Drag the Group header and confirm the complete group moves. Try dragging only an End If or End Loop away from its opener and confirm the move is rejected without changing order.
+4. Copy and paste a range, then confirm pasted steps have distinct IDs in `project.json`. Duplicate an If or Repeat header and confirm its complete block is placed after the original closer.
+5. Add a Comment, edit it in Step Details, and generate Python. Confirm the note appears as `# Note:` and does not execute as an automation action.
+6. Move a selected range into the named group and back out. Confirm any existing failure-action Jump still points to the same logical target step.
+7. Apply a search filter and confirm matching rows inside a collapsed group are visible. Attempt a drag while filtered and confirm ordering remains unchanged.
 
 ### Windows Task Scheduler
 

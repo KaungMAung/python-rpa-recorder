@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from rpa.models import ActionType, RpaAction
-from rpa.control_flow import CONTROL_TYPES
+from rpa.control_flow import CONTROL_TYPES, METADATA_TYPES
 from ui.condition_editor import ConditionEditor
 from ui.window_target_editor import WindowTargetEditor
 
@@ -185,8 +185,10 @@ class ActionEditor(QWidget):
         name.editingFinished.connect(lambda: self._set_name(name.text()))
         self.form.addRow("Step name", name)
         self.form.addRow("Action", QLabel(action.friendly_name()))
-        self.form.addRow("Status", QLabel("Disabled" if not action.enabled else str(action.status).title()))
-        self.form.addRow("Enabled", self._check(action.enabled, lambda value: self._set("enabled", value)))
+        is_metadata = action.action in METADATA_TYPES
+        if not is_metadata:
+            self.form.addRow("Status", QLabel("Disabled" if not action.enabled else str(action.status).title()))
+            self.form.addRow("Enabled", self._check(action.enabled, lambda value: self._set("enabled", value)))
         is_click_image = action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value)
         is_control = action.action in CONTROL_TYPES
         if is_click_image:
@@ -194,11 +196,22 @@ class ActionEditor(QWidget):
             note.setWordWrap(True)
             note.setStyleSheet("color: #64748b;")
             self.form.addRow(note)
-        elif not is_control:
+        elif not is_control and not is_metadata:
             self.form.addRow("Wait before", self._double(action.delay_before, lambda value: self._set("delay_before", value), 0, 9999))
 
         data = action.data
-        if action.action in {
+        if action.action == ActionType.COMMENT.value:
+            editor = QPlainTextEdit(str(data.get("text", "")))
+            editor.setPlaceholderText("Add context for the people maintaining this flow")
+            editor.textChanged.connect(lambda: self._set_data("text", editor.toPlainText()))
+            self.form.addRow("Comment", editor)
+        elif action.action == ActionType.GROUP_START.value:
+            group_name = QLineEdit(str(data.get("name", "")))
+            group_name.editingFinished.connect(lambda: self._set_data("name", group_name.text().strip()))
+            self.form.addRow("Group name", group_name)
+        elif action.action == ActionType.GROUP_END.value:
+            self.form.addRow(QLabel("Closes the matching named group."))
+        elif action.action in {
             ActionType.IF_IMAGE_EXISTS.value, ActionType.IF_IMAGE_NOT_EXISTS.value,
             ActionType.IF_WINDOW_EXISTS.value, ActionType.IF_PATH_EXISTS.value,
             ActionType.IF_VARIABLE.value,
@@ -307,7 +320,7 @@ class ActionEditor(QWidget):
             self.form.addRow("End X", self._number_field(data.get("end_x", 0), lambda v: self._set_data("end_x", v), integer=True))
             self.form.addRow("End Y", self._number_field(data.get("end_y", 0), lambda v: self._set_data("end_y", v), integer=True))
             self.advanced_form.addRow("Drag duration", self._double(data.get("duration", 0.5), lambda v: self._set_data("duration", v), 0, 60))
-        if is_control:
+        if is_control or is_metadata:
             self._loading = False
             return
         retry_heading = QLabel("Retry and failure handling")
