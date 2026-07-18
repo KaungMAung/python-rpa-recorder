@@ -20,6 +20,7 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
     runner_exe = _runner_exe_reference(out_dir, _main_exe_path())
     _write_generated_runner(out_dir, runner_python, runner_exe)
     function_lines: list[str] = []
+    runtime_input_data = project.to_dict().get("runtime_inputs", {})
     for index, action in enumerate(project.actions, start=1):
         if action.action == ActionType.PYTHON_CODE.value:
             function_lines.extend(_python_code_function(index, action.data.get("name") or action.name or "python_code", str(action.data.get("code", ""))))
@@ -36,6 +37,8 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
         "",
         "import time",
         "import os",
+        "import getpass",
+        "from datetime import date",
         "from pathlib import Path",
         "import cv2",
         "import numpy as np",
@@ -45,6 +48,7 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
         "PROJECT_DIR = Path(__file__).resolve().parent.parent",
         "SCREENSHOT_DIR = PROJECT_DIR / 'screenshots'",
         f"VARIABLES = {json.dumps(project.variables, indent=4)}",
+        f"RUNTIME_INPUTS = {runtime_input_data!r}",
         "RUNTIME_VARIABLES = dict(VARIABLES)",
         f"PRE_CLICK_PAUSE = {_delay_literal(project.settings.pre_click_pause)}",
         "",
@@ -61,8 +65,59 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
         "        raise KeyError(f'Missing variable: {missing[0]}')",
         "    return value",
         "",
+        "def as_int(value):",
+        "    return int(float(resolve(value)))",
+        "",
+        "def as_float(value):",
+        "    return float(resolve(value))",
+        "",
+        "def prompt_runtime_inputs():",
+        "    values = {}",
+        "    for name, definition in RUNTIME_INPUTS.items():",
+        "        kind = definition.get('type', 'text')",
+        "        default = definition.get('default', '')",
+        "        required = bool(definition.get('required', True))",
+        "        options = definition.get('options') or []",
+        "        env_value = os.environ.get('RPA_INPUT_' + name)",
+        "        if env_value is not None:",
+        "            raw = env_value",
+        "        elif kind == 'password' or definition.get('sensitive'):",
+        "            raw = getpass.getpass(f'{name}: ') or default",
+        "        elif kind == 'dropdown' and options:",
+        "            print(f'{name} choices: ' + ', '.join(options))",
+        "            raw = input(f'{name} [{default}]: ').strip() or default",
+        "        else:",
+        "            raw = input(f'{name} [{default}]: ').strip() or default",
+        "        if required and (raw is None or str(raw).strip() == ''):",
+        "            raise ValueError(f'{name}: a value is required')",
+        "        if kind == 'number' and raw != '':",
+        "            number = float(raw)",
+        "            raw = int(number) if number.is_integer() else number",
+        "        elif kind == 'date' and raw != '':",
+        "            raw = date.fromisoformat(str(raw)).isoformat()",
+        "        elif kind == 'dropdown' and options and raw not in options:",
+        "            raise ValueError(f'{name}: choose one of {options}')",
+        "        elif kind in ('file', 'folder') and raw != '':",
+        "            selected = Path(raw).expanduser()",
+        "            if not selected.exists() or (kind == 'file' and not selected.is_file()) or (kind == 'folder' and not selected.is_dir()):",
+        "                raise ValueError(f'{name}: invalid {kind} path')",
+        "            raw = str(selected)",
+        "        values[name] = raw",
+        "    return values",
+        "",
         "def check_stop():",
         "    return False",
+        "",
+        "def clipboard_text():",
+        "    try:",
+        "        import tkinter",
+        "        root = tkinter.Tk()",
+        "        root.withdraw()",
+        "        value = root.clipboard_get()",
+        "        root.destroy()",
+        "        return value",
+        "    except Exception:",
+        "        return ''",
         "",
         "def virtual_screen_origin():",
         "    if os.name != 'nt':",
@@ -95,20 +150,29 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
         "    return last",
         "",
         "def click_image(image, offset_x, offset_y, button='left', confidence=0.86, timeout=10, fallback=None, clicks=1):",
+        "    image, button = resolve(image), resolve(button)",
+        "    offset_x, offset_y = as_int(offset_x), as_int(offset_y)",
+        "    confidence, timeout = as_float(confidence), as_float(timeout)",
+        "    fallback = tuple(as_int(value) for value in fallback) if fallback else None",
         "    found, x, y, width, height, score = wait_for_image(image, confidence, timeout)",
         "    if found:",
         "        time.sleep(PRE_CLICK_PAUSE)",
-        "        pyautogui.click(x + offset_x, y + offset_y, button=button, clicks=clicks)",
+        "        click_x, click_y = x + offset_x, y + offset_y",
+        "        pyautogui.click(click_x, click_y, button=button, clicks=clicks)",
+        "        RUNTIME_VARIABLES['LAST_CLICK_X'], RUNTIME_VARIABLES['LAST_CLICK_Y'] = click_x, click_y",
         "        return",
         "    if fallback:",
         "        time.sleep(PRE_CLICK_PAUSE)",
         "        pyautogui.click(fallback[0], fallback[1], button=button, clicks=clicks)",
+        "        RUNTIME_VARIABLES['LAST_CLICK_X'], RUNTIME_VARIABLES['LAST_CLICK_Y'] = fallback",
         "        return",
         "    raise RuntimeError(f'Image not found: {image}, best score={score:.3f}')",
         "",
         "def main():",
         "    global RUNTIME_VARIABLES",
         "    RUNTIME_VARIABLES = dict(VARIABLES)",
+        "    RUNTIME_VARIABLES.update({'RUN_DATE': date.today().isoformat(), 'CLIPBOARD_TEXT': clipboard_text(), 'LAST_CLICK_X': 0, 'LAST_CLICK_Y': 0})",
+        "    RUNTIME_VARIABLES.update(prompt_runtime_inputs())",
         f"    time.sleep({_delay_literal(project.settings.start_delay)})",
     ]
     lines.insert(11, "import re")
@@ -132,55 +196,75 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
         if is_click_image:
             fallback = None
             if data.get("use_coordinate_fallback", True):
-                fallback = [int(data.get("fallback_x", 0)), int(data.get("fallback_y", 0))]
+                fallback = [data.get("fallback_x", 0), data.get("fallback_y", 0)]
             clicks = 2 if action.action == ActionType.DOUBLE_CLICK_IMAGE.value else 1
             lines.append(
                 "    click_image("
-                f"{data.get('image')!r}, {int(data.get('click_offset_x', 0))!r}, {int(data.get('click_offset_y', 0))!r}, "
-                f"button={data.get('button', 'left')!r}, confidence={float(data.get('confidence', project.settings.default_confidence))!r}, "
-                f"timeout={float(data.get('timeout', project.settings.default_timeout))!r}, fallback={fallback!r}, clicks={clicks!r})"
+                f"{data.get('image')!r}, {data.get('click_offset_x', 0)!r}, {data.get('click_offset_y', 0)!r}, "
+                f"button={data.get('button', 'left')!r}, confidence={data.get('confidence', project.settings.default_confidence)!r}, "
+                f"timeout={data.get('timeout', project.settings.default_timeout)!r}, fallback={fallback!r}, clicks={clicks!r})"
             )
         elif action.action == ActionType.TYPE_TEXT.value:
             if data.get("clear_first"):
                 lines.append("    pyautogui.hotkey('ctrl', 'a')")
                 lines.append("    pyautogui.press('backspace')")
-            lines.append(f"    pyautogui.write(resolve({data.get('text', '')!r}), interval={float(data.get('interval', project.settings.typing_interval))!r})")
+            lines.append(f"    typed_value = resolve({data.get('text', '')!r})")
+            lines.append(f"    pyautogui.write(typed_value, interval=as_float({data.get('interval', project.settings.typing_interval)!r}))")
+            if str(data.get("output_variable", "")).strip():
+                lines.append(f"    RUNTIME_VARIABLES[{str(data.get('output_variable')).strip()!r}] = typed_value")
         elif action.action == ActionType.PRESS_KEY.value:
-            lines.append(f"    pyautogui.press({data.get('key', '')!r}, presses={int(data.get('count', 1))!r}, interval={float(data.get('interval', 0.0))!r})")
+            lines.append(f"    pyautogui.press(resolve({data.get('key', '')!r}), presses=as_int({data.get('count', 1)!r}), interval=as_float({data.get('interval', 0.0)!r}))")
         elif action.action == ActionType.HOTKEY.value:
-            keys = ", ".join(repr(str(key)) for key in data.get("keys", []))
+            keys = ", ".join(
+                f"resolve({str(key)!r})" if "{{" in str(key) else repr(str(key))
+                for key in data.get("keys", [])
+            )
             lines.append(f"    pyautogui.hotkey({keys})")
         elif action.action == ActionType.SCROLL.value:
             if data.get("move_to"):
-                lines.append(f"    pyautogui.moveTo({int(data.get('x', 0))!r}, {int(data.get('y', 0))!r})")
-            lines.append(f"    pyautogui.scroll({int(data.get('amount', 0))!r})")
+                lines.append(f"    pyautogui.moveTo(as_int({data.get('x', 0)!r}), as_int({data.get('y', 0)!r}))")
+            lines.append(f"    pyautogui.scroll(as_int({data.get('amount', 0)!r}))")
         elif action.action == ActionType.WAIT.value:
-            lines.append(f"    time.sleep({_delay_literal(data.get('seconds', delay))})")
+            lines.append(f"    time.sleep(as_float({data.get('seconds', delay)!r}))")
         elif action.action == ActionType.RUN_PYTHON.value:
             lines.append("    variables = RUNTIME_VARIABLES")
             for code_line in str(data.get("code", "")).splitlines() or [""]:
                 lines.append(f"    {code_line}")
+            if str(data.get("output_variable", "")).strip():
+                lines.append(f"    RUNTIME_VARIABLES[{str(data.get('output_variable')).strip()!r}] = locals().get('result', '')")
         elif action.action == ActionType.PYTHON_CODE.value:
             function_name = _function_name(index, data.get("name") or action.name or "python_code")
+            output_name = str(data.get("output_variable", "")).strip()
             if data.get("continue_on_error", False):
                 lines.append("    try:")
-                lines.append(f"        {function_name}(RUNTIME_VARIABLES, PROJECT_DIR, check_stop)")
+                lines.append(f"        step_result = {function_name}(RUNTIME_VARIABLES, PROJECT_DIR, check_stop)")
+                if output_name:
+                    lines.append(f"        RUNTIME_VARIABLES[{output_name!r}] = step_result")
                 lines.append("    except Exception as exc:")
                 lines.append(f"        print('Step {index} Python Code ignored error:', exc)")
             else:
-                lines.append(f"    {function_name}(RUNTIME_VARIABLES, PROJECT_DIR, check_stop)")
+                lines.append(f"    step_result = {function_name}(RUNTIME_VARIABLES, PROJECT_DIR, check_stop)")
+                if output_name:
+                    lines.append(f"    RUNTIME_VARIABLES[{output_name!r}] = step_result")
         elif action.action == ActionType.OPEN_FILE.value:
             lines.append("    import subprocess")
-            lines.append(f"    subprocess.Popen([resolve({data.get('path', '')!r})], shell=True)")
-            lines.append(f"    time.sleep({_delay_literal(data.get('wait_after', 1.0))})")
+            lines.append(f"    opened_path = resolve({data.get('path', '')!r})")
+            lines.append("    subprocess.Popen([opened_path], shell=True)")
+            lines.append(f"    time.sleep(as_float({data.get('wait_after', 1.0)!r}))")
+            if str(data.get("output_variable", "")).strip():
+                lines.append(f"    RUNTIME_VARIABLES[{str(data.get('output_variable')).strip()!r}] = opened_path")
         elif action.action == ActionType.CLICK_COORDINATE.value:
             lines.append("    time.sleep(PRE_CLICK_PAUSE)")
-            lines.append(f"    pyautogui.click({int(data.get('x', 0))!r}, {int(data.get('y', 0))!r}, button={data.get('button', 'left')!r})")
+            lines.append(f"    click_x, click_y = as_int({data.get('x', 0)!r}), as_int({data.get('y', 0)!r})")
+            lines.append(f"    pyautogui.click(click_x, click_y, button=resolve({data.get('button', 'left')!r}))")
+            lines.append("    RUNTIME_VARIABLES['LAST_CLICK_X'], RUNTIME_VARIABLES['LAST_CLICK_Y'] = click_x, click_y")
         elif action.action == ActionType.MOUSE_MOVE.value:
-            lines.append(f"    pyautogui.moveTo({int(data.get('x', 0))!r}, {int(data.get('y', 0))!r}, duration={float(data.get('duration', 0.2))!r})")
+            lines.append(f"    pyautogui.moveTo(as_int({data.get('x', 0)!r}), as_int({data.get('y', 0)!r}), duration=as_float({data.get('duration', 0.2)!r}))")
         elif action.action == ActionType.DRAG.value:
-            lines.append(f"    pyautogui.moveTo({int(data.get('start_x', 0))!r}, {int(data.get('start_y', 0))!r}, duration={float(data.get('move_duration', 0.2))!r})")
-            lines.append(f"    pyautogui.dragTo({int(data.get('end_x', 0))!r}, {int(data.get('end_y', 0))!r}, duration={float(data.get('duration', 0.5))!r}, button={data.get('button', 'left')!r})")
+            lines.append(f"    pyautogui.moveTo(as_int({data.get('start_x', 0)!r}), as_int({data.get('start_y', 0)!r}), duration=as_float({data.get('move_duration', 0.2)!r}))")
+            lines.append(f"    drag_x, drag_y = as_int({data.get('end_x', 0)!r}), as_int({data.get('end_y', 0)!r})")
+            lines.append(f"    pyautogui.dragTo(drag_x, drag_y, duration=as_float({data.get('duration', 0.5)!r}), button=resolve({data.get('button', 'left')!r}))")
+            lines.append("    RUNTIME_VARIABLES['LAST_CLICK_X'], RUNTIME_VARIABLES['LAST_CLICK_Y'] = drag_x, drag_y")
     lines.extend([
         "",
         "if __name__ == '__main__':",
@@ -283,5 +367,6 @@ def _python_code_function(index: int, name: str, code: str) -> list[str]:
         "    check_stop()",
         *indented.splitlines(),
         "    check_stop()",
+        "    return locals().get('result')",
         "",
     ]

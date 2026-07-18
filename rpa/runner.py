@@ -12,6 +12,7 @@ from typing import Any, Callable
 from .image_matcher import screenshot_image, wait_for_image
 from .models import ActionType, RpaAction, RpaProject
 from .utils import MissingPlaceholderError, foreground_elevation_mismatch, resolve_placeholders_strict
+from .variables import prepare_runtime_variables
 
 pyautogui = None
 
@@ -41,7 +42,7 @@ class ReplayRunner:
         self.project_dir = Path(project_dir)
         self.log = log
         self._stop_event = threading.Event()
-        self.runtime_variables: dict[str, Any] = dict(project.variables)
+        self.runtime_variables, _ = prepare_runtime_variables(project, validate_paths=False)
         self.excluded_regions = list(excluded_regions or [])
         self.total_attempts = 0
         self.current_index: int | None = None
@@ -219,7 +220,9 @@ class ReplayRunner:
             if data.get("clear_first"):
                 gui.hotkey("ctrl", "a")
                 gui.press("backspace")
-            gui.write(str(data.get("text", "")), interval=float(data.get("interval", self.project.settings.typing_interval)))
+            typed_text = str(data.get("text", ""))
+            gui.write(typed_text, interval=float(data.get("interval", self.project.settings.typing_interval)))
+            self._store_output(data, variables, typed_text)
         elif action.action == ActionType.PRESS_KEY.value:
             gui = get_pyautogui()
             gui.press(str(data.get("key")), presses=int(data.get("count", 1)), interval=float(data.get("interval", 0.0)))
@@ -237,15 +240,19 @@ class ReplayRunner:
             gui = get_pyautogui()
             self.sleep_checked(float(data.get("pre_click_pause", self.project.settings.pre_click_pause)))
             gui.click(int(data.get("x", 0)), int(data.get("y", 0)), button=str(data.get("button", "left")))
+            self._set_last_click(variables, int(data.get("x", 0)), int(data.get("y", 0)))
         elif action.action == ActionType.MOUSE_MOVE.value:
             get_pyautogui().moveTo(int(data.get("x", 0)), int(data.get("y", 0)), duration=float(data.get("duration", 0.2)))
         elif action.action == ActionType.DRAG.value:
             gui = get_pyautogui()
             gui.moveTo(int(data.get("start_x", 0)), int(data.get("start_y", 0)), duration=float(data.get("move_duration", 0.2)))
             gui.dragTo(int(data.get("end_x", 0)), int(data.get("end_y", 0)), duration=float(data.get("duration", 0.5)), button=str(data.get("button", "left")))
+            self._set_last_click(variables, int(data.get("end_x", 0)), int(data.get("end_y", 0)))
         elif action.action == ActionType.OPEN_FILE.value:
-            subprocess.Popen([str(data.get("path", ""))], shell=True)
+            opened_path = str(data.get("path", ""))
+            subprocess.Popen([opened_path], shell=True)
             self.sleep_checked(float(data.get("wait_after", 1.0)))
+            self._store_output(data, variables, opened_path)
         elif action.action in (ActionType.RUN_PYTHON.value, ActionType.PYTHON_CODE.value):
             self.run_python_code(action, data, variables, step_number)
         else:
@@ -283,6 +290,9 @@ class ReplayRunner:
         text = output.getvalue().strip()
         if text:
             self.log(text)
+        output_name = str(data.get("output_variable", "")).strip()
+        if output_name:
+            variables[output_name] = env.get("result", output.getvalue().strip())
         return output.getvalue()
 
     def _check_stop_for_code(self) -> bool:
@@ -330,6 +340,7 @@ class ReplayRunner:
             clicks = 2 if action.action == ActionType.DOUBLE_CLICK_IMAGE.value else 1
             self.sleep_checked(float(data.get("pre_click_pause", self.project.settings.pre_click_pause)))
             get_pyautogui().click(x, y, clicks=clicks, button=str(data.get("button", "left")))
+            self._set_last_click(self.runtime_variables, x, y)
             return
         self.log(
             f"image match: no match found, best confidence={getattr(match, 'confidence', 0.0):.3f} "
@@ -338,6 +349,9 @@ class ReplayRunner:
         if allow_coordinate_fallback and data.get("use_coordinate_fallback", True):
             self.sleep_checked(float(data.get("pre_click_pause", self.project.settings.pre_click_pause)))
             get_pyautogui().click(int(data.get("fallback_x", 0)), int(data.get("fallback_y", 0)), button=str(data.get("button", "left")))
+            self._set_last_click(
+                self.runtime_variables, int(data.get("fallback_x", 0)), int(data.get("fallback_y", 0)),
+            )
             return
         raise FileNotFoundError(
             f"Image not found: {image_path}; best confidence={self._best_image_confidence:.3f}, "
@@ -414,6 +428,15 @@ class ReplayRunner:
             except ValueError:
                 pass
         return str(path)
+
+    def _store_output(self, data: dict[str, Any], variables: dict[str, Any], value: Any) -> None:
+        name = str(data.get("output_variable", "")).strip()
+        if name:
+            variables[name] = value
+
+    def _set_last_click(self, variables: dict[str, Any], x: int, y: int) -> None:
+        variables["LAST_CLICK_X"] = x
+        variables["LAST_CLICK_Y"] = y
 
     def _safe_int(self, value: Any, default: int) -> int:
         try:

@@ -8,8 +8,9 @@ import re
 import shutil
 from typing import Any
 
-from .models import ActionType, RpaAction, RpaProject
+from .models import ActionType, RpaAction, RpaProject, RuntimeInputDefinition
 from .utils import MissingPlaceholderError, resolve_placeholders_strict
+from .variables import VARIABLE_NAME_PATTERN, built_in_variables
 
 LEVEL_ERROR = "Error"
 LEVEL_WARNING = "Warning"
@@ -33,11 +34,34 @@ def validate_project_detailed(
     start_index: int = 0,
     end_index: int | None = None,
     force_enabled: bool = False,
+    runtime_variables: dict[str, Any] | None = None,
 ) -> list[ValidationIssue]:
     """Return structured validation results using original project step numbers."""
     issues: list[ValidationIssue] = []
     try:
         variables = dict(project.variables)
+        variables.update(built_in_variables())
+        for input_name, raw_definition in project.runtime_inputs.items():
+            definition = (
+                raw_definition if isinstance(raw_definition, RuntimeInputDefinition)
+                else RuntimeInputDefinition.from_dict(raw_definition)
+            )
+            if definition.default not in (None, ""):
+                variables[input_name] = definition.default
+            elif definition.type.casefold() == "number":
+                variables[input_name] = 0
+            elif definition.type.casefold() == "date":
+                variables[input_name] = "2000-01-01"
+            elif definition.type.casefold() == "dropdown" and definition.options:
+                variables[input_name] = definition.options[0]
+            elif definition.type.casefold() == "folder" and project_dir:
+                variables[input_name] = str(project_dir)
+            elif definition.type.casefold() == "file":
+                variables[input_name] = str(Path(__file__))
+            else:
+                variables[input_name] = "<runtime input>"
+        if runtime_variables:
+            variables.update(runtime_variables)
     except (TypeError, ValueError):
         variables = {}
     supported = {action.value for action in ActionType}
@@ -141,6 +165,9 @@ def _validate_common(
     for field, label in (("capture_before", "before-step screenshot"), ("capture_after", "after-step screenshot")):
         if field in data and not isinstance(data[field], bool):
             _add(issues, LEVEL_ERROR, number, name, f"{label} setting must be true or false")
+    output_name = str(data.get("output_variable", "")).strip()
+    if output_name and not VARIABLE_NAME_PATTERN.fullmatch(output_name):
+        _add(issues, LEVEL_ERROR, number, name, "output variable name is invalid")
 
 
 def _validate_action(
@@ -270,10 +297,13 @@ def _path_exists(value: str, project_dir: Path) -> bool:
 
 
 def _collect_created_variables(action: RpaAction, variables: dict[str, Any]) -> None:
+    output_name = str(action.data.get("output_variable", "")).strip() if isinstance(action.data, dict) else ""
+    if output_name:
+        variables.setdefault(output_name, 0)
     if action.action not in {ActionType.RUN_PYTHON.value, ActionType.PYTHON_CODE.value}:
         return
     code = str(action.data.get("code", "")) if isinstance(action.data, dict) else ""
     for match in re.finditer(r"variables\[['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]\]\s*=", code):
         # The exact runtime value is unknowable during static validation, but
         # it is defined for following steps if this assignment executes.
-        variables.setdefault(match.group(1), "<runtime value>")
+        variables.setdefault(match.group(1), 0)

@@ -167,10 +167,37 @@ class ProjectMeta:
 
 
 @dataclass
+class RuntimeInputDefinition:
+    """Saved description of one value requested (or supplied by a schedule) at run time."""
+
+    type: str = "text"
+    default: Any = ""
+    required: bool = True
+    sensitive: bool = False
+    options: list[str] = field(default_factory=list)
+    description: str = ""
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "RuntimeInputDefinition":
+        if not isinstance(data, dict):
+            return cls(default=data if data is not None else "")
+        return cls(
+            type=str(data.get("type") or "text"),
+            default=data.get("default", ""),
+            required=bool(data.get("required", True)),
+            sensitive=bool(data.get("sensitive", False)),
+            options=[str(item) for item in data.get("options", []) if str(item)],
+            description=str(data.get("description") or ""),
+        )
+
+
+@dataclass
 class RpaProject:
     project: ProjectMeta = field(default_factory=ProjectMeta)
     settings: ProjectSettings = field(default_factory=ProjectSettings)
     variables: dict[str, str] = field(default_factory=dict)
+    runtime_inputs: dict[str, RuntimeInputDefinition] = field(default_factory=dict)
+    output_variables: list[str] = field(default_factory=list)
     actions: list[RpaAction] = field(default_factory=list)
 
     @classmethod
@@ -179,10 +206,21 @@ class RpaProject:
             raise ValueError("Invalid project format")
         if int(data.get("format_version", 0)) != FORMAT_VERSION:
             raise ValueError("Unsupported project format version")
+        raw_runtime_inputs = data.get("runtime_inputs") or {}
+        if not isinstance(raw_runtime_inputs, dict):
+            raw_runtime_inputs = {}
+        raw_output_variables = data.get("output_variables") or []
+        if not isinstance(raw_output_variables, list):
+            raw_output_variables = []
         return cls(
             project=ProjectMeta(**data.get("project", {})),
             settings=ProjectSettings.from_dict(data.get("settings")),
             variables=dict(data.get("variables") or {}),
+            runtime_inputs={
+                str(name): RuntimeInputDefinition.from_dict(definition)
+                for name, definition in raw_runtime_inputs.items()
+            },
+            output_variables=[str(name) for name in raw_output_variables],
             actions=[RpaAction.from_dict(item) for item in data.get("actions", [])],
         )
 
@@ -193,6 +231,14 @@ class RpaProject:
             "project": asdict(self.project),
             "settings": asdict(self.settings),
             "variables": self.variables,
+            "runtime_inputs": {
+                name: asdict(
+                    definition if isinstance(definition, RuntimeInputDefinition)
+                    else RuntimeInputDefinition.from_dict(definition)
+                )
+                for name, definition in self.runtime_inputs.items()
+            },
+            "output_variables": self.output_variables,
             "actions": [action.to_dict() for action in self.actions],
         }
 
