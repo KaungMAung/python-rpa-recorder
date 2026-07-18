@@ -1392,8 +1392,14 @@ class MainWindow(QMainWindow):
             insert_at = index + 1
         self.project.actions.insert(insert_at, action)
         self.mark_dirty()
+        # A filtered list can otherwise make a successfully added step appear
+        # to vanish. Show the new work immediately and select it for review.
+        if self.filter_box.text():
+            self.filter_box.clear()
         self.refresh()
         self.table.selectRow(insert_at)
+        self.table.scrollToItem(self.table.item(insert_at, 0))
+        self.log(f"step {insert_at + 1} added: {action.summary()}")
 
     def delete_action(self) -> None:
         indices = self.table.selected_indices()

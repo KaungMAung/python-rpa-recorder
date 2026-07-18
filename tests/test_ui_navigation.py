@@ -141,3 +141,13 @@ def test_log_viewer_adds_level_and_step_context() -> None:
     text = window.logs.toPlainText()
     assert "[Warning] warning: target is not visible" in text
     assert "[Step 1] Running" in text
+
+
+def test_inserted_step_clears_filter_and_is_visible() -> None:
+    window = window_with_actions()
+    window.filter_box.setText("first")
+    window.insert_action(RpaAction(ActionType.WAIT.value, {"seconds": 1}))
+    assert window.filter_box.text() == ""
+    assert window.table.rowCount() == 3
+    assert not window.table.isRowHidden(2)
+    assert window.table.selected_index() == 2
