@@ -12,8 +12,15 @@ if (-not (Test-Path ".venv")) {
 }
 
 & ".\.venv\Scripts\python.exe" -m compileall . -q
-& ".\.venv\Scripts\python.exe" -m pytest
+if ($LASTEXITCODE -ne 0) { throw "Python compilation checks failed." }
+
+# Keep pytest's temporary files inside the workspace. This avoids failures from
+# locked or restricted user-temp folders on managed Windows desktops.
+& ".\.venv\Scripts\python.exe" -m pytest --basetemp ".pytest-build-tmp"
+if ($LASTEXITCODE -ne 0) { throw "Tests failed; packaging was not started." }
+
 & ".\.venv\Scripts\pyinstaller.exe" --noconfirm --clean PythonRPARecorder.spec
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller packaging failed." }
 
 if (-not $SkipInstaller) {
     & "$PSScriptRoot\build_installer.ps1"
