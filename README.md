@@ -58,13 +58,13 @@ Columns:
 
 - **Flow** - the automation's name.
 - **State** - color-coded `Enabled`, `Paused`, or `Disabled`.
-- **Run every** - the interval (15 minutes up to 24 hours).
+- **Run every** - the interval (5 minutes up to 24 hours).
 - **Last run** - a friendly relative time such as `2 min ago` (hover for the exact timestamp).
 - **Duration** - how long the last run took.
 - **Last status** - `Success`, `Failed`, `Running`, or a `Skipped (...)` reason.
 - **Next run** - a countdown such as `in 12 min` (or `Paused`/`Disabled`; hover for the exact timestamp).
 
-Select a row to open its Details panel. The panel shows the last run, duration, result, error, next run, and schedule interval. Change the interval or enabled/paused state there without adding controls to every table row. The row's labeled **Actions** menu provides:
+Select a row to open its Details panel. The panel shows the latest run, duration, result, error, next run, and schedule interval. It also contains persistent run history with start/end times, duration, result, failed step, and error. Filter history by `Success`, `Failed`, `Skipped`, or `Running`. Change the interval or enabled/paused state there without adding controls to every table row. The row's labeled **Actions** menu provides:
 
 - **Run Now** - runs the flow immediately without affecting its schedule or next run time.
 - **Pause / Resume** - temporarily stops automatic runs while keeping the interval configuration intact. No confirmation needed.
@@ -73,7 +73,7 @@ Select a row to open its Details panel. The panel shows the last run, duration, 
 
 The header shows the auto-refresh state and refreshes every 5 seconds so `Running` status and countdowns stay current; use **Refresh** or `F5` for an immediate update. Click `Flow`, `Last run`, `Next run`, or `Last status` headers to sort (click again to reverse); column widths and the chosen sort order are remembered between openings. Row selection and all controls support keyboard navigation.
 
-Only one flow runs at a time: if a different flow is already running, new runs are queued until it finishes; if the *same* flow is asked to run again while its own previous run hasn't finished, that attempt is skipped and marked `Skipped (Already Running)`. Schedules are stored permanently in `flows/schedules.json` and persist across app restarts.
+Only one flow runs at a time: if a different flow is already running, new runs are queued until it finishes; if the *same* flow is asked to run again while its own previous run hasn't finished, that attempt is skipped and marked `Skipped (Already Running)`. Schedules and run history are stored permanently in `flows/schedules.json` and persist across app restarts. History keeps the latest 100 records per flow by default; adjust the retention control in the Details panel from 10 to 1,000 records. Existing schedule files are migrated automatically from their previous latest-run fields.
 
 ## Step Details
 

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
 from rpa.scheduler import STATUS_FAILED, STATUS_RUNNING, FlowSchedule, ScheduleStore, schedule_next_run
 
 INTERVAL_OPTIONS = [
+    ("Every 5 minutes", 5),
     ("Every 15 minutes", 15),
     ("Every 30 minutes", 30),
     ("Every hour", 60),
@@ -92,7 +94,7 @@ class ScheduleFlowsDialog(QDialog):
         self._detail_schedule: FlowSchedule | None = None
         self.setWindowTitle("Schedule Flows")
         self.setMinimumSize(820, 500)
-        self.resize(1180, 640)
+        self.resize(1280, 700)
 
         self._sort_column = COLUMN_FLOW
         self._sort_order = Qt.AscendingOrder
@@ -209,15 +211,14 @@ class ScheduleFlowsDialog(QDialog):
         splitter.addWidget(table_wrap)
         splitter.addWidget(self._build_details_panel())
         splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([820, 300])
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([760, 480])
         return splitter
 
     def _build_details_panel(self) -> QWidget:
         panel = QFrame()
         panel.setFrameShape(QFrame.StyledPanel)
-        panel.setMinimumWidth(260)
-        panel.setMaximumWidth(390)
+        panel.setMinimumWidth(340)
         panel.setStyleSheet("QFrame { background: #f8fafc; border: 1px solid #dbe3ec; border-radius: 7px; }")
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(14, 14, 14, 14)
@@ -263,6 +264,50 @@ class ScheduleFlowsDialog(QDialog):
         layout.addWidget(interval_label)
         layout.addWidget(self.detail_interval)
 
+        history_heading = QHBoxLayout()
+        history_title = QLabel("Run history")
+        history_title.setStyleSheet("font-weight: 650; border: none;")
+        self.history_filter = QComboBox()
+        self.history_filter.addItems(["All runs", "Success", "Failed", "Skipped", "Running"])
+        self.history_filter.setToolTip("Filter this flow's saved run history")
+        self.history_filter.currentIndexChanged.connect(self._refresh_history)
+        history_heading.addWidget(history_title)
+        history_heading.addStretch(1)
+        history_heading.addWidget(self.history_filter)
+        layout.addLayout(history_heading)
+
+        self.history_table = QTableWidget(0, 6)
+        self.history_table.setHorizontalHeaderLabels(["Started", "Ended", "Duration", "Result", "Failed step", "Error"])
+        self.history_table.verticalHeader().setVisible(False)
+        self.history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.history_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.history_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.history_table.setAlternatingRowColors(True)
+        self.history_table.setShowGrid(False)
+        history_header = self.history_table.horizontalHeader()
+        history_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        history_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        history_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        history_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        history_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        history_header.setSectionResizeMode(5, QHeaderView.Stretch)
+        self.history_table.setMinimumHeight(150)
+        layout.addWidget(self.history_table, 1)
+
+        retention_row = QHBoxLayout()
+        retention_label = QLabel("Keep history")
+        retention_label.setStyleSheet("color: #64748b; border: none;")
+        self.history_limit_spin = QSpinBox()
+        self.history_limit_spin.setRange(10, 1000)
+        self.history_limit_spin.setSingleStep(10)
+        self.history_limit_spin.setSuffix(" runs per flow")
+        self.history_limit_spin.setValue(max(10, self.store.history_limit))
+        self.history_limit_spin.setToolTip("Older records are removed when this limit is exceeded")
+        self.history_limit_spin.valueChanged.connect(self._history_limit_changed)
+        retention_row.addWidget(retention_label)
+        retention_row.addWidget(self.history_limit_spin, 1)
+        layout.addLayout(retention_row)
+
         self.detail_run_btn = QPushButton("Run Now")
         self.detail_run_btn.setEnabled(False)
         self.detail_run_btn.clicked.connect(self._run_selected)
@@ -275,7 +320,6 @@ class ScheduleFlowsDialog(QDialog):
         layout.addWidget(self.detail_run_btn)
         layout.addWidget(self.detail_pause_btn)
         layout.addWidget(self.detail_enabled_btn)
-        layout.addStretch(1)
         return panel
 
     def _build_footer(self) -> QHBoxLayout:
@@ -563,6 +607,39 @@ class ScheduleFlowsDialog(QDialog):
             self.detail_pause_btn.setText("Resume Schedule" if schedule.paused else "Pause Schedule")
             self.detail_enabled_btn.setText("Disable Schedule" if schedule.enabled else "Enable Schedule")
         self.detail_interval.blockSignals(False)
+        self._refresh_history()
+
+    def _refresh_history(self, _index: int | None = None) -> None:
+        schedule = self._detail_schedule
+        entries = list(reversed(schedule.history)) if schedule is not None else []
+        wanted = self.history_filter.currentText()
+        if wanted != "All runs":
+            entries = [entry for entry in entries if self._history_status_matches(entry.status, wanted)]
+        self.history_table.setRowCount(len(entries))
+        for row, entry in enumerate(entries):
+            started = self._readonly_item(self._format_time(entry.started_at))
+            started.setToolTip(self._exact_time(entry.started_at))
+            ended = self._readonly_item(self._format_time(entry.finished_at))
+            ended.setToolTip(self._exact_time(entry.finished_at))
+            duration = self._readonly_item(self._format_duration(entry.duration_seconds))
+            result = self._badge_item(self._badge_name(entry.status), entry.status)
+            failed_step = self._readonly_item(f"Step {entry.failed_step}" if entry.failed_step is not None else "-")
+            error = self._readonly_item(entry.error or "-")
+            error.setToolTip(entry.error or "No error")
+            for column, item in enumerate((started, ended, duration, result, failed_step, error)):
+                self.history_table.setItem(row, column, item)
+
+    def _history_status_matches(self, status: str, wanted: str) -> bool:
+        return status == wanted or (wanted == "Skipped" and status.startswith("Skipped"))
+
+    def _history_limit_changed(self, limit: int) -> None:
+        self.store.set_history_limit(limit)
+        self.store.save()
+        if self.settings is not None:
+            self.settings.setValue("scheduler/history_limit", limit)
+        if self._detail_schedule is not None:
+            self._detail_schedule = self.store.get(self._detail_schedule.flow_name)
+        self._refresh_history()
 
     def _style_label_badge(self, label: QLabel, badge: str) -> None:
         background, foreground = BADGE_COLORS.get(badge, ("#f1f5f9", "#475569"))

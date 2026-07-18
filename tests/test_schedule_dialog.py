@@ -257,3 +257,55 @@ def test_times_use_friendly_relative_text(tmp_path: Path) -> None:
     assert dialog.table.item(0, 3).text() in {"1 min ago", "2 min ago"}
     assert dialog.table.item(0, 6).text() in {"in 11 min", "in 12 min"}
     dialog.close()
+
+
+def test_five_minute_interval_is_available_and_persists(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, _settings = make_dialog(tmp_path)
+    five_minute_index = dialog.detail_interval.findData(5)
+    assert five_minute_index >= 0
+    dialog.detail_interval.setCurrentIndex(five_minute_index)
+    assert store.get("flow_a").interval_minutes == 5
+    dialog.close()
+
+
+def test_history_panel_lists_and_filters_persisted_results(tmp_path: Path) -> None:
+    from rpa.scheduler import RunHistoryEntry
+
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, _settings = make_dialog(tmp_path)
+    schedule = store.get("flow_a")
+    schedule.history = [
+        RunHistoryEntry("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:02+00:00", 2, "Success"),
+        RunHistoryEntry("2026-01-02T00:00:00+00:00", "2026-01-02T00:00:03+00:00", 3, "Failed", 2, "boom"),
+        RunHistoryEntry("2026-01-03T00:00:00+00:00", "2026-01-03T00:00:00+00:00", 0, "Skipped (Already Running)"),
+    ]
+    schedule.last_status = "Failed"
+    schedule.last_error = "boom"
+    store.set(schedule)
+    store.save()
+
+    dialog.reload()
+    assert dialog.history_table.rowCount() == 3
+    assert dialog.table.item(0, 5).text() == "Failed"
+    dialog.history_filter.setCurrentText("Failed")
+    assert dialog.history_table.rowCount() == 1
+    assert dialog.history_table.item(0, 4).text() == "Step 2"
+    assert dialog.history_table.item(0, 5).text() == "boom"
+    dialog.history_filter.setCurrentText("Skipped")
+    assert dialog.history_table.rowCount() == 1
+    dialog.close()
+
+
+def test_history_limit_setting_trims_and_persists(tmp_path: Path) -> None:
+    from rpa.scheduler import RunHistoryEntry
+
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, settings = make_dialog(tmp_path, settings_name="history_limit")
+    schedule = store.get("flow_a")
+    schedule.history = [RunHistoryEntry(f"2026-01-{day:02d}T00:00:00+00:00", status="Success") for day in range(1, 13)]
+    store.set(schedule)
+    dialog.history_limit_spin.setValue(10)
+    assert len(store.get("flow_a").history) == 10
+    assert settings.value("scheduler/history_limit", type=int) == 10
+    dialog.close()
