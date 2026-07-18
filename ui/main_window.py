@@ -1318,6 +1318,8 @@ class MainWindow(QMainWindow):
         self.log(f"[Add Step] opening dialog; project has {before_count} steps")
         dialog = ManualActionDialog(self.project.settings, self.project.variables, self)
         dialog.screen_pick_requested.connect(lambda role: self._begin_manual_target_capture(dialog, role))
+        dialog.accepted.connect(lambda: self.log("[Add Step] Add Step button accepted"))
+        dialog.rejected.connect(lambda: self.log("[Add Step] dialog dismissed before adding a step"))
         result = dialog.exec()
         self.log(f"[Add Step] dialog result: {'accepted' if result == QDialog.Accepted else 'cancelled'}")
         if result != QDialog.Accepted:
@@ -1383,6 +1385,11 @@ class MainWindow(QMainWindow):
         else:
             dialog.set_screen_point(self.manual_capture_role, x, y)
         self._restore_manual_capture_dialog()
+        # For a one-point click target, the overlay's Confirm is the user's
+        # final confirmation. Avoid sending them back to an ambiguous second
+        # confirmation dialog. Drag retains its separate start/end picks.
+        if self.manual_capture_role == "target":
+            QTimer.singleShot(0, dialog.accept)
 
     def _cancel_manual_target_capture(self) -> None:
         self._restore_manual_capture_dialog()
