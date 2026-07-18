@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
 
@@ -92,6 +92,7 @@ class FloatingRecorderToolbar(QWidget):
 
 class FloatingExecutionToolbar(QWidget):
     stop_requested = Signal()
+    position_changed = Signal(QPoint)
 
     def __init__(self) -> None:
         super().__init__(None, Qt.WindowStaysOnTopHint | Qt.Tool)
@@ -106,3 +107,7 @@ class FloatingExecutionToolbar(QWidget):
         layout.addWidget(status)
         layout.addWidget(stop)
         self.setStyleSheet("QWidget { background: #eff6ff; border: 1px solid #bfdbfe; }")
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self.position_changed.emit(self.pos())

@@ -1040,16 +1040,54 @@ class MainWindow(QMainWindow):
         self.execution_floating = FloatingExecutionToolbar()
         self.execution_floating.stop_requested.connect(self.stop_run)
         self.execution_floating.show()
-        screen = self.screen() or QApplication.primaryScreen()
-        if screen:
-            bounds = screen.availableGeometry()
-            self.execution_floating.adjustSize()
-            self.execution_floating.move(bounds.left() + (bounds.width() - self.execution_floating.width()) // 2, bounds.bottom() - self.execution_floating.height() - 16)
+        self._position_execution_toolbar()
+        self.execution_floating.position_changed.connect(self._execution_toolbar_moved)
         self.hide()
         # Prepare a clean desktop before replay begins. The always-on-top stop
         # control remains available, and other windows are intentionally not
         # restored after the run.
         self._show_windows_desktop()
+
+    def _position_execution_toolbar(self) -> None:
+        toolbar = self.execution_floating
+        if not toolbar:
+            return
+        screen = self.screen() or QApplication.primaryScreen()
+        if not screen:
+            return
+        bounds = screen.availableGeometry()
+        toolbar.adjustSize()
+        saved = self.settings.value("execution_toolbar_position")
+        if isinstance(saved, QPoint):
+            saved_rect = QRect(saved, toolbar.size())
+            if bounds.contains(saved_rect):
+                toolbar.move(saved)
+                return
+        margin = 32
+        default_position = QPoint(
+            bounds.right() - toolbar.width() - margin + 1,
+            bounds.bottom() - toolbar.height() - margin + 1,
+        )
+        toolbar.move(default_position)
+        self.settings.setValue("execution_toolbar_position", default_position)
+
+    def _execution_toolbar_moved(self, position: QPoint) -> None:
+        toolbar = self.execution_floating
+        if not toolbar:
+            return
+        center = QPoint(position.x() + toolbar.width() // 2, position.y() + toolbar.height() // 2)
+        screen = QApplication.screenAt(center) or self.screen() or QApplication.primaryScreen()
+        if not screen:
+            return
+        bounds = screen.availableGeometry()
+        x = min(max(position.x(), bounds.left()), bounds.right() - toolbar.width() + 1)
+        y = min(max(position.y(), bounds.top()), bounds.bottom() - toolbar.height() + 1)
+        safe = QPoint(x, y)
+        if safe != position:
+            toolbar.blockSignals(True)
+            toolbar.move(safe)
+            toolbar.blockSignals(False)
+        self.settings.setValue("execution_toolbar_position", safe)
 
     def _restore_after_replay(self) -> None:
         if self.execution_floating:

@@ -113,6 +113,32 @@ def test_step_details_hide_during_run_and_restore_afterward() -> None:
     assert window.table.selected_index() == 0
 
 
+def test_execution_toolbar_uses_safe_saved_position(monkeypatch) -> None:
+    window = window_with_actions()
+    monkeypatch.setattr(window, "_show_windows_desktop", lambda: None)
+    previous = window.settings.value("execution_toolbar_position")
+    window.settings.setValue("execution_toolbar_position", QPoint(99999, 99999))
+    try:
+        window._hide_for_replay()
+        toolbar = window.execution_floating
+        assert toolbar is not None
+        bounds = (window.screen() or QApplication.primaryScreen()).availableGeometry()
+        assert bounds.contains(toolbar.frameGeometry())
+        assert 24 <= bounds.right() - toolbar.frameGeometry().right() <= 40
+        assert 24 <= bounds.bottom() - toolbar.frameGeometry().bottom() <= 40
+
+        moved = QPoint(bounds.left() + 48, bounds.top() + 56)
+        toolbar.move(moved)
+        app().processEvents()
+        assert window.settings.value("execution_toolbar_position") == moved
+    finally:
+        window._restore_after_replay()
+        if previous is None:
+            window.settings.remove("execution_toolbar_position")
+        else:
+            window.settings.setValue("execution_toolbar_position", previous)
+
+
 def test_undo_redo_restores_step_edits() -> None:
     window = window_with_actions()
     window._reset_history()
