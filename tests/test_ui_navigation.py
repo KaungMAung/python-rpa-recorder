@@ -154,10 +154,12 @@ def test_inserted_step_clears_filter_and_is_visible() -> None:
 
 
 def test_manual_step_is_saved_to_active_flow(tmp_path, monkeypatch) -> None:
+    from rpa.generator import generate_python
     from rpa.project_manager import ProjectManager
 
     window = window_with_actions()
     window.project_dir = tmp_path
+    window._reset_history()
     original_exec = ManualActionDialog.exec
 
     def accept_default_step(dialog):
@@ -168,6 +170,18 @@ def test_manual_step_is_saved_to_active_flow(tmp_path, monkeypatch) -> None:
     window.add_manual_action()
 
     assert len(window.project.actions) == 3
+    assert window.table.rowCount() == 3
+    assert window.table.selected_index() == 2
+    assert window.dirty
+
+    window.undo()
+    assert len(window.project.actions) == 2
+    window.redo()
+    assert len(window.project.actions) == 3
+
+    window.save_project()
     loaded = ProjectManager().load(tmp_path / "project.json")
     assert len(loaded.actions) == 3
     assert loaded.actions[-1].action == ActionType.CLICK_COORDINATE.value
+    generated = generate_python(loaded, tmp_path).read_text(encoding="utf-8")
+    assert "pyautogui.click(0, 0" in generated

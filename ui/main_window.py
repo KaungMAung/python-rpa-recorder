@@ -1316,16 +1316,7 @@ class MainWindow(QMainWindow):
             if action.action == ActionType.PYTHON_CODE.value and not self.confirm_python_code_warning():
                 return
             self.insert_action(action, position)
-            # Manual steps are deliberate, one-at-a-time edits. Persist them
-            # immediately so the current flow cannot lose a confirmed step if
-            # the user reopens it before making another change.
-            try:
-                self.manager.save(self.project, self.project_dir)
-                self.dirty = False
-                self.update_status("Manual step added and saved")
-            except Exception as exc:
-                self.dirty = True
-                show_error(self, "Step Added but Not Saved", f"The step was added to this session, but could not be saved:\n{exc}")
+            self.update_status("Manual step added")
 
     def _materialize_manual_image(self, action: RpaAction) -> None:
         """Import a manually chosen image into the flow so projects stay portable."""
