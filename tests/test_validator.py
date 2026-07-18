@@ -87,6 +87,8 @@ def test_retry_and_failure_settings_are_validated(tmp_path: Path) -> None:
         "failure_action": "jump",
         "failure_jump_step": 9,
         "capture_failure_screenshot": "yes",
+        "capture_before": "yes",
+        "capture_after": 1,
     })])
     text = "\n".join(reasons(project, tmp_path))
     assert "retry count" in text
@@ -94,3 +96,5 @@ def test_retry_and_failure_settings_are_validated(tmp_path: Path) -> None:
     assert "step timeout" in text
     assert "jump target" in text
     assert "screenshot setting" in text
+    assert "before-step screenshot setting" in text
+    assert "after-step screenshot setting" in text

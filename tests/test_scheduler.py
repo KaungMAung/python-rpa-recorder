@@ -122,6 +122,18 @@ def test_run_history_is_started_then_finalized_with_failed_step() -> None:
     assert entry.attempts == 3
 
 
+def test_run_history_persists_optional_evidence_reference() -> None:
+    from rpa.scheduler import FlowSchedule, RunHistoryEntry, mark_started
+
+    schedule = FlowSchedule(flow_name="demo")
+    mark_started(schedule, source="Manual", evidence_path="runs/example", run_id="abc123")
+    restored = RunHistoryEntry.from_dict(schedule.to_dict()["history"][0])
+    assert restored is not None
+    assert restored.source == "Manual"
+    assert restored.evidence_path == "runs/example"
+    assert restored.run_id == "abc123"
+
+
 def test_mark_finished_clears_error_on_success_after_previous_failure() -> None:
     from rpa.scheduler import FlowSchedule, mark_finished, mark_started, STATUS_SUCCESS
 

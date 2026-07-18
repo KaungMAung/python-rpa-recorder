@@ -138,6 +138,9 @@ def _validate_common(
     capture = data.get("capture_failure_screenshot", False)
     if not isinstance(capture, bool):
         _add(issues, LEVEL_ERROR, number, name, "failure screenshot setting must be true or false")
+    for field, label in (("capture_before", "before-step screenshot"), ("capture_after", "after-step screenshot")):
+        if field in data and not isinstance(data[field], bool):
+            _add(issues, LEVEL_ERROR, number, name, f"{label} setting must be true or false")
 
 
 def _validate_action(

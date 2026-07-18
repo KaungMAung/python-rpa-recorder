@@ -259,6 +259,14 @@ class ActionEditor(QWidget):
             "Capture final failure",
             self._check(data.get("capture_failure_screenshot", False), lambda v: self._set_data("capture_failure_screenshot", v)),
         )
+        self.advanced_form.addRow(
+            "Capture before step",
+            self._check(data.get("capture_before", False), lambda v: self._set_data("capture_before", v)),
+        )
+        self.advanced_form.addRow(
+            "Capture after step",
+            self._check(data.get("capture_after", False), lambda v: self._set_data("capture_after", v)),
+        )
         self._loading = False
 
     def _click_image_fields(self, data: dict) -> None:

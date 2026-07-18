@@ -4,7 +4,7 @@ import subprocess
 import threading
 import time
 from contextlib import redirect_stdout
-from datetime import datetime
+from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
@@ -35,6 +35,7 @@ class ReplayRunner:
         project_dir: Path,
         log: Callable[[str], None],
         excluded_regions: list[tuple[int, int, int, int]] | None = None,
+        evidence_dir: Path | None = None,
     ) -> None:
         self.project = project
         self.project_dir = Path(project_dir)
@@ -49,6 +50,8 @@ class ReplayRunner:
         self.first_failure_error: str | None = None
         self._step_deadline: float | None = None
         self._best_image_confidence = 0.0
+        self.evidence_dir = Path(evidence_dir) if evidence_dir else None
+        self.step_results: list[dict[str, Any]] = []
 
     def request_stop(self) -> None:
         self._stop_event.set()
@@ -103,12 +106,16 @@ class ReplayRunner:
             if self.stop_requested():
                 raise StopReplay()
             if respect_enabled and not action.enabled:
+                record = self._start_step_record(action, index)
+                self._finish_step_record(record, "Skipped")
                 if action_callback:
                     action_callback(index, "skipped")
                 index += 1
                 continue
             if action_callback:
                 action_callback(index, "running")
+            record = self._start_step_record(action, index)
+            self._capture_step_screenshot(record, index, "before", bool(action.data.get("capture_before")))
             self.log(f"action started: {index + 1} {action.action}")
             # Click Image steps rely on continuous polling with their own search
             # timeout (see _click_image/wait_for_image) instead of a fixed
@@ -128,6 +135,7 @@ class ReplayRunner:
             self._best_image_confidence = 0.0
             for attempt in range(1, max_attempts + 1):
                 self.total_attempts += 1
+                record["attempts"] = attempt
                 self.log(f"[Step {index + 1}] Attempt {attempt}/{max_attempts}")
                 self._step_deadline = time.monotonic() + step_timeout if step_timeout > 0 else None
                 try:
@@ -149,6 +157,7 @@ class ReplayRunner:
                     self._step_deadline = None
                 if attempt < max_attempts:
                     reason = str(final_error)
+                    record["retry_attempts"].append({"attempt": attempt + 1, "reason": reason})
                     self.log(
                         f"[Step {index + 1}] Retry {attempt + 1}/{max_attempts} in {retry_delay:.2f}s: {reason}"
                     )
@@ -160,6 +169,10 @@ class ReplayRunner:
                     action_callback(index, "failed")
                 failure_message = str(final_error)
                 screenshot_path = self._capture_failure_screenshot(action, index)
+                record["error"] = failure_message
+                if screenshot_path:
+                    record["screenshots"]["failure"] = screenshot_path
+                self._finish_step_record(record, "Failed", failure_message)
                 if screenshot_path:
                     failure_message = f"{failure_message} (failure screenshot: {screenshot_path})"
                 failure_action = str(control_data.get("failure_action", "stop")).strip().lower()
@@ -184,6 +197,8 @@ class ReplayRunner:
                 raise ReplayActionError(index, action, RuntimeError(failure_message))
             if action_callback:
                 action_callback(index, "completed")
+            self._capture_step_screenshot(record, index, "after", bool(action.data.get("capture_after")))
+            self._finish_step_record(record, "Success")
             self.log(f"action completed: {index + 1} {action.action}")
             index += 1
         self.log("replay completed")
@@ -330,18 +345,75 @@ class ReplayRunner:
         )
 
     def _capture_failure_screenshot(self, action: RpaAction, index: int) -> str | None:
-        if not action.data.get("capture_failure_screenshot", False):
+        if self.evidence_dir is None and not action.data.get("capture_failure_screenshot", False):
             return None
         try:
-            target_dir = self.project_dir / "logs" / "failures"
+            target_dir = (
+                self.evidence_dir / "screenshots" if self.evidence_dir is not None
+                else self.project_dir / "logs" / "failures"
+            )
             target_dir.mkdir(parents=True, exist_ok=True)
             path = target_dir / f"step_{index + 1}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
             screenshot_image().save(path, "PNG")
             self.log(f"[Step {index + 1}] Failure screenshot saved: {path}")
-            return str(path)
+            return self._evidence_relative_path(path)
         except Exception as exc:
             self.log(f"[Step {index + 1}] Could not save failure screenshot: {exc}")
             return None
+
+    def _start_step_record(self, action: RpaAction, index: int) -> dict[str, Any]:
+        record = {
+            "step_number": index + 1,
+            "step_name": action.summary(),
+            "action": action.action,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "ended_at": None,
+            "duration_seconds": None,
+            "status": "Running",
+            "attempts": 0,
+            "retry_attempts": [],
+            "error": None,
+            "screenshots": {},
+        }
+        self.step_results.append(record)
+        return record
+
+    def _finish_step_record(self, record: dict[str, Any], status: str, error: str | None = None) -> None:
+        ended = datetime.now(timezone.utc)
+        record["ended_at"] = ended.isoformat()
+        try:
+            started = datetime.fromisoformat(str(record["started_at"]))
+            record["duration_seconds"] = max(0.0, (ended - started).total_seconds())
+        except (TypeError, ValueError):
+            record["duration_seconds"] = None
+        record["status"] = status
+        record["error"] = error
+
+    def _capture_step_screenshot(
+        self, record: dict[str, Any], index: int, kind: str, enabled: bool,
+    ) -> str | None:
+        if not enabled or self.evidence_dir is None:
+            return None
+        try:
+            target_dir = self.evidence_dir / "screenshots"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            path = target_dir / f"step_{index + 1}_{kind}.png"
+            screenshot_image().save(path, "PNG")
+            relative = self._evidence_relative_path(path)
+            record["screenshots"][kind] = relative
+            self.log(f"[Step {index + 1}] {kind.title()} screenshot saved: {relative}")
+            return relative
+        except Exception as exc:
+            self.log(f"[Step {index + 1}] Could not save {kind} screenshot: {exc}")
+            return None
+
+    def _evidence_relative_path(self, path: Path) -> str:
+        if self.evidence_dir is not None:
+            try:
+                return path.relative_to(self.evidence_dir).as_posix()
+            except ValueError:
+                pass
+        return str(path)
 
     def _safe_int(self, value: Any, default: int) -> int:
         try:

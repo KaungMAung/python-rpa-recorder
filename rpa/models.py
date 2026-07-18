@@ -66,6 +66,7 @@ class ProjectSettings:
     pyautogui_failsafe: bool = True
     show_desktop_before_recording: bool = True
     hide_window_during_replay: bool = True
+    evidence_retention_runs: int = 100
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ProjectSettings":

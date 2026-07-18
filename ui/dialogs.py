@@ -379,6 +379,8 @@ class SettingsDialog(QDialog):
         self.hide_during_replay = QCheckBox()
         self.hide_during_replay.setChecked(settings.hide_window_during_replay)
         self.hide_during_replay.setToolTip("Keeps the recorder out of the way while a floating Stop Run control remains available.")
+        self.evidence_retention = self._spin(settings.evidence_retention_runs, 10, 1000)
+        self.evidence_retention.setToolTip("Maximum timestamped run-evidence folders retained for this flow.")
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -397,6 +399,7 @@ class SettingsDialog(QDialog):
         layout.addRow("Ignore application window", self.ignore_app)
         layout.addRow("Show desktop before recording", self.show_desktop)
         layout.addRow("Hide recorder while running", self.hide_during_replay)
+        layout.addRow("Run evidence retention", self.evidence_retention)
         layout.addRow("PyAutoGUI failsafe", self.failsafe)
         layout.addWidget(buttons)
 
@@ -428,6 +431,7 @@ class SettingsDialog(QDialog):
         self.settings.ignore_application_window = self.ignore_app.isChecked()
         self.settings.show_desktop_before_recording = self.show_desktop.isChecked()
         self.settings.hide_window_during_replay = self.hide_during_replay.isChecked()
+        self.settings.evidence_retention_runs = self.evidence_retention.value()
         self.settings.pyautogui_failsafe = self.failsafe.isChecked()
         qsettings = QSettings("PythonRPARecorder", "PythonRPARecorder")
         for key, value in self.settings.__dict__.items():

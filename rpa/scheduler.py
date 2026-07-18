@@ -35,6 +35,9 @@ class RunHistoryEntry:
     failed_step: int | None = None
     error: str | None = None
     attempts: int | None = None
+    source: str | None = None
+    evidence_path: str | None = None
+    run_id: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RunHistoryEntry | None":
@@ -59,6 +62,9 @@ class RunHistoryEntry:
             failed_step=failed_step,
             error=data.get("error"),
             attempts=_optional_int(data.get("attempts")),
+            source=data.get("source"),
+            evidence_path=data.get("evidence_path"),
+            run_id=data.get("run_id"),
         )
 
 
@@ -138,14 +144,23 @@ def schedule_next_run(schedule: FlowSchedule, now: datetime | None = None) -> No
     schedule.next_run_at = (now + timedelta(minutes=max(1, schedule.interval_minutes))).isoformat()
 
 
-def mark_started(schedule: FlowSchedule, now: datetime | None = None) -> None:
+def mark_started(
+    schedule: FlowSchedule,
+    now: datetime | None = None,
+    source: str | None = None,
+    evidence_path: str | None = None,
+    run_id: str | None = None,
+) -> None:
     now = now or utc_now()
     schedule.last_run_at = now.isoformat()
     schedule.last_finished_at = None
     schedule.last_duration_seconds = None
     schedule.last_status = STATUS_RUNNING
     schedule.last_error = None
-    schedule.history.append(RunHistoryEntry(started_at=now.isoformat(), attempts=0))
+    schedule.history.append(RunHistoryEntry(
+        started_at=now.isoformat(), attempts=0, source=source,
+        evidence_path=evidence_path, run_id=run_id,
+    ))
 
 
 def mark_finished(
@@ -182,7 +197,14 @@ def mark_finished(
     schedule_next_run(schedule, now)
 
 
-def mark_skipped(schedule: FlowSchedule, status: str, now: datetime | None = None) -> None:
+def mark_skipped(
+    schedule: FlowSchedule,
+    status: str,
+    now: datetime | None = None,
+    source: str | None = None,
+    evidence_path: str | None = None,
+    run_id: str | None = None,
+) -> None:
     """Record a run that never started because of an overlap, without touching duration."""
     now = now or utc_now()
     schedule.last_status = status
@@ -193,6 +215,9 @@ def mark_skipped(schedule: FlowSchedule, status: str, now: datetime | None = Non
         duration_seconds=0.0,
         status=status,
         attempts=0,
+        source=source,
+        evidence_path=evidence_path,
+        run_id=run_id,
     ))
     # Retry soon instead of waiting a full interval, since this attempt never ran.
     schedule.next_run_at = (now + timedelta(minutes=1)).isoformat()
