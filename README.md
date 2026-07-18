@@ -80,7 +80,7 @@ Schedules and run history are stored permanently in `flows/schedules.json` and p
 
 ## Step Details
 
-Select a step to edit its friendly name and common settings on the right. Technical target settings such as match accuracy, timeout, image path, original coordinates, click offsets, retries, and failure handling are kept under `Advanced Settings`. Target previews retain their original aspect ratio and point out missing screenshots. Deselecting a step does not hide the step list.
+Select a step to edit its friendly name and common settings on the right. Image steps show their ordered reference images, confidence slider, search area, and coordinate-fallback status without requiring a path to be typed. Timeout, grayscale mode, match priority, original coordinates, click offsets, retries, and failure handling remain under `Advanced Settings`. Target previews retain their original aspect ratio and point out missing screenshots. Deselecting a step does not hide the step list.
 
 The lower Logs/Status and Validation area has a practical minimum height and remains resizable. Window geometry, splitter positions, table widths, the logs state, and the Advanced section state are stored with `QSettings`.
 
@@ -89,6 +89,17 @@ The lower Logs/Status and Validation area has a practical minimum height and rem
 Use **Add Step** to configure an action in plain language. Click, double-click, right-click, mouse move, and drag steps have **Pick on Screen** controls: the recorder hides while a crosshair overlay captures the selected position. Press Esc or right-click to cancel without changing the new step. This works across monitors, including monitors positioned to the left of the primary display.
 
 For clicks, choose coordinate-only execution or capture/select an image target. Captured targets use image matching first and retain the selected coordinate as a fallback. Scroll uses direction and amount, typing accepts multiline text and variable insertion, waiting accepts milliseconds, keyboard steps offer common keys/shortcuts, and file/application steps use Browse.
+
+## Advanced Image Targeting
+
+Select a Click Image or Double Click Image step to manage targeting in **Step Details**:
+
+- **Capture / Crop Target** hides the recorder and opens the resizable screen-crop overlay. Add existing alternatives with **Add Images**; references are tried in the displayed order, and can be reordered or removed without editing paths.
+- **Test Match Now** searches one current desktop screenshot, lists every candidate at 50% confidence or better, and shows its reference, confidence, top-left location, rank, and exact click coordinate. **Highlight on Screen** outlines every candidate and emphasizes the selected one. **Use Selected Match** moves its reference to first priority when necessary and stores the selected match number.
+- **Search area > Select on Screen** limits matching to a rectangle selected across the virtual multi-monitor desktop. **Clear** restores whole-desktop matching.
+- The confidence slider defaults to 86%. Advanced settings provide grayscale matching and highest-confidence, edge-based, or specific-match priority. Coordinate fallback is always shown as enabled with its saved position or disabled/image-required.
+
+Runtime matching captures the desktop once per poll, tries reference images in order, and logs the winning reference, confidence, location, best score, and search duration. These values are also saved in per-step run evidence. Missing, unreadable, and oversized references produce actionable warnings; oversized images specifically call out display scaling and resolution. Because image matching is pixel-based, recapture references after material DPI, display-scaling, theme, or resolution changes. Existing projects with only the legacy `image` field continue to load and run unchanged, while generated Python includes the same ordered references, grayscale, search-region, priority, and fallback behavior.
 
 During Run, Run From Here, Run Until Here, Test Step, and scheduled execution, the recorder hides by default, Windows shows the desktop (minimizing other windows), and a floating **Stop Run** control remains available. The recorder is restored when execution ends; other windows remain minimized. Turn this behavior off in Settings with **Hide recorder while running**.
 

@@ -119,6 +119,21 @@ class RunDetailsDialog(QDialog):
 
     @staticmethod
     def _execution_result_text(step: dict) -> str:
+        image = step.get("image_match")
+        if isinstance(image, dict):
+            reference = Path(str(image.get("reference_image") or "target")).name
+            confidence = image.get("confidence")
+            duration = image.get("search_duration")
+            values = ["matched" if image.get("matched") else "not matched", reference]
+            if confidence is not None:
+                values.append(f"confidence {float(confidence):.1%}")
+            if duration is not None:
+                values.append(f"search {float(duration):.2f}s")
+            if image.get("coordinate_fallback"):
+                values.append("coordinate fallback")
+            if image.get("click_x") is not None:
+                values.append(f"click ({image['click_x']}, {image.get('click_y')})")
+            return " - ".join(values)
         window = step.get("window_result")
         if isinstance(window, dict):
             values = [str(window.get("operation") or "window action")]

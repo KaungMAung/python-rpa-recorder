@@ -307,10 +307,21 @@ def _validate_action(
     image_actions = {ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value}
     if action_type in image_actions:
         image = str(data.get("image") or "").strip()
+        references = data.get("reference_images", [])
+        if references is None:
+            references = []
+        if not isinstance(references, list) or any(not isinstance(value, str) or not value.strip() for value in references):
+            _add(issues, LEVEL_ERROR, number, name, "reference images must be an ordered list of image paths")
+            references = []
+        ordered_images = [image] + [str(value).strip() for value in references if str(value).strip() != image]
         if not image:
             _add(issues, LEVEL_ERROR, number, name, "target screenshot is required")
-        elif project_dir and not _resolve_path(image, project_dir).is_file():
-            _add(issues, LEVEL_ERROR, number, name, f"target screenshot is missing: {image}")
+        for reference_index, reference in enumerate(ordered_images):
+            if reference and project_dir and not _resolve_path(reference, project_dir).is_file():
+                label = "target screenshot" if reference_index == 0 else f"reference image {reference_index + 1}"
+                _add(issues, LEVEL_ERROR, number, name, f"{label} is missing: {reference}")
+        if len(set(ordered_images)) != len(ordered_images):
+            _add(issues, LEVEL_WARNING, number, name, "duplicate reference images will be ignored")
         confidence = _finite_number(data.get("confidence", project.settings.default_confidence))
         if confidence is None or not 0 < confidence <= 1:
             _add(issues, LEVEL_ERROR, number, name, "image confidence must be greater than 0 and at most 1")
@@ -321,6 +332,21 @@ def _validate_action(
             _add(issues, LEVEL_ERROR, number, name, "image timeout must be greater than 0 seconds")
         if data.get("use_coordinate_fallback", True):
             _validate_coordinates(data, ("fallback_x", "fallback_y"), number, name, issues, "fallback position")
+        if "grayscale" in data and not isinstance(data.get("grayscale"), bool):
+            _add(issues, LEVEL_ERROR, number, name, "grayscale matching setting must be true or false")
+        priority = str(data.get("match_priority", "highest_confidence"))
+        if priority not in {"highest_confidence", "leftmost", "rightmost", "topmost", "bottommost", "match_index"}:
+            _add(issues, LEVEL_ERROR, number, name, "image match priority is unsupported")
+        match_index = _integer(data.get("match_index", 1))
+        if match_index is None or match_index < 1:
+            _add(issues, LEVEL_ERROR, number, name, "selected match number must be at least 1")
+        region = data.get("search_region")
+        if region not in (None, {}) and not isinstance(region, dict):
+            _add(issues, LEVEL_ERROR, number, name, "search region must contain X, Y, width, and height")
+        elif isinstance(region, dict) and region:
+            values = [_finite_number(region.get(key)) for key in ("x", "y", "width", "height")]
+            if any(value is None for value in values) or values[2] <= 0 or values[3] <= 0:
+                _add(issues, LEVEL_ERROR, number, name, "search region needs valid coordinates and a positive width and height")
         return
 
     if action_type in {ActionType.CLICK_COORDINATE.value, ActionType.MOUSE_MOVE.value}:

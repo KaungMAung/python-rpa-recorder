@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 from rpa.generator import generate_python
 from rpa.control_flow import IF_TYPES, LOOP_TYPES, CONTROL_TYPES, parse_control_flow
 from rpa.evidence import RunEvidenceSession
-from rpa.image_matcher import find_image, save_crop_from_image, screenshot_image, virtual_screen_origin
+from rpa.image_matcher import find_image, find_reference_matches, save_crop_from_image, screenshot_image, virtual_screen_origin
 from rpa.models import ActionType, ProjectSettings, RecorderState, RpaAction, RpaProject
 from rpa.project_manager import ProjectManager
 from rpa.recorder import RpaRecorder
@@ -82,6 +82,8 @@ from ui.run_details_dialog import RunDetailsDialog
 from ui.runtime_inputs_dialog import RuntimeInputsDialog
 from ui.target_capture import TargetCaptureOverlay
 from ui.window_picker import WindowPickOverlay
+from ui.image_match_debug import MatchHighlightOverlay, MatchResultsDialog
+from ui.region_selector import RegionSelectionOverlay
 
 
 def app_root() -> Path:
@@ -215,6 +217,9 @@ class MainWindow(QMainWindow):
         self.target_capture_action: RpaAction | None = None
         self.target_capture_origin = (0, 0)
         self.target_capture_was_maximized = False
+        self.search_region_overlay: RegionSelectionOverlay | None = None
+        self.search_region_action: RpaAction | None = None
+        self.match_highlight_overlay: MatchHighlightOverlay | None = None
         self.manual_capture_dialog: ManualActionDialog | None = None
         self.manual_capture_role = "target"
         self.window_pick_overlay: WindowPickOverlay | None = None
@@ -522,6 +527,7 @@ class MainWindow(QMainWindow):
         self.editor.test_step_requested.connect(self.test_selected_step)
         self.editor.test_locator_requested.connect(self.test_target)
         self.editor.recapture_requested.connect(self.recapture_target)
+        self.editor.search_region_requested.connect(self.select_image_search_region)
         self.editor.advanced_changed.connect(lambda expanded: self.settings.setValue("advanced_expanded", expanded))
         self.clear_logs_btn.clicked.connect(self.logs.clear)
         self.copy_logs_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.logs.toPlainText()))
@@ -1672,28 +1678,137 @@ class MainWindow(QMainWindow):
         if not self.project_dir:
             show_error(self, "Test Target", "Open or create an automation first.")
             return
-        image = self.project_dir / str(action.data.get("image", ""))
+        references = [str(action.data.get("image", ""))]
+        references.extend(str(item) for item in action.data.get("reference_images", []) if str(item))
+        paths = [self.project_dir / item for item in references if item]
+        was_visible = self.isVisible()
+        was_maximized = self.isMaximized()
+        if was_visible:
+            self.hide()
+            QApplication.processEvents()
+            time.sleep(0.12)
         try:
-            match = find_image(
-                image,
+            diagnostic = find_reference_matches(
+                paths,
                 float(action.data.get("confidence", self.project.settings.default_confidence)),
-                self._image_match_exclusions(),
+                excluded_regions=[],
+                search_region=action.data.get("search_region"),
+                grayscale=bool(action.data.get("grayscale", False)),
+                match_priority=str(action.data.get("match_priority", "highest_confidence")),
+                match_index=int(action.data.get("match_index", 1)),
+                diagnostic_min_confidence=0.5,
             )
         except Exception as exc:
+            if was_visible:
+                self.showMaximized() if was_maximized else self.showNormal()
             show_error(self, "Target Test Failed", str(exc))
             return
-        if match.found:
-            QMessageBox.information(
-                self,
-                "Target Found",
-                f"Target found at ({match.x}, {match.y}).\nMatch: {match.confidence:.1%}\nSearch time: {match.duration:.2f} seconds",
+        if was_visible:
+            self.showMaximized() if was_maximized else self.showNormal()
+            self.raise_()
+            self.activateWindow()
+        if not diagnostic.matches and not diagnostic.warnings:
+            diagnostic.warnings.append(
+                "No candidates reached 50%. Check display scaling, DPI, resolution, or capture a new reference."
             )
+        self.log(
+            f"image test: {len(diagnostic.matches)} candidate(s), "
+            f"best={diagnostic.selected.confidence:.3f}, search time={diagnostic.duration:.2f}s"
+        )
+        dialog = MatchResultsDialog(
+            diagnostic,
+            (int(action.data.get("click_offset_x", 0)), int(action.data.get("click_offset_y", 0))),
+            self,
+        )
+        dialog.highlight_requested.connect(lambda match: self._highlight_matches(diagnostic.matches, match))
+        dialog.match_chosen.connect(lambda match: self._use_selected_image_match(action, match))
+        dialog.exec()
+
+    def _highlight_matches(self, matches, selected) -> None:
+        if self.match_highlight_overlay:
+            self.match_highlight_overlay.close()
+            self.match_highlight_overlay.deleteLater()
+        overlay = MatchHighlightOverlay(matches, selected)
+        self.match_highlight_overlay = overlay
+        overlay.show()
+        QTimer.singleShot(2500, self._close_match_highlight)
+
+    def _close_match_highlight(self) -> None:
+        overlay = self.match_highlight_overlay
+        self.match_highlight_overlay = None
+        if overlay:
+            overlay.close()
+            overlay.deleteLater()
+
+    def _use_selected_image_match(self, action: RpaAction, match) -> None:
+        if action not in self.project.actions or not self.project_dir:
+            return
+        references = [str(action.data.get("image", ""))]
+        references.extend(str(item) for item in action.data.get("reference_images", []) if str(item))
+        try:
+            selected_path = Path(match.reference_image).resolve()
+            selected_index = next(
+                index for index, reference in enumerate(references)
+                if (self.project_dir / reference).resolve() == selected_path
+            )
+        except (StopIteration, OSError):
+            selected_index = 0
+        if selected_index:
+            references.insert(0, references.pop(selected_index))
+            action.data["image"] = references[0]
+            action.data["reference_images"] = references[1:]
+        action.data["match_priority"] = "match_index"
+        action.data["match_index"] = int(match.match_index or 1)
+        self.mark_dirty()
+        self.editor.set_action(action, self.project_dir)
+        self.log(
+            f"selected image match #{match.match_index} from {Path(match.reference_image).name} "
+            f"at ({match.x}, {match.y}), confidence={match.confidence:.3f}"
+        )
+
+    def select_image_search_region(self, action: RpaAction) -> None:
+        if action not in self.project.actions or self.search_region_overlay is not None:
+            return
+        self.search_region_action = action
+        self.target_capture_was_maximized = self.isMaximized()
+        self.hide()
+        QTimer.singleShot(200, self._start_image_search_region)
+
+    def _start_image_search_region(self) -> None:
+        overlay = RegionSelectionOverlay()
+        self.search_region_overlay = overlay
+        overlay.selected.connect(self._complete_image_search_region)
+        overlay.canceled.connect(self._cancel_image_search_region)
+        overlay.show()
+        overlay.raise_()
+        overlay.activateWindow()
+
+    def _complete_image_search_region(self, x: int, y: int, width: int, height: int) -> None:
+        action = self.search_region_action
+        if action in self.project.actions:
+            action.data["search_region"] = {"x": x, "y": y, "width": width, "height": height}
+            self.mark_dirty()
+            self.log(f"image search area selected: ({x}, {y}), {width}x{height}")
+        self._restore_after_image_search_region()
+        if action in self.project.actions:
+            self.editor.set_action(action, self.project_dir)
+
+    def _cancel_image_search_region(self) -> None:
+        self.log("image search-area selection cancelled")
+        self._restore_after_image_search_region()
+
+    def _restore_after_image_search_region(self) -> None:
+        overlay = self.search_region_overlay
+        self.search_region_overlay = None
+        self.search_region_action = None
+        if overlay:
+            overlay.deleteLater()
+        if self.target_capture_was_maximized:
+            self.showMaximized()
         else:
-            QMessageBox.warning(
-                self,
-                "Target Not Found",
-                f"The target is not currently visible.\nBest match: {match.confidence:.1%}\nSearch time: {match.duration:.2f} seconds\n\nTry showing the target, lowering Match Accuracy, or recapturing it.",
-            )
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def recapture_target(self, action: RpaAction) -> None:
         if not self.project_dir:

@@ -9,7 +9,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
 
-from .image_matcher import find_image, screenshot_image, wait_for_image
+from .image_matcher import find_image, screenshot_image, wait_for_image, wait_for_references
 from .models import ActionType, RpaAction, RpaProject, condition_summary
 from .control_flow import CONTROL_TYPES, IF_TYPES, LOOP_TYPES, parse_control_flow
 from .utils import MissingPlaceholderError, foreground_elevation_mismatch, resolve_placeholders_strict
@@ -60,6 +60,7 @@ class ReplayRunner:
         self.selected_window_target: dict[str, Any] | None = None
         self.window_resolver: WindowResolver | None = None
         self._last_window_result: dict[str, Any] | None = None
+        self._last_image_result: dict[str, Any] | None = None
 
     def request_stop(self) -> None:
         self._stop_event.set()
@@ -147,6 +148,7 @@ class ReplayRunner:
                 self.sleep_checked(action.delay_before)
             try:
                 self._last_window_result = None
+                self._last_image_result = None
                 control_data = resolve_placeholders_strict(action.data, self.runtime_variables)
             except MissingPlaceholderError:
                 control_data = action.data
@@ -190,6 +192,8 @@ class ReplayRunner:
             if final_error is not None:
                 if self._last_window_result:
                     record["window_result"] = dict(self._last_window_result)
+                if self._last_image_result:
+                    record["image_match"] = dict(self._last_image_result)
                 if action_callback:
                     action_callback(index, "failed")
                 failure_message = str(final_error)
@@ -224,6 +228,8 @@ class ReplayRunner:
                 action_callback(index, "completed")
             if self._last_window_result:
                 record["window_result"] = dict(self._last_window_result)
+            if self._last_image_result:
+                record["image_match"] = dict(self._last_image_result)
             self._capture_step_screenshot(record, index, "after", bool(action.data.get("capture_after")))
             self._finish_step_record(record, "Success")
             self.log(f"action completed: {index + 1} {action.action}")
@@ -655,13 +661,39 @@ class ReplayRunner:
     def _click_image(self, action: RpaAction, data: dict, allow_coordinate_fallback: bool = True) -> None:
         image_path = self.project_dir / str(data.get("image", ""))
         required_confidence = float(data.get("confidence", self.project.settings.default_confidence))
-        match = wait_for_image(
-            image_path,
-            required_confidence,
-            float(data.get("timeout", self.project.settings.default_timeout)),
-            self._poll_cancelled,
-            excluded_regions=self.excluded_regions,
+        references = [image_path]
+        for value in data.get("reference_images", []) if isinstance(data.get("reference_images"), list) else []:
+            path = self.project_dir / str(value)
+            if path not in references:
+                references.append(path)
+        advanced = bool(
+            len(references) > 1 or data.get("grayscale") or data.get("search_region")
+            or str(data.get("match_priority", "highest_confidence")) != "highest_confidence"
+            or int(data.get("match_index", 1) or 1) != 1
         )
+        warnings: list[str] = []
+        if advanced:
+            match, warnings = wait_for_references(
+                references, required_confidence,
+                float(data.get("timeout", self.project.settings.default_timeout)),
+                self._poll_cancelled, excluded_regions=self.excluded_regions,
+                grayscale=bool(data.get("grayscale", False)),
+                search_region=data.get("search_region") if isinstance(data.get("search_region"), dict) else None,
+                match_priority=str(data.get("match_priority", "highest_confidence")),
+                match_index=int(data.get("match_index", 1) or 1),
+            )
+        else:
+            match = wait_for_image(
+                image_path,
+                required_confidence,
+                float(data.get("timeout", self.project.settings.default_timeout)),
+                self._poll_cancelled,
+                excluded_regions=self.excluded_regions,
+            )
+            if not getattr(match, "reference_image", ""):
+                match.reference_image = str(image_path)
+        for warning in warnings:
+            self.log(f"image target warning: {warning}")
         if self.stop_requested():
             raise StopReplay()
         self._best_image_confidence = max(
@@ -673,12 +705,22 @@ class ReplayRunner:
                 f"best confidence={self._best_image_confidence:.3f}, required={required_confidence:.3f}"
             )
         if match.found:
+            reference = str(getattr(match, "reference_image", "") or image_path)
             self.log(
-                f"image match: confidence={match.confidence:.3f} (required {required_confidence:.3f}), "
+                f"image match: reference={Path(reference).name}, confidence={match.confidence:.3f} "
+                f"(required {required_confidence:.3f}), "
                 f"location=({match.x}, {match.y}), search time={match.duration:.2f}s"
             )
             x = match.x + int(data.get("click_offset_x", match.width / 2))
             y = match.y + int(data.get("click_offset_y", match.height / 2))
+            self._last_image_result = {
+                "matched": True, "reference_image": self._evidence_reference(reference),
+                "reference_index": int(getattr(match, "reference_index", 0)),
+                "confidence": float(match.confidence), "required_confidence": required_confidence,
+                "search_duration": float(match.duration), "match_x": int(match.x), "match_y": int(match.y),
+                "click_x": int(x), "click_y": int(y), "grayscale": bool(data.get("grayscale", False)),
+                "search_region": data.get("search_region"),
+            }
             clicks = 2 if action.action == ActionType.DOUBLE_CLICK_IMAGE.value else 1
             self.sleep_checked(float(data.get("pre_click_pause", self.project.settings.pre_click_pause)))
             get_pyautogui().click(x, y, clicks=clicks, button=str(data.get("button", "left")))
@@ -688,17 +730,33 @@ class ReplayRunner:
             f"image match: no match found, best confidence={getattr(match, 'confidence', 0.0):.3f} "
             f"(required {required_confidence:.3f}), search time={getattr(match, 'duration', 0.0):.2f}s"
         )
+        self._last_image_result = {
+            "matched": False, "reference_image": self._evidence_reference(str(getattr(match, "reference_image", "") or image_path)),
+            "confidence": float(getattr(match, "confidence", 0.0)),
+            "required_confidence": required_confidence, "search_duration": float(getattr(match, "duration", 0.0)),
+            "grayscale": bool(data.get("grayscale", False)), "search_region": data.get("search_region"),
+            "warnings": warnings,
+        }
         if allow_coordinate_fallback and data.get("use_coordinate_fallback", True):
             self.sleep_checked(float(data.get("pre_click_pause", self.project.settings.pre_click_pause)))
             get_pyautogui().click(int(data.get("fallback_x", 0)), int(data.get("fallback_y", 0)), button=str(data.get("button", "left")))
             self._set_last_click(
                 self.runtime_variables, int(data.get("fallback_x", 0)), int(data.get("fallback_y", 0)),
             )
+            self._last_image_result["coordinate_fallback"] = True
+            self._last_image_result["click_x"] = int(data.get("fallback_x", 0))
+            self._last_image_result["click_y"] = int(data.get("fallback_y", 0))
             return
         raise FileNotFoundError(
             f"Image not found: {image_path}; best confidence={self._best_image_confidence:.3f}, "
             f"required={required_confidence:.3f}"
         )
+
+    def _evidence_reference(self, value: str) -> str:
+        try:
+            return (Path(value).resolve().relative_to(self.project_dir.resolve())).as_posix()
+        except ValueError:
+            return str(value)
 
     def _capture_failure_screenshot(self, action: RpaAction, index: int) -> str | None:
         if self.evidence_dir is None and not action.data.get("capture_failure_screenshot", False):

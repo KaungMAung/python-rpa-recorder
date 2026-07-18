@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
+from uuid import uuid4
 import shiboken6
 
 from PySide6.QtCore import Qt, Signal
@@ -14,9 +16,11 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QPushButton,
     QPlainTextEdit,
     QSpinBox,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +46,7 @@ class ActionEditor(QWidget):
     test_step_requested = Signal(RpaAction)
     test_locator_requested = Signal(RpaAction)
     recapture_requested = Signal(RpaAction)
+    search_region_requested = Signal(RpaAction)
     advanced_changed = Signal(bool)
 
     def __init__(self) -> None:
@@ -66,9 +71,10 @@ class ActionEditor(QWidget):
         self.test_step_button = QPushButton("Test This Step")
         self.test_step_button.setStyleSheet("font-weight: 600; padding: 6px 10px;")
         self.test_step_button.clicked.connect(self._test_step)
-        self.locate_button = QPushButton("Locate Target")
+        self.locate_button = QPushButton("Test Match Now")
+        self.locate_button.setToolTip("Find every visible match and preview the exact click location.")
         self.locate_button.clicked.connect(self._test_locator)
-        self.recapture_button = QPushButton("Recapture Target")
+        self.recapture_button = QPushButton("Capture / Crop Target")
         self.recapture_button.clicked.connect(self._recapture_target)
 
         self.preview_heading = QLabel("Target Preview")
@@ -347,13 +353,87 @@ class ActionEditor(QWidget):
         self._loading = False
 
     def _click_image_fields(self, data: dict) -> None:
-        self.advanced_form.addRow("Target image file", self._line(data.get("image", ""), lambda v: self._set_data("image", v)))
-        self.advanced_form.addRow("Match accuracy", self._number_field(data.get("confidence", 0.86), lambda v: self._set_data("confidence", v)))
+        references = [str(data.get("image", ""))] if data.get("image") else []
+        references.extend(str(item) for item in data.get("reference_images", []) if str(item))
+        reference_list = QListWidget()
+        reference_list.setObjectName("imageReferenceList")
+        reference_list.setMinimumHeight(78)
+        for index, reference in enumerate(references):
+            reference_list.addItem(f"{index + 1}. {Path(reference).name}")
+        reference_list.setToolTip("References are attempted in this order; the first qualifying image wins.")
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        for label, handler in (
+            ("Add Images", lambda: self._add_reference_images(reference_list)),
+            ("Replace", lambda: self._replace_reference_image(reference_list)),
+            ("Remove", lambda: self._remove_reference_image(reference_list)),
+            ("Move Up", lambda: self._move_reference(reference_list, -1)),
+            ("Move Down", lambda: self._move_reference(reference_list, 1)),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(handler)
+            controls.addWidget(button)
+        reference_box = QWidget()
+        reference_layout = QVBoxLayout(reference_box)
+        reference_layout.setContentsMargins(0, 0, 0, 0)
+        reference_layout.addWidget(reference_list)
+        reference_layout.addLayout(controls)
+        self.form.addRow("Reference images", reference_box)
+
+        confidence = float(data.get("confidence", 0.86))
+        slider = QSlider(Qt.Horizontal)
+        slider.setObjectName("imageConfidenceSlider")
+        slider.setRange(50, 100)
+        slider.setValue(round(confidence * 100))
+        slider.setToolTip("Higher values reduce false matches but tolerate fewer visual changes.")
+        value_label = QLabel(f"{confidence:.0%}")
+        slider.valueChanged.connect(
+            lambda value: (value_label.setText(f"{value}%"), self._set_data("confidence", value / 100.0))
+        )
+        confidence_layout = QHBoxLayout()
+        confidence_layout.setContentsMargins(0, 0, 0, 0)
+        confidence_layout.addWidget(slider, 1)
+        confidence_layout.addWidget(value_label)
+        confidence_box = QWidget(); confidence_box.setLayout(confidence_layout)
+        self.form.addRow("Match confidence", confidence_box)
+
+        region = data.get("search_region") or {}
+        region_label = QLabel(
+            f"X {region.get('x')}, Y {region.get('y')}, {region.get('width')} x {region.get('height')}"
+            if region else "Entire desktop"
+        )
+        choose_region = QPushButton("Select on Screen")
+        clear_region = QPushButton("Clear")
+        choose_region.clicked.connect(self._select_search_region)
+        clear_region.clicked.connect(lambda: self._clear_search_region(region_label))
+        region_layout = QHBoxLayout(); region_layout.setContentsMargins(0, 0, 0, 0)
+        region_layout.addWidget(region_label, 1); region_layout.addWidget(choose_region); region_layout.addWidget(clear_region)
+        region_box = QWidget(); region_box.setLayout(region_layout)
+        self.form.addRow("Search area", region_box)
+
+        fallback_enabled = bool(data.get("use_coordinate_fallback", True))
+        fallback_check = self._check(fallback_enabled, lambda value: self._set_data("use_coordinate_fallback", value))
+        fallback_status = QLabel()
+        self._update_fallback_status(fallback_status, fallback_enabled)
+        fallback_check.toggled.connect(lambda enabled: self._update_fallback_status(fallback_status, enabled))
+        fallback_layout = QHBoxLayout(); fallback_layout.setContentsMargins(0, 0, 0, 0)
+        fallback_layout.addWidget(fallback_check); fallback_layout.addWidget(fallback_status, 1)
+        fallback_box = QWidget(); fallback_box.setLayout(fallback_layout)
+        self.form.addRow("Coordinate fallback", fallback_box)
+
         self.advanced_form.addRow("Search timeout", self._number_field(data.get("timeout", 10), lambda v: self._set_data("timeout", v)))
-        self.advanced_form.addRow("Mouse button", self._line(data.get("button", "left"), lambda v: self._set_data("button", v)))
+        self.advanced_form.addRow("Grayscale matching", self._check(data.get("grayscale", False), lambda v: self._set_data("grayscale", v)))
+        self.advanced_form.addRow("Match priority", self._combo([
+            ("Highest confidence", "highest_confidence"), ("Leftmost", "leftmost"),
+            ("Rightmost", "rightmost"), ("Topmost", "topmost"),
+            ("Bottommost", "bottommost"), ("Specific match number", "match_index"),
+        ], data.get("match_priority", "highest_confidence"), lambda v: self._set_data("match_priority", v)))
+        self.advanced_form.addRow("Match number", self._spin(data.get("match_index", 1), lambda v: self._set_data("match_index", v), 1, 100))
+        self.advanced_form.addRow("Mouse button", self._combo([
+            ("Left", "left"), ("Right", "right"), ("Middle", "middle")
+        ], data.get("button", "left"), lambda v: self._set_data("button", v)))
         self.advanced_form.addRow("Original X", self._number_field(data.get("fallback_x", 0), lambda v: self._set_data("fallback_x", v), integer=True))
         self.advanced_form.addRow("Original Y", self._number_field(data.get("fallback_y", 0), lambda v: self._set_data("fallback_y", v), integer=True))
-        self.advanced_form.addRow("Use original position if target is not found", self._check(data.get("use_coordinate_fallback", True), lambda v: self._set_data("use_coordinate_fallback", v)))
         self.advanced_form.addRow("Click point offset X", self._number_field(data.get("click_offset_x", 0), lambda v: self._set_data("click_offset_x", v), integer=True))
         self.advanced_form.addRow("Click point offset Y", self._number_field(data.get("click_offset_y", 0), lambda v: self._set_data("click_offset_y", v), integer=True))
         if self.project_dir and data.get("image"):
@@ -362,7 +442,96 @@ class ActionEditor(QWidget):
                 pixmap = QPixmap(str(image))
                 self.preview.setPixmap(pixmap.scaled(self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
             else:
-                self.preview.setText("Target image is missing. Recapture it or update the image path in Advanced Settings.")
+                self.preview.setText("Target image is missing. Capture it again or add a replacement image.")
+
+    def _reference_paths(self) -> list[str]:
+        if not self.action:
+            return []
+        primary = str(self.action.data.get("image", ""))
+        return ([primary] if primary else []) + [str(item) for item in self.action.data.get("reference_images", []) if str(item)]
+
+    def _store_reference_paths(self, references: list[str]) -> None:
+        if not self.action or not references:
+            return
+        self.action.data["image"] = references[0]
+        if len(references) > 1:
+            self.action.data["reference_images"] = references[1:]
+        else:
+            self.action.data.pop("reference_images", None)
+        self.action_changed.emit()
+        self._rebuild()
+
+    def _add_reference_images(self, _widget: QListWidget) -> None:
+        if not self.action or not self.project_dir:
+            return
+        paths, _ = QFileDialog.getOpenFileNames(self, "Add Reference Images", "", "Images (*.png *.jpg *.jpeg *.bmp)")
+        if not paths:
+            return
+        destination = self.project_dir / "screenshots"
+        destination.mkdir(parents=True, exist_ok=True)
+        references = self._reference_paths()
+        for source_text in paths:
+            source = Path(source_text)
+            target = destination / f"reference_{self.action.id[:8]}_{uuid4().hex[:8]}{source.suffix.lower()}"
+            shutil.copy2(source, target)
+            references.append(target.relative_to(self.project_dir).as_posix())
+        self._store_reference_paths(references)
+
+    def _remove_reference_image(self, widget: QListWidget) -> None:
+        row = widget.currentRow()
+        references = self._reference_paths()
+        if row < 0 or row >= len(references) or len(references) == 1:
+            return
+        references.pop(row)
+        self._store_reference_paths(references)
+
+    def _replace_reference_image(self, widget: QListWidget) -> None:
+        if not self.action or not self.project_dir:
+            return
+        row = widget.currentRow()
+        references = self._reference_paths()
+        if row < 0 or row >= len(references):
+            return
+        source_text, _ = QFileDialog.getOpenFileName(
+            self, "Replace Reference Image", "", "Images (*.png *.jpg *.jpeg *.bmp)"
+        )
+        if not source_text:
+            return
+        source = Path(source_text)
+        destination = self.project_dir / "screenshots"
+        destination.mkdir(parents=True, exist_ok=True)
+        target = destination / f"reference_{self.action.id[:8]}_{uuid4().hex[:8]}{source.suffix.lower()}"
+        shutil.copy2(source, target)
+        references[row] = target.relative_to(self.project_dir).as_posix()
+        self._store_reference_paths(references)
+
+    def _move_reference(self, widget: QListWidget, offset: int) -> None:
+        row = widget.currentRow()
+        references = self._reference_paths()
+        target = row + offset
+        if row < 0 or target < 0 or target >= len(references):
+            return
+        references[row], references[target] = references[target], references[row]
+        self._store_reference_paths(references)
+
+    def _select_search_region(self) -> None:
+        if self.action:
+            self.search_region_requested.emit(self.action)
+
+    def _clear_search_region(self, label: QLabel) -> None:
+        if self.action:
+            self.action.data.pop("search_region", None)
+            label.setText("Entire desktop")
+            self.action_changed.emit()
+
+    def _update_fallback_status(self, label: QLabel, enabled: bool) -> None:
+        if not self.action:
+            return
+        label.setText(
+            f"Enabled at ({self.action.data.get('fallback_x', 0)}, {self.action.data.get('fallback_y', 0)})"
+            if enabled else "Disabled - image match is required"
+        )
+        label.setStyleSheet("color: #166534;" if enabled else "color: #9a3412;")
 
     def _suggested_name(self, action: RpaAction) -> str:
         summary = action.summary()
