@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
+from PIL import Image
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QSettings, QTimer, Qt
+from PySide6.QtCore import QEvent, QPoint, QSettings, QTimer, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QPlainTextEdit
@@ -14,6 +15,7 @@ from rpa.project_manager import ProjectManager
 from ui.dialogs import ManualActionDialog
 from ui.main_window import MainWindow
 from ui.main_window import sanitize_flow_name
+from ui.target_capture import TargetCaptureOverlay
 
 
 def app() -> QApplication:
@@ -199,6 +201,46 @@ def test_toolbar_add_step_updates_and_persists_active_flow(tmp_path) -> None:
     assert loaded.actions[-1].action == ActionType.CLICK_COORDINATE.value
     generated = generate_python(loaded, tmp_path).read_text(encoding="utf-8")
     assert "pyautogui.click(0, 0" in generated
+
+
+def test_click_image_picker_keeps_parent_open_until_add_step(tmp_path, monkeypatch) -> None:
+    import ui.main_window as main_window_module
+
+    window = window_with_actions()
+    window.project.actions.extend(RpaAction(ActionType.WAIT.value, {"seconds": 1}) for _ in range(7))
+    window.project_dir = tmp_path
+    ProjectManager().save(window.project, tmp_path)
+    window.open_project_path(tmp_path / "project.json")
+    monkeypatch.setattr(main_window_module, "screenshot_image", lambda: Image.new("RGB", (800, 600), "white"))
+    monkeypatch.setattr(main_window_module, "virtual_screen_origin", lambda: (0, 0))
+    observed: dict[str, bool] = {}
+
+    def confirm_parent() -> None:
+        dialog = next(widget for widget in QApplication.topLevelWidgets() if isinstance(widget, ManualActionDialog))
+        observed["parent_still_open"] = dialog.isVisible() and dialog.result() != QDialog.DialogCode.Accepted
+        QTest.mouseClick(dialog.confirm_button, Qt.LeftButton)
+
+    def confirm_picker() -> None:
+        overlay = next(widget for widget in QApplication.topLevelWidgets() if isinstance(widget, TargetCaptureOverlay) and widget.isVisible())
+        QTest.mouseClick(overlay, Qt.LeftButton, pos=QPoint(300, 250))
+        QTest.mouseClick(overlay.confirm_button, Qt.LeftButton)
+        QTimer.singleShot(10, confirm_parent)
+
+    def open_picker() -> None:
+        dialog = next(widget for widget in QApplication.topLevelWidgets() if isinstance(widget, ManualActionDialog) and widget.isVisible())
+        dialog.type_box.setCurrentIndex(dialog.type_box.findData(ActionType.CLICK_IMAGE.value))
+        QTest.mouseClick(dialog.target_pick_button, Qt.LeftButton)
+        QTimer.singleShot(250, confirm_picker)
+
+    QTimer.singleShot(10, open_picker)
+    QTest.mouseClick(window.buttons["Add Manual Action"], Qt.LeftButton)
+
+    assert observed["parent_still_open"]
+    assert len(window.project.actions) == 10
+    assert window.project.actions[-1].action == ActionType.CLICK_IMAGE.value
+    log_text = window.logs.toPlainText()
+    assert "[Image Picker] closed: accepted" in log_text
+    assert log_text.index("[Add Step] still open") < log_text.index("[Add Step] confirmation clicked")
 
 
 def test_startup_reopens_last_saved_flow(tmp_path) -> None:

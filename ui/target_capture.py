@@ -18,8 +18,8 @@ class TargetCaptureOverlay(QWidget):
     confirmed = Signal(int, int, int, int)
     canceled = Signal()
 
-    def __init__(self, captured_image: Image.Image, crop_width: int, crop_height: int) -> None:
-        super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+    def __init__(self, captured_image: Image.Image, crop_width: int, crop_height: int, parent=None) -> None:
+        super().__init__(parent, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.captured_image = captured_image
         self._finished = False
         self._target: QPoint | None = None

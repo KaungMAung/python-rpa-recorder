@@ -120,6 +120,7 @@ class ManualActionDialog(QDialog):
         button = QPushButton("Pick on Screen")
         button.setToolTip("Hide this dialog and select a position. Esc or right-click cancels without changing this step.")
         button.clicked.connect(lambda: self.screen_pick_requested.emit(role))
+        setattr(self, f"{role}_pick_button", button)
         row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(QLabel("X")); row.addWidget(x); row.addWidget(QLabel("Y")); row.addWidget(y); row.addWidget(button)
         box = QVBoxLayout(); box.addLayout(row)

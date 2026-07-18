@@ -1349,8 +1349,12 @@ class MainWindow(QMainWindow):
         self.manual_capture_dialog = dialog
         self.manual_capture_role = role
         self.target_capture_was_maximized = self.isMaximized()
-        dialog.hide()
+        # Hiding a modal QDialog that is inside exec() terminates its nested
+        # event loop as Rejected. Keep it alive while making it invisible and
+        # non-interactive behind the independent picker overlay.
+        dialog.setWindowOpacity(0.0)
         self.hide()
+        self.log("[Image Picker] opened")
         QTimer.singleShot(200, self._start_manual_target_capture)
 
     def _start_manual_target_capture(self) -> None:
@@ -1360,7 +1364,12 @@ class MainWindow(QMainWindow):
         try:
             captured = screenshot_image()
             self.target_capture_origin = virtual_screen_origin()
-            self.target_capture_overlay = TargetCaptureOverlay(captured, self.project.settings.crop_width, self.project.settings.crop_height)
+            self.target_capture_overlay = TargetCaptureOverlay(
+                captured,
+                self.project.settings.crop_width,
+                self.project.settings.crop_height,
+                parent=dialog,
+            )
             self.target_capture_overlay.confirmed.connect(self._complete_manual_target_capture)
             self.target_capture_overlay.canceled.connect(self._cancel_manual_target_capture)
             self.target_capture_overlay.show()
@@ -1372,6 +1381,7 @@ class MainWindow(QMainWindow):
         dialog, overlay = self.manual_capture_dialog, self.target_capture_overlay
         if not dialog:
             return
+        self.log("[Image Picker] confirmed")
         image = None
         if overlay and getattr(dialog, "capture_image", None) and dialog.capture_image.isChecked() and self.project_dir:
             image = (Path("screenshots") / f"manual_target_{int(time.time() * 1000)}.png").as_posix()
@@ -1383,17 +1393,12 @@ class MainWindow(QMainWindow):
                 dialog.set_screen_point(self.manual_capture_role, x, y)
         else:
             dialog.set_screen_point(self.manual_capture_role, x, y)
-        self._restore_manual_capture_dialog()
-        # For a one-point click target, the overlay's Confirm is the user's
-        # final confirmation. Avoid sending them back to an ambiguous second
-        # confirmation dialog. Drag retains its separate start/end picks.
-        if self.manual_capture_role == "target":
-            QTimer.singleShot(0, dialog.accept)
+        self._restore_manual_capture_dialog("accepted")
 
     def _cancel_manual_target_capture(self) -> None:
-        self._restore_manual_capture_dialog()
+        self._restore_manual_capture_dialog("rejected")
 
-    def _restore_manual_capture_dialog(self) -> None:
+    def _restore_manual_capture_dialog(self, result: str) -> None:
         overlay, dialog = self.target_capture_overlay, self.manual_capture_dialog
         self.target_capture_overlay = None
         self.manual_capture_dialog = None
@@ -1404,9 +1409,11 @@ class MainWindow(QMainWindow):
         else:
             self.showNormal()
         if dialog:
-            dialog.show()
+            dialog.setWindowOpacity(1.0)
             dialog.raise_()
             dialog.activateWindow()
+            self.log(f"[Image Picker] closed: {result}")
+            self.log("[Add Step] still open")
 
     def insert_action(self, action: RpaAction, position: str | None = None) -> None:
         index = self.table.selected_index()
