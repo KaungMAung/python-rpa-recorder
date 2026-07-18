@@ -106,3 +106,16 @@ def test_step_details_hide_during_run_and_restore_afterward() -> None:
     window._restore_details_after_run()
     assert window.editor_scroll.isVisible()
     assert window.table.selected_index() == 0
+
+
+def test_undo_redo_restores_step_edits() -> None:
+    window = window_with_actions()
+    window._reset_history()
+    window.project.actions[0].data["text"] = "changed"
+    window.mark_dirty()
+
+    window.undo()
+    assert window.project.actions[0].data["text"] == "first"
+
+    window.redo()
+    assert window.project.actions[0].data["text"] == "changed"
