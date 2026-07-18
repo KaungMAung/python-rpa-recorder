@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QVBoxLayout, QWidget,
 )
+import shiboken6
 
 
 class WindowTargetEditor(QWidget):
@@ -14,6 +15,7 @@ class WindowTargetEditor(QWidget):
 
     def __init__(self, data: dict | None = None, allow_selected: bool = True, parent=None) -> None:
         super().__init__(parent)
+        self._disposed = False
         data = data or {}
         source = data.get("window") if isinstance(data.get("window"), dict) else data
         layout = QVBoxLayout(self)
@@ -81,6 +83,8 @@ class WindowTargetEditor(QWidget):
         self._selected_changed()
 
     def _selected_changed(self, *_args) -> None:
+        if self._disposed or not shiboken6.isValid(self.use_selected):
+            return
         enabled = not self.use_selected.isVisible() or not self.use_selected.isChecked()
         for widget in (
             self.pick_button, self.process_name, self.window_title, self.title_match, self.class_name,
@@ -89,6 +93,8 @@ class WindowTargetEditor(QWidget):
         self.changed.emit()
 
     def set_target(self, target: dict, description: str = "") -> None:
+        if self._disposed or not shiboken6.isValid(self) or not shiboken6.isValid(self.use_selected):
+            return
         self.use_selected.setChecked(False)
         self.process_name.setText(str(target.get("process_name", "")))
         self.window_title.setText(str(target.get("window_title", "")))
@@ -98,6 +104,8 @@ class WindowTargetEditor(QWidget):
         self.changed.emit()
 
     def data(self) -> dict:
+        if self._disposed or not shiboken6.isValid(self) or not shiboken6.isValid(self.use_selected):
+            return {"use_selected_window": False, "window": {}}
         return {
             "use_selected_window": self.use_selected.isVisible() and self.use_selected.isChecked(),
             "window": {
@@ -110,3 +118,18 @@ class WindowTargetEditor(QWidget):
                 "multiple_match": self.multiple.currentData(),
             },
         }
+
+    def dispose(self) -> None:
+        """Disconnect callbacks before the dynamic Add Step form deletes this editor."""
+        if self._disposed:
+            return
+        self._disposed = True
+        if shiboken6.isValid(self):
+            self.pick_button.clicked.disconnect(self.pick_requested)
+            self.use_selected.toggled.disconnect(self._selected_changed)
+            for line in (self.process_name, self.window_title, self.class_name):
+                line.textChanged.disconnect(self.changed)
+            for combo in (self.title_match, self.multiple):
+                combo.currentIndexChanged.disconnect(self.changed)
+            self.timeout.valueChanged.disconnect(self.changed)
+            self.retry.valueChanged.disconnect(self.changed)

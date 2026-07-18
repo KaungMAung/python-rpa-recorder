@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shiboken6
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QPixmap
@@ -143,6 +144,8 @@ class ActionEditor(QWidget):
             widget = item.widget()
             child_layout = item.layout()
             if widget:
+                if isinstance(widget, WindowTargetEditor) and shiboken6.isValid(widget):
+                    widget.dispose()
                 widget.blockSignals(True)
                 widget.deleteLater()
             elif child_layout:

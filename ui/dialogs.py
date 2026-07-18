@@ -29,6 +29,7 @@ from rpa.models import ActionType, ProjectSettings, RpaAction, RpaProject, Runti
 from rpa.variables import INPUT_TYPES, VARIABLE_NAME_PATTERN, validate_variable_configuration
 from ui.condition_editor import ConditionEditor
 from ui.window_target_editor import WindowTargetEditor
+import shiboken6
 
 
 WINDOW_ACTIONS = {
@@ -70,6 +71,8 @@ class ManualActionDialog(QDialog):
         self.settings = settings
         self.variables = variables
         self.picked: dict[str, tuple[int, int]] = {}
+        self._picker_active = False
+        self._picker_snapshot: dict = {}
         self.type_box = QComboBox()
         for label, value in [
             ("Click", ActionType.CLICK_COORDINATE.value),
@@ -138,6 +141,9 @@ class ManualActionDialog(QDialog):
         self._rebuild()
 
     def _clear_form(self) -> None:
+        window_editor = getattr(self, "window_editor", None)
+        if isinstance(window_editor, WindowTargetEditor) and shiboken6.isValid(window_editor):
+            window_editor.dispose()
         while self.form.count():
             item = self.form.takeAt(0)
             if item.widget():
@@ -146,6 +152,18 @@ class ManualActionDialog(QDialog):
                 while item.layout().count():
                     child = item.layout().takeAt(0)
                     if child.widget(): child.widget().deleteLater()
+        # Dynamic form controls are replaced whenever the action type changes.
+        # Keeping Python attributes to their deleted C++ objects is unsafe and
+        # was the root cause of Pick Window reading a deleted QCheckBox.
+        for name in (
+            "target_x", "target_y", "target_pick_button", "capture_image", "mode_note", "image_file",
+            "start_x", "start_y", "start_pick_button", "end_x", "end_y", "end_pick_button",
+            "direction", "amount", "text", "wait_ms", "path", "key", "keys", "condition_editor",
+            "repeat_count", "max_iterations", "iteration_delay", "window_editor", "relative_x", "relative_y",
+            "scale_window", "absolute_fallback", "window_button", "window_move_duration",
+        ):
+            if hasattr(self, name):
+                delattr(self, name)
 
     def _pick_row(self, role: str, label: str) -> tuple[QSpinBox, QSpinBox]:
         x, y = QSpinBox(), QSpinBox()
@@ -165,6 +183,8 @@ class ManualActionDialog(QDialog):
         return x, y
 
     def _rebuild(self) -> None:
+        if self._picker_active:
+            return
         self._clear_form()
         kind = self.type_box.currentData()
         if kind in (ActionType.CLICK_COORDINATE.value, ActionType.DOUBLE_CLICK_IMAGE.value, "right_click", ActionType.CLICK_IMAGE.value):
@@ -288,6 +308,36 @@ class ManualActionDialog(QDialog):
             self.form.addRow(QLabel("This advanced step can be edited after insertion."))
         self._update_summary()
 
+    def begin_picker(self, role: str) -> dict | None:
+        """Freeze volatile widget state before the child picker starts."""
+        if self._picker_active or not shiboken6.isValid(self):
+            return None
+        snapshot: dict = {"role": role, "action_type": self.type_box.currentData()}
+        if role == "window_target":
+            editor = getattr(self, "window_editor", None)
+            if not isinstance(editor, WindowTargetEditor) or not shiboken6.isValid(editor):
+                return None
+            snapshot["window_data"] = editor.data()
+            if hasattr(self, "scale_window") and shiboken6.isValid(self.scale_window):
+                snapshot["scale_with_window"] = self.scale_window.isChecked()
+            if hasattr(self, "absolute_fallback") and shiboken6.isValid(self.absolute_fallback):
+                snapshot["use_absolute_fallback"] = self.absolute_fallback.isChecked()
+        elif hasattr(self, "capture_image") and shiboken6.isValid(self.capture_image):
+            snapshot["capture_image"] = self.capture_image.isChecked()
+        self._picker_active = True
+        self._picker_snapshot = snapshot
+        self.type_box.setEnabled(False)
+        self.confirm_button.setEnabled(False)
+        return dict(snapshot)
+
+    def finish_picker(self) -> None:
+        if not shiboken6.isValid(self):
+            return
+        self._picker_active = False
+        self._picker_snapshot = {}
+        self.type_box.setEnabled(True)
+        self.confirm_button.setEnabled(True)
+
     def set_screen_point(self, role: str, x: int, y: int, image: str | None = None, offsets: tuple[int, int] | None = None) -> None:
         getattr(self, f"{role}_x").setValue(x); getattr(self, f"{role}_y").setValue(y)
         self.picked[role] = (x, y)
@@ -298,7 +348,10 @@ class ManualActionDialog(QDialog):
         self._update_summary()
 
     def set_window_target(self, target: dict, window_info: dict, point: tuple[int, int]) -> None:
-        self.window_editor.set_target(
+        editor = getattr(self, "window_editor", None)
+        if not isinstance(editor, WindowTargetEditor) or not shiboken6.isValid(editor):
+            return
+        editor.set_target(
             target,
             f"Captured {window_info.get('process_name') or 'window'} — {window_info.get('title') or 'untitled'}",
         )

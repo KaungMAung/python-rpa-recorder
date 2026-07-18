@@ -8,6 +8,8 @@ from html import escape
 import os
 import time
 import sys
+import shiboken6
+import weakref
 
 from PySide6.QtCore import QObject, QPoint, QRect, QSettings, QThread, QTimer, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeyEvent, QKeySequence, QShortcut
@@ -216,6 +218,11 @@ class MainWindow(QMainWindow):
         self.manual_capture_dialog: ManualActionDialog | None = None
         self.manual_capture_role = "target"
         self.window_pick_overlay: WindowPickOverlay | None = None
+        self.manual_capture_snapshot: dict = {}
+        self._manual_capture_token = 0
+        self._manual_capture_timer = QTimer(self)
+        self._manual_capture_timer.setSingleShot(True)
+        self._manual_capture_timer.timeout.connect(self._start_pending_manual_capture)
         self.settings = QSettings("PythonRPARecorder", "PythonRPARecorder")
         try:
             schedule_history_limit = int(self.settings.value("scheduler/history_limit", 100))
@@ -1875,10 +1882,24 @@ class MainWindow(QMainWindow):
         action.data["image"] = destination.relative_to(self.project_dir).as_posix()
 
     def _begin_manual_target_capture(self, dialog: ManualActionDialog, role: str) -> None:
-        if self.manual_capture_dialog is not None:
+        if self._valid_manual_capture_dialog() is not None or not shiboken6.isValid(dialog):
             return
+        snapshot = dialog.begin_picker(role)
+        if snapshot is None:
+            self.log(f"[{role}] picker could not start because its form is no longer available")
+            return
+        self._manual_capture_token += 1
+        token = self._manual_capture_token
         self.manual_capture_dialog = dialog
         self.manual_capture_role = role
+        self.manual_capture_snapshot = snapshot
+        owner_ref = weakref.ref(self)
+        def parent_ended(_value=None, capture_token=token, ref=owner_ref) -> None:
+            owner = ref()
+            if owner is not None and shiboken6.isValid(owner):
+                owner._manual_capture_parent_destroyed(capture_token)
+        dialog.destroyed.connect(parent_ended)
+        dialog.finished.connect(parent_ended)
         self.target_capture_was_maximized = self.isMaximized()
         # Hiding a modal QDialog that is inside exec() terminates its nested
         # event loop as Rejected. Keep it alive while making it invisible and
@@ -1887,14 +1908,24 @@ class MainWindow(QMainWindow):
         self.hide()
         if role == "window_target":
             self.log("[Window Picker] opened")
-            QTimer.singleShot(200, self._start_manual_window_capture)
         else:
             self.log("[Image Picker] opened")
-            QTimer.singleShot(200, self._start_manual_target_capture)
+        self._manual_capture_timer.start(200)
+
+    def _valid_manual_capture_dialog(self) -> ManualActionDialog | None:
+        dialog = self.manual_capture_dialog
+        return dialog if dialog is not None and shiboken6.isValid(dialog) else None
+
+    def _start_pending_manual_capture(self) -> None:
+        if self.manual_capture_role == "window_target":
+            self._start_manual_window_capture()
+        else:
+            self._start_manual_target_capture()
 
     def _start_manual_window_capture(self) -> None:
-        dialog = self.manual_capture_dialog
+        dialog = self._valid_manual_capture_dialog()
         if dialog is None:
+            self._abandon_manual_capture()
             return
         try:
             self.window_pick_overlay = WindowPickOverlay(parent=dialog)
@@ -1906,7 +1937,10 @@ class MainWindow(QMainWindow):
             show_error(self, "Pick Window Failed", str(exc))
 
     def _complete_manual_window_capture(self, x: int, y: int) -> None:
-        dialog = self.manual_capture_dialog
+        dialog = self._valid_manual_capture_dialog()
+        if dialog is None:
+            self._abandon_manual_capture()
+            return
         try:
             backend = NativeWindowBackend()
             # Native cursor coordinates stay aligned with GetWindowRect under
@@ -1916,8 +1950,6 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
             window = backend.window_at_point(x, y, exclude_process_id=os.getpid())
-            if dialog is None:
-                return
             dialog.set_window_target(window.target(), window.evidence(), (x, y))
             self.log(
                 f"[Window Picker] captured: process={window.process_name or 'unknown'}, "
@@ -1930,8 +1962,9 @@ class MainWindow(QMainWindow):
             show_error(self, "Pick Window Failed", str(exc))
 
     def _start_manual_target_capture(self) -> None:
-        dialog = self.manual_capture_dialog
+        dialog = self._valid_manual_capture_dialog()
         if dialog is None:
+            self._abandon_manual_capture()
             return
         try:
             captured = screenshot_image()
@@ -1950,12 +1983,14 @@ class MainWindow(QMainWindow):
             show_error(self, "Pick on Screen Failed", str(exc))
 
     def _complete_manual_target_capture(self, x: int, y: int, width: int, height: int) -> None:
-        dialog, overlay = self.manual_capture_dialog, self.target_capture_overlay
-        if not dialog:
+        dialog, overlay = self._valid_manual_capture_dialog(), self.target_capture_overlay
+        if dialog is None:
+            self._abandon_manual_capture()
             return
         self.log("[Image Picker] confirmed")
         image = None
-        if overlay and getattr(dialog, "capture_image", None) and dialog.capture_image.isChecked() and self.project_dir:
+        capture_image = bool(self.manual_capture_snapshot.get("capture_image", False))
+        if overlay and shiboken6.isValid(overlay) and capture_image and self.project_dir:
             image = (Path("screenshots") / f"manual_target_{int(time.time() * 1000)}.png").as_posix()
             try:
                 offset_x, offset_y, _width, _height = save_crop_from_image(self.project_dir / image, overlay.captured_image, x, y, width, height, *self.target_capture_origin)
@@ -1971,26 +2006,65 @@ class MainWindow(QMainWindow):
         self._restore_manual_capture_dialog("rejected")
 
     def _restore_manual_capture_dialog(self, result: str) -> None:
-        overlay, dialog = self.target_capture_overlay, self.manual_capture_dialog
+        self._manual_capture_timer.stop()
+        overlay, dialog = self.target_capture_overlay, self._valid_manual_capture_dialog()
         self.target_capture_overlay = None
         window_overlay = self.window_pick_overlay
         self.window_pick_overlay = None
         self.manual_capture_dialog = None
-        if overlay:
+        self.manual_capture_snapshot = {}
+        if overlay and shiboken6.isValid(overlay):
+            overlay.confirmed.disconnect(self._complete_manual_target_capture)
+            overlay.canceled.disconnect(self._cancel_manual_target_capture)
             overlay.deleteLater()
-        if window_overlay:
+        if window_overlay and shiboken6.isValid(window_overlay):
+            window_overlay.picked.disconnect(self._complete_manual_window_capture)
+            window_overlay.canceled.disconnect(self._cancel_manual_target_capture)
             window_overlay.deleteLater()
         if self.target_capture_was_maximized:
             self.showMaximized()
         else:
             self.showNormal()
-        if dialog:
+        if dialog is not None:
+            dialog.finish_picker()
             dialog.setWindowOpacity(1.0)
             dialog.raise_()
             dialog.activateWindow()
             picker = "Window Picker" if self.manual_capture_role == "window_target" else "Image Picker"
             self.log(f"[{picker}] closed: {result}")
             self.log("[Add Step] still open")
+
+    def _manual_capture_parent_destroyed(self, token: int) -> None:
+        if not shiboken6.isValid(self):
+            return
+        if token != self._manual_capture_token or self.manual_capture_dialog is None:
+            return
+        self._abandon_manual_capture()
+
+    def _abandon_manual_capture(self) -> None:
+        """End a child picker without dereferencing a destroyed parent dialog."""
+        if not shiboken6.isValid(self):
+            return
+        if shiboken6.isValid(self._manual_capture_timer):
+            self._manual_capture_timer.stop()
+        overlay, window_overlay = self.target_capture_overlay, self.window_pick_overlay
+        self.target_capture_overlay = None
+        self.window_pick_overlay = None
+        self.manual_capture_dialog = None
+        self.manual_capture_snapshot = {}
+        if overlay is not None and shiboken6.isValid(overlay):
+            overlay.confirmed.disconnect(self._complete_manual_target_capture)
+            overlay.canceled.disconnect(self._cancel_manual_target_capture)
+            overlay.close(); overlay.deleteLater()
+        if window_overlay is not None and shiboken6.isValid(window_overlay):
+            window_overlay.picked.disconnect(self._complete_manual_window_capture)
+            window_overlay.canceled.disconnect(self._cancel_manual_target_capture)
+            window_overlay.close(); window_overlay.deleteLater()
+        if self.target_capture_was_maximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
+        self.log("[Picker] parent dialog closed; picker cancelled safely")
 
     def insert_action(self, action: RpaAction, position: str | None = None) -> bool:
         index = self.table.selected_index()

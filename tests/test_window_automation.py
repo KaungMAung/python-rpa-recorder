@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import shiboken6
 
 from rpa.generator import generate_python
 from rpa.models import ActionType, ProjectSettings, RpaAction, RpaProject
@@ -236,3 +237,128 @@ def test_manual_relative_window_form_uses_captured_window_details() -> None:
     assert result.data["use_absolute_fallback"] is False
     assert result.data["window"]["process_name"] == "billing.exe"
     dialog.deleteLater(); app.processEvents()
+
+
+def test_window_form_rebuild_disposes_deleted_checkboxes_safely() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from ui.dialogs import ManualActionDialog
+
+    app = QApplication.instance() or QApplication([])
+    dialog = ManualActionDialog(ProjectSettings(), {})
+    dialog.type_box.setCurrentIndex(dialog.type_box.findData(ActionType.CLICK_WINDOW_RELATIVE.value))
+    first_editor = dialog.window_editor
+    first_checkbox = first_editor.use_selected
+    dialog.type_box.setCurrentIndex(dialog.type_box.findData(ActionType.ACTIVATE_WINDOW.value))
+    app.processEvents()
+    from PySide6.QtCore import QEvent
+    app.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert not shiboken6.isValid(first_editor)
+    assert not shiboken6.isValid(first_checkbox)
+    assert shiboken6.isValid(dialog.window_editor.use_selected)
+    snapshot = dialog.begin_picker("window_target")
+    assert snapshot is not None
+    assert isinstance(snapshot["window_data"]["use_selected_window"], bool)
+    dialog.finish_picker()
+    dialog.deleteLater(); app.processEvents()
+
+
+class FakePickerBackend:
+    def cursor_position(self):
+        return -450, 320
+
+    def window_at_point(self, _x, _y, exclude_process_id=None):
+        assert exclude_process_id
+        return WindowInfo(44, "Invoice - Billing", "billing.exe", "BillingWindow", 900, -900, 100, 800, 600)
+
+
+def _window_dialog_and_main(monkeypatch):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from ui.dialogs import ManualActionDialog
+    from ui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr("ui.main_window.NativeWindowBackend", FakePickerBackend)
+    window = MainWindow()
+    dialog = ManualActionDialog(ProjectSettings(), {}, window)
+    dialog.type_box.setCurrentIndex(dialog.type_box.findData(ActionType.CLICK_WINDOW_RELATIVE.value))
+    dialog.show(); app.processEvents()
+    return app, window, dialog
+
+
+def test_pick_window_cancel_and_reopen_keeps_parent_controls_alive(monkeypatch) -> None:
+    app, window, dialog = _window_dialog_and_main(monkeypatch)
+    window._begin_manual_target_capture(dialog, "window_target")
+    window._manual_capture_timer.stop()
+    window._start_pending_manual_capture()
+    assert window.window_pick_overlay is not None
+    window.window_pick_overlay._cancel()
+    app.processEvents()
+    assert shiboken6.isValid(dialog)
+    assert shiboken6.isValid(dialog.window_editor.use_selected)
+    assert not dialog._picker_active
+
+    window._begin_manual_target_capture(dialog, "window_target")
+    window._manual_capture_timer.stop()
+    window._start_pending_manual_capture()
+    window._cancel_manual_target_capture()
+    app.processEvents()
+    assert shiboken6.isValid(dialog.window_editor.use_selected)
+    dialog.close(); window.close(); app.processEvents()
+
+
+def test_pick_window_confirm_updates_live_parent_and_can_reopen(monkeypatch) -> None:
+    app, window, dialog = _window_dialog_and_main(monkeypatch)
+    window._begin_manual_target_capture(dialog, "window_target")
+    window._manual_capture_timer.stop()
+    window._start_pending_manual_capture()
+    window._complete_manual_window_capture(0, 0)
+    app.processEvents()
+    action = dialog.action()
+    assert action.data["window"]["process_name"] == "billing.exe"
+    assert action.data["relative_x"] == 450
+    assert action.data["relative_y"] == 220
+    assert shiboken6.isValid(dialog.window_editor.use_selected)
+    assert not dialog._picker_active
+
+    window._begin_manual_target_capture(dialog, "window_target")
+    window._manual_capture_timer.stop()
+    window._start_pending_manual_capture()
+    window._cancel_manual_target_capture()
+    dialog.close(); window.close(); app.processEvents()
+
+
+@pytest.mark.parametrize("start_overlay", [False, True])
+def test_closing_parent_during_pick_window_cancels_delayed_callbacks(monkeypatch, start_overlay: bool) -> None:
+    app, window, dialog = _window_dialog_and_main(monkeypatch)
+    window._begin_manual_target_capture(dialog, "window_target")
+    window._manual_capture_timer.stop()
+    if start_overlay:
+        window._start_pending_manual_capture()
+        assert window.window_pick_overlay is not None
+    dialog.deleteLater()
+    app.processEvents()
+    from PySide6.QtCore import QEvent
+    app.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert not shiboken6.isValid(dialog)
+    assert window.manual_capture_dialog is None
+    assert window.window_pick_overlay is None
+    # A stale timeout delivered after parent teardown must be a harmless no-op.
+    window._start_pending_manual_capture()
+    assert window.manual_capture_dialog is None
+    window.close(); app.processEvents()
+
+
+def test_rejecting_parent_while_picker_is_open_disconnects_child_flow(monkeypatch) -> None:
+    app, window, dialog = _window_dialog_and_main(monkeypatch)
+    window._begin_manual_target_capture(dialog, "window_target")
+    window._manual_capture_timer.stop()
+    window._start_pending_manual_capture()
+    assert window.window_pick_overlay is not None
+    dialog.reject()
+    app.processEvents()
+    assert window.manual_capture_dialog is None
+    assert window.window_pick_overlay is None
+    assert not window._manual_capture_timer.isActive()
+    dialog.deleteLater(); window.close(); app.processEvents()
