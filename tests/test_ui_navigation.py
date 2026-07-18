@@ -4,7 +4,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication, QPlainTextEdit
 
@@ -151,3 +151,23 @@ def test_inserted_step_clears_filter_and_is_visible() -> None:
     assert window.table.rowCount() == 3
     assert not window.table.isRowHidden(2)
     assert window.table.selected_index() == 2
+
+
+def test_manual_step_is_saved_to_active_flow(tmp_path, monkeypatch) -> None:
+    from rpa.project_manager import ProjectManager
+
+    window = window_with_actions()
+    window.project_dir = tmp_path
+    original_exec = ManualActionDialog.exec
+
+    def accept_default_step(dialog):
+        QTimer.singleShot(0, dialog.accept)
+        return original_exec(dialog)
+
+    monkeypatch.setattr(ManualActionDialog, "exec", accept_default_step)
+    window.add_manual_action()
+
+    assert len(window.project.actions) == 3
+    loaded = ProjectManager().load(tmp_path / "project.json")
+    assert len(loaded.actions) == 3
+    assert loaded.actions[-1].action == ActionType.CLICK_COORDINATE.value
