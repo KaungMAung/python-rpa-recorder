@@ -8,7 +8,8 @@ from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication, QPlainTextEdit
 
-from rpa.models import ActionType, RpaAction
+from rpa.models import ActionType, ProjectSettings, RpaAction
+from ui.dialogs import ManualActionDialog
 from ui.main_window import MainWindow
 from ui.main_window import sanitize_flow_name
 
@@ -119,3 +120,24 @@ def test_undo_redo_restores_step_edits() -> None:
 
     window.redo()
     assert window.project.actions[0].data["text"] == "changed"
+
+
+def test_manual_drag_form_creates_picked_positions() -> None:
+    app()
+    dialog = ManualActionDialog(ProjectSettings(), {}, None)
+    dialog.type_box.setCurrentIndex(dialog.type_box.findData(ActionType.DRAG.value))
+    dialog.set_screen_point("start", -120, 30)
+    dialog.set_screen_point("end", 240, 160)
+    action = dialog.action()
+    assert action.action == ActionType.DRAG.value
+    assert action.data["start_x"] == -120
+    assert action.data["end_y"] == 160
+
+
+def test_log_viewer_adds_level_and_step_context() -> None:
+    window = window_with_actions()
+    window.log("warning: target is not visible")
+    window.set_action_status(0, "running")
+    text = window.logs.toPlainText()
+    assert "[Warning] warning: target is not visible" in text
+    assert "[Step 1] Running" in text

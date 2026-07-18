@@ -138,6 +138,12 @@ class ReplayRunner:
             gui = get_pyautogui()
             self.sleep_checked(float(data.get("pre_click_pause", self.project.settings.pre_click_pause)))
             gui.click(int(data.get("x", 0)), int(data.get("y", 0)), button=str(data.get("button", "left")))
+        elif action.action == ActionType.MOUSE_MOVE.value:
+            get_pyautogui().moveTo(int(data.get("x", 0)), int(data.get("y", 0)), duration=float(data.get("duration", 0.2)))
+        elif action.action == ActionType.DRAG.value:
+            gui = get_pyautogui()
+            gui.moveTo(int(data.get("start_x", 0)), int(data.get("start_y", 0)), duration=float(data.get("move_duration", 0.2)))
+            gui.dragTo(int(data.get("end_x", 0)), int(data.get("end_y", 0)), duration=float(data.get("duration", 0.5)), button=str(data.get("button", "left")))
         elif action.action == ActionType.OPEN_FILE.value:
             subprocess.Popen([str(data.get("path", ""))], shell=True)
             self.sleep_checked(float(data.get("wait_after", 1.0)))

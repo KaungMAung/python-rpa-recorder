@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from copy import deepcopy
+import shutil
 from datetime import datetime, timezone
+from html import escape
 import time
 import sys
 
@@ -53,7 +55,7 @@ from rpa.utils import create_file_logger, foreground_elevation_mismatch
 from ui.action_editor import ActionEditor
 from ui.action_table import ActionTable
 from ui.dialogs import ManualActionDialog, SettingsDialog, VariablesDialog, load_default_project_settings, show_error
-from ui.recorder_toolbar import FloatingRecorderToolbar
+from ui.recorder_toolbar import FloatingExecutionToolbar, FloatingRecorderToolbar
 from ui.schedule_dialog import ScheduleFlowsDialog
 from ui.target_capture import TargetCaptureOverlay
 
@@ -142,6 +144,8 @@ class MainWindow(QMainWindow):
         self.dirty = False
         self.recorder: RpaRecorder | None = None
         self.floating: FloatingRecorderToolbar | None = None
+        self.execution_floating: FloatingExecutionToolbar | None = None
+        self.replay_was_maximized = False
         self.replay_thread: QThread | None = None
         self.replay_worker: ReplayWorker | None = None
         self.run_log_path: Path | None = None
@@ -163,12 +167,15 @@ class MainWindow(QMainWindow):
         self.run_end_index = -1
         self.run_mode = "run"
         self.file_logger = None
+        self._logs_follow_tail = True
         self.last_runtime_variables: dict = {}
         self.details_were_visible_before_run = True
         self.target_capture_overlay: TargetCaptureOverlay | None = None
         self.target_capture_action: RpaAction | None = None
         self.target_capture_origin = (0, 0)
         self.target_capture_was_maximized = False
+        self.manual_capture_dialog: ManualActionDialog | None = None
+        self.manual_capture_role = "target"
         self.settings = QSettings("PythonRPARecorder", "PythonRPARecorder")
         self.schedule_store = ScheduleStore(flows_root())
         self._scheduled_runs: dict[str, tuple[QThread, ReplayWorker]] = {}
@@ -281,14 +288,20 @@ class MainWindow(QMainWindow):
         self.logs.setFont(QFont("Consolas", 9))
         self.clear_logs_btn = QPushButton("Clear")
         self.copy_logs_btn = QPushButton("Copy")
+        self.save_logs_btn = QPushButton("Save Log")
         self.open_log_btn = QPushButton("Open File")
         self.toggle_logs_btn = QPushButton("Collapse Logs")
+        self.log_search = QLineEdit()
+        self.log_search.setPlaceholderText("Search logs")
+        self.log_search.setClearButtonEnabled(True)
+        self.log_search.setMaximumWidth(220)
         logs_header = QWidget()
         logs_header_layout = QHBoxLayout(logs_header)
         logs_header_layout.setContentsMargins(0, 0, 0, 0)
         logs_header_layout.addWidget(QLabel("Logs / Status"))
         logs_header_layout.addStretch(1)
-        for btn in (self.clear_logs_btn, self.copy_logs_btn, self.open_log_btn, self.toggle_logs_btn):
+        logs_header_layout.addWidget(self.log_search)
+        for btn in (self.clear_logs_btn, self.copy_logs_btn, self.save_logs_btn, self.open_log_btn, self.toggle_logs_btn):
             logs_header_layout.addWidget(btn)
         self.logs_wrap = QWidget()
         logs_layout = QVBoxLayout(self.logs_wrap)
@@ -333,7 +346,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.vertical_splitter)
         self.setCentralWidget(main)
         self.statusBar().showMessage("Ready")
-        self.vertical_splitter.setSizes([620, 120])
+        self.vertical_splitter.setSizes([500, 280])
 
     def _build_menu_bar(self) -> None:
         menus = [
@@ -429,8 +442,11 @@ class MainWindow(QMainWindow):
         self.editor.advanced_changed.connect(lambda expanded: self.settings.setValue("advanced_expanded", expanded))
         self.clear_logs_btn.clicked.connect(self.logs.clear)
         self.copy_logs_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.logs.toPlainText()))
+        self.save_logs_btn.clicked.connect(self.save_logs)
         self.open_log_btn.clicked.connect(self.open_run_log)
         self.toggle_logs_btn.clicked.connect(self.toggle_logs)
+        self.log_search.returnPressed.connect(self.find_log)
+        self.logs.verticalScrollBar().valueChanged.connect(self._on_log_scroll)
         self.action_recorded.connect(self._action_recorded)
         self.log_recorded.connect(self.log)
         self.recorder_failed.connect(self._recorder_failed)
@@ -922,6 +938,7 @@ class MainWindow(QMainWindow):
         self.run_started_at = time.monotonic()
         self._reset_action_statuses()
         self._hide_details_for_run()
+        self._hide_for_replay()
         self.replay_thread = QThread()
         self.replay_worker = ReplayWorker(
             self.project,
@@ -944,10 +961,14 @@ class MainWindow(QMainWindow):
         self.update_buttons()
 
     def _image_match_exclusions(self) -> list[tuple[int, int, int, int]]:
-        if not self.isVisible() or self.isMinimized():
-            return []
-        rect = self.frameGeometry()
-        return [(rect.x(), rect.y(), rect.width(), rect.height())]
+        exclusions: list[tuple[int, int, int, int]] = []
+        if self.isVisible() and not self.isMinimized():
+            rect = self.frameGeometry()
+            exclusions.append((rect.x(), rect.y(), rect.width(), rect.height()))
+        if self.execution_floating and self.execution_floating.isVisible():
+            rect = self.execution_floating.frameGeometry()
+            exclusions.append((rect.x(), rect.y(), rect.width(), rect.height()))
+        return exclusions
 
     def _reset_action_statuses(self) -> None:
         for index, action in enumerate(self.project.actions):
@@ -998,12 +1019,35 @@ class MainWindow(QMainWindow):
         self.replay_worker = None
         self.running_action_index = None
         self._restore_details_after_run()
+        self._restore_after_replay()
         self.update_buttons()
         self.update_status()
 
     def _hide_details_for_run(self) -> None:
         self.details_were_visible_before_run = self.editor_scroll.isVisible()
         self.editor_scroll.setVisible(False)
+
+    def _hide_for_replay(self) -> None:
+        if not self.project.settings.hide_window_during_replay:
+            return
+        self.replay_was_maximized = self.isMaximized()
+        self.execution_floating = FloatingExecutionToolbar()
+        self.execution_floating.stop_requested.connect(self.stop_run)
+        self.execution_floating.show()
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen:
+            bounds = screen.availableGeometry()
+            self.execution_floating.adjustSize()
+            self.execution_floating.move(bounds.left() + (bounds.width() - self.execution_floating.width()) // 2, bounds.bottom() - self.execution_floating.height() - 16)
+        self.hide()
+
+    def _restore_after_replay(self) -> None:
+        if self.execution_floating:
+            self.execution_floating.close()
+            self.execution_floating = None
+        if self.project.settings.hide_window_during_replay:
+            self.showMaximized() if self.replay_was_maximized else self.showNormal()
+            self.raise_()
 
     def _restore_details_after_run(self) -> None:
         self.editor_scroll.setVisible(self.details_were_visible_before_run)
@@ -1243,6 +1287,8 @@ class MainWindow(QMainWindow):
             self.project.actions[index].status = status
             self.table.update_action(index, self.project.actions[index])
             self.table.selectRow(index)
+            if status == "running":
+                self.log(f"[Step {index + 1}] Running: {self.project.actions[index].summary()}")
             self.update_status("Running")
 
     def generate_python(self) -> None:
@@ -1256,12 +1302,85 @@ class MainWindow(QMainWindow):
         self.log(f"Python file generated: {path}")
 
     def add_manual_action(self, position: str | None = None) -> None:
-        dialog = ManualActionDialog(self)
+        dialog = ManualActionDialog(self.project.settings, self.project.variables, self)
+        dialog.screen_pick_requested.connect(lambda role: self._begin_manual_target_capture(dialog, role))
         if dialog.exec() == QDialog.Accepted:
             action = dialog.action()
+            self._materialize_manual_image(action)
             if action.action == ActionType.PYTHON_CODE.value and not self.confirm_python_code_warning():
                 return
             self.insert_action(action, position)
+
+    def _materialize_manual_image(self, action: RpaAction) -> None:
+        """Import a manually chosen image into the flow so projects stay portable."""
+        image = str(action.data.get("image", ""))
+        source = Path(image)
+        if not image or not source.is_absolute() or not source.exists() or not self.project_dir:
+            return
+        destination = self.project_dir / "screenshots" / f"manual_{action.id[:8]}{source.suffix.lower() or '.png'}"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        action.data["image"] = destination.relative_to(self.project_dir).as_posix()
+
+    def _begin_manual_target_capture(self, dialog: ManualActionDialog, role: str) -> None:
+        if self.manual_capture_dialog is not None:
+            return
+        self.manual_capture_dialog = dialog
+        self.manual_capture_role = role
+        self.target_capture_was_maximized = self.isMaximized()
+        dialog.hide()
+        self.hide()
+        QTimer.singleShot(200, self._start_manual_target_capture)
+
+    def _start_manual_target_capture(self) -> None:
+        dialog = self.manual_capture_dialog
+        if dialog is None:
+            return
+        try:
+            captured = screenshot_image()
+            self.target_capture_origin = virtual_screen_origin()
+            self.target_capture_overlay = TargetCaptureOverlay(captured, self.project.settings.crop_width, self.project.settings.crop_height)
+            self.target_capture_overlay.confirmed.connect(self._complete_manual_target_capture)
+            self.target_capture_overlay.canceled.connect(self._cancel_manual_target_capture)
+            self.target_capture_overlay.show()
+        except Exception as exc:
+            self._cancel_manual_target_capture()
+            show_error(self, "Pick on Screen Failed", str(exc))
+
+    def _complete_manual_target_capture(self, x: int, y: int, width: int, height: int) -> None:
+        dialog, overlay = self.manual_capture_dialog, self.target_capture_overlay
+        if not dialog:
+            return
+        image = None
+        if overlay and getattr(dialog, "capture_image", None) and dialog.capture_image.isChecked() and self.project_dir:
+            image = (Path("screenshots") / f"manual_target_{int(time.time() * 1000)}.png").as_posix()
+            try:
+                offset_x, offset_y, _width, _height = save_crop_from_image(self.project_dir / image, overlay.captured_image, x, y, width, height, *self.target_capture_origin)
+                dialog.set_screen_point(self.manual_capture_role, x, y, image, (offset_x, offset_y))
+            except Exception as exc:
+                self.log(f"Target image was not saved: {exc}")
+                dialog.set_screen_point(self.manual_capture_role, x, y)
+        else:
+            dialog.set_screen_point(self.manual_capture_role, x, y)
+        self._restore_manual_capture_dialog()
+
+    def _cancel_manual_target_capture(self) -> None:
+        self._restore_manual_capture_dialog()
+
+    def _restore_manual_capture_dialog(self) -> None:
+        overlay, dialog = self.target_capture_overlay, self.manual_capture_dialog
+        self.target_capture_overlay = None
+        self.manual_capture_dialog = None
+        if overlay:
+            overlay.deleteLater()
+        if self.target_capture_was_maximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
+        if dialog:
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
 
     def insert_action(self, action: RpaAction, position: str | None = None) -> None:
         index = self.table.selected_index()
@@ -1415,9 +1534,45 @@ class MainWindow(QMainWindow):
             self._restoring_history = False
 
     def log(self, message: str) -> None:
-        self.logs.append(message)
+        level, color = self._log_style(message)
+        self.logs.append(f'<span style="color:{color}">[{level}] {escape(str(message))}</span>')
+        if self._logs_follow_tail:
+            bar = self.logs.verticalScrollBar()
+            bar.setValue(bar.maximum())
         if self.file_logger:
             self.file_logger.info(message)
+
+    def _log_style(self, message: str) -> tuple[str, str]:
+        lowered = str(message).lower()
+        if any(word in lowered for word in ("failed", "error", "exception", "stopped")):
+            return "Error", "#dc2626"
+        if any(word in lowered for word in ("warning", "skipped", "could not")):
+            return "Warning", "#ca8a04"
+        if any(word in lowered for word in ("completed", "success", "saved", "created")):
+            return "Success", "#16a34a"
+        return "Info", "#334155"
+
+    def _on_log_scroll(self, value: int) -> None:
+        bar = self.logs.verticalScrollBar()
+        self._logs_follow_tail = value >= bar.maximum() - 2
+
+    def find_log(self) -> None:
+        text = self.log_search.text().strip()
+        if text and not self.logs.find(text):
+            cursor = self.logs.textCursor()
+            cursor.movePosition(cursor.Start)
+            self.logs.setTextCursor(cursor)
+            self.logs.find(text)
+
+    def save_logs(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Save log", "rpa-run.log", "Log files (*.log *.txt)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(self.logs.toPlainText(), encoding="utf-8")
+            self.statusBar().showMessage(f"Log saved: {path}", 4000)
+        except OSError as exc:
+            show_error(self, "Save Log Failed", str(exc))
 
     def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():

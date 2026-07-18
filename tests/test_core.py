@@ -51,6 +51,7 @@ def test_double_click_interval_setting_present() -> None:
     assert ProjectSettings().double_click_interval > 0
     assert ProjectSettings().pre_click_pause == 0.10
     assert ProjectSettings().show_desktop_before_recording is True
+    assert ProjectSettings().hide_window_during_replay is True
 
 
 def test_project_save_load(tmp_path: Path) -> None:

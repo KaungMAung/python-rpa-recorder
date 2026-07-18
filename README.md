@@ -81,6 +81,18 @@ Select a step to edit its friendly name and common settings on the right. Techni
 
 The logs panel starts collapsed and can be expanded from its header. Window geometry, splitter positions, table widths, the logs state, and the Advanced section state are stored with `QSettings`.
 
+## Adding Steps
+
+Use **Add Step** to configure an action in plain language. Click, double-click, right-click, mouse move, and drag steps have **Pick on Screen** controls: the recorder hides while a crosshair overlay captures the selected position. Press Esc or right-click to cancel without changing the new step. This works across monitors, including monitors positioned to the left of the primary display.
+
+For clicks, choose coordinate-only execution or capture/select an image target. Captured targets use image matching first and retain the selected coordinate as a fallback. Scroll uses direction and amount, typing accepts multiline text and variable insertion, waiting accepts milliseconds, keyboard steps offer common keys/shortcuts, and file/application steps use Browse.
+
+During Run, Run From Here, Run Until Here, and Test Step, the recorder hides by default and a floating **Stop Run** control remains available. It is restored when execution ends; turn this off in Settings with **Hide recorder while running**.
+
+## Log Viewer
+
+The larger, resizable Log Viewer remembers its splitter size. Entries are color-coded by severity, include the currently running step, and follow the newest entry unless you scroll up. Use Search, Clear, Copy, Save Log, or Open File from its header.
+
 ## Generate Python
 
 Click `Generate Python` to create:

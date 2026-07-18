@@ -37,6 +37,8 @@ class ActionType(str, Enum):
     RUN_PYTHON = "run_python"
     PYTHON_CODE = "python_code"
     CLICK_COORDINATE = "click_coordinate"
+    MOUSE_MOVE = "mouse_move"
+    DRAG = "drag"
 
 
 class ActionStatus(str, Enum):
@@ -63,6 +65,7 @@ class ProjectSettings:
     ignore_application_window: bool = True
     pyautogui_failsafe: bool = True
     show_desktop_before_recording: bool = True
+    hide_window_during_replay: bool = True
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ProjectSettings":
@@ -137,7 +140,13 @@ class RpaAction:
             name = data.get("name") or self.name or "Python Code"
             return str(name)
         if self.action == ActionType.CLICK_COORDINATE.value:
-            return f"Click original position ({data.get('x')}, {data.get('y')})"
+            button = str(data.get("button", "left"))
+            label = "Right-click" if button == "right" else "Click"
+            return f"{label} position ({data.get('x')}, {data.get('y')})"
+        if self.action == ActionType.MOUSE_MOVE.value:
+            return f"Move mouse to ({data.get('x')}, {data.get('y')})"
+        if self.action == ActionType.DRAG.value:
+            return f"Drag from ({data.get('start_x')}, {data.get('start_y')}) to ({data.get('end_x')}, {data.get('end_y')})"
         return self.action
 
     def friendly_name(self) -> str:
@@ -199,4 +208,6 @@ FRIENDLY_ACTION_NAMES = {
     ActionType.RUN_PYTHON.value: "Run Python",
     ActionType.PYTHON_CODE.value: "Python Code",
     ActionType.CLICK_COORDINATE.value: "Click Position",
+    ActionType.MOUSE_MOVE.value: "Mouse Move",
+    ActionType.DRAG.value: "Drag",
 }

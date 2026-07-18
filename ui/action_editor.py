@@ -213,9 +213,19 @@ class ActionEditor(QWidget):
             else:
                 self.advanced_form.addRow("Output variable", self._line(data.get("output_variable", ""), lambda v: self._set_data("output_variable", v)))
         elif action.action == ActionType.CLICK_COORDINATE.value:
-            self.form.addRow("Original X", self._spin(data.get("x", 0), lambda v: self._set_data("x", v), 0, 99999))
-            self.form.addRow("Original Y", self._spin(data.get("y", 0), lambda v: self._set_data("y", v), 0, 99999))
+            self.form.addRow("X", self._spin(data.get("x", 0), lambda v: self._set_data("x", v), -99999, 99999))
+            self.form.addRow("Y", self._spin(data.get("y", 0), lambda v: self._set_data("y", v), -99999, 99999))
             self.advanced_form.addRow("Mouse button", self._line(data.get("button", "left"), lambda v: self._set_data("button", v)))
+        elif action.action == ActionType.MOUSE_MOVE.value:
+            self.form.addRow("X", self._spin(data.get("x", 0), lambda v: self._set_data("x", v), -99999, 99999))
+            self.form.addRow("Y", self._spin(data.get("y", 0), lambda v: self._set_data("y", v), -99999, 99999))
+            self.advanced_form.addRow("Move duration", self._double(data.get("duration", 0.2), lambda v: self._set_data("duration", v), 0, 60))
+        elif action.action == ActionType.DRAG.value:
+            self.form.addRow("Start X", self._spin(data.get("start_x", 0), lambda v: self._set_data("start_x", v), -99999, 99999))
+            self.form.addRow("Start Y", self._spin(data.get("start_y", 0), lambda v: self._set_data("start_y", v), -99999, 99999))
+            self.form.addRow("End X", self._spin(data.get("end_x", 0), lambda v: self._set_data("end_x", v), -99999, 99999))
+            self.form.addRow("End Y", self._spin(data.get("end_y", 0), lambda v: self._set_data("end_y", v), -99999, 99999))
+            self.advanced_form.addRow("Drag duration", self._double(data.get("duration", 0.5), lambda v: self._set_data("duration", v), 0, 60))
         self._loading = False
 
     def _click_image_fields(self, data: dict) -> None:

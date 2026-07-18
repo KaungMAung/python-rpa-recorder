@@ -29,6 +29,8 @@ def validate_project(project: RpaProject, project_dir: Path | None = None) -> li
             errors.append(f"Step {index} {name}: key is required")
         if action.action == ActionType.HOTKEY.value and not data.get("keys"):
             errors.append(f"Step {index} {name}: keys are required")
+        if action.action == ActionType.DRAG.value and not all(key in data for key in ("start_x", "start_y", "end_x", "end_y")):
+            errors.append(f"Step {index} {name}: start and end positions are required")
         if action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value):
             image = data.get("image")
             if not image:

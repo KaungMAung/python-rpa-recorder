@@ -176,6 +176,11 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
         elif action.action == ActionType.CLICK_COORDINATE.value:
             lines.append("    time.sleep(PRE_CLICK_PAUSE)")
             lines.append(f"    pyautogui.click({int(data.get('x', 0))!r}, {int(data.get('y', 0))!r}, button={data.get('button', 'left')!r})")
+        elif action.action == ActionType.MOUSE_MOVE.value:
+            lines.append(f"    pyautogui.moveTo({int(data.get('x', 0))!r}, {int(data.get('y', 0))!r}, duration={float(data.get('duration', 0.2))!r})")
+        elif action.action == ActionType.DRAG.value:
+            lines.append(f"    pyautogui.moveTo({int(data.get('start_x', 0))!r}, {int(data.get('start_y', 0))!r}, duration={float(data.get('move_duration', 0.2))!r})")
+            lines.append(f"    pyautogui.dragTo({int(data.get('end_x', 0))!r}, {int(data.get('end_y', 0))!r}, duration={float(data.get('duration', 0.5))!r}, button={data.get('button', 'left')!r})")
     lines.extend([
         "",
         "if __name__ == '__main__':",

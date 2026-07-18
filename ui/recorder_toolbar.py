@@ -88,3 +88,21 @@ class FloatingRecorderToolbar(QWidget):
             self.resume_requested.emit()
         else:
             self.pause_requested.emit()
+
+
+class FloatingExecutionToolbar(QWidget):
+    stop_requested = Signal()
+
+    def __init__(self) -> None:
+        super().__init__(None, Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setWindowTitle("Automation Running")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 6, 10, 6)
+        status = QLabel("Running automation")
+        status.setStyleSheet("font-weight: 600;")
+        stop = QPushButton("Stop Run")
+        stop.setStyleSheet("background: #ea580c; color: white; font-weight: 600; padding: 4px 12px;")
+        stop.clicked.connect(self.stop_requested)
+        layout.addWidget(status)
+        layout.addWidget(stop)
+        self.setStyleSheet("QWidget { background: #eff6ff; border: 1px solid #bfdbfe; }")
