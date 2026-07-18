@@ -12,10 +12,19 @@ from .models import ActionType, RpaAction, RpaProject, RuntimeInputDefinition
 from .control_flow import CONTROL_TYPES, parse_control_flow, range_structure_issues
 from .utils import MissingPlaceholderError, resolve_placeholders_strict
 from .variables import VARIABLE_NAME_PATTERN, built_in_variables
+from .windowing import normalize_window_target
 
 LEVEL_ERROR = "Error"
 LEVEL_WARNING = "Warning"
 LEVEL_INFO = "Info"
+
+_WINDOW_ACTIONS = {
+    ActionType.SELECT_WINDOW.value, ActionType.WAIT_WINDOW.value,
+    ActionType.ACTIVATE_WINDOW.value, ActionType.MAXIMIZE_WINDOW.value,
+    ActionType.MINIMIZE_WINDOW.value, ActionType.RESTORE_WINDOW.value,
+    ActionType.CLOSE_WINDOW.value, ActionType.CLICK_WINDOW_RELATIVE.value,
+    ActionType.MOVE_WINDOW_RELATIVE.value,
+}
 
 
 @dataclass(frozen=True)
@@ -90,6 +99,7 @@ def validate_project_detailed(
                     ))
 
     seen: set[str] = set()
+    selected_window_available = False
     for index, action in enumerate(project.actions):
         step_number = index + 1
         name = _step_name(action)
@@ -127,6 +137,16 @@ def validate_project_detailed(
             action, resolved, step_number, name, issues, len(project.actions), start_index + 1, end_index + 1,
         )
         _validate_action(action, resolved, project, project_dir, step_number, name, issues)
+        if action.action in _WINDOW_ACTIONS:
+            target = normalize_window_target(resolved)
+            has_criteria = any(target[key] for key in ("process_name", "window_title", "class_name"))
+            if bool(resolved.get("use_selected_window", False)) and not has_criteria and not selected_window_available:
+                _add(
+                    issues, LEVEL_ERROR, step_number, name,
+                    "this step uses the selected window, but no earlier enabled Select / Target Window step defines it",
+                )
+            if action.action == ActionType.SELECT_WINDOW.value and has_criteria:
+                selected_window_available = True
         _collect_created_variables(action, variables)
     return issues
 
@@ -192,6 +212,51 @@ def _validate_common(
         _add(issues, LEVEL_ERROR, number, name, "output variable name is invalid")
 
 
+def _validate_window_action(
+    action_type: str, data: dict[str, Any], number: int, name: str,
+    issues: list[ValidationIssue],
+) -> None:
+    target = normalize_window_target(data)
+    has_criteria = any(target[key] for key in ("process_name", "window_title", "class_name"))
+    if not has_criteria and not bool(data.get("use_selected_window", False)):
+        _add(issues, LEVEL_ERROR, number, name, "choose a target window or use a previously selected window")
+    if target["title_match"] not in {"exact", "contains", "regex"}:
+        _add(issues, LEVEL_ERROR, number, name, "window title matching must be Exact, Contains, or Regular Expression")
+    elif target["title_match"] == "regex" and target["window_title"]:
+        try:
+            re.compile(target["window_title"])
+        except re.error as exc:
+            _add(issues, LEVEL_ERROR, number, name, f"window title regular expression is invalid: {exc}")
+    timeout = _finite_number(target["timeout"])
+    if timeout is None or timeout < 0:
+        _add(issues, LEVEL_ERROR, number, name, "window timeout must be a non-negative number")
+    retry = _finite_number(target["retry_interval"])
+    if retry is None or retry <= 0:
+        _add(issues, LEVEL_ERROR, number, name, "window retry interval must be greater than zero")
+    if target["multiple_match"] not in {"error", "first", "active"}:
+        _add(issues, LEVEL_ERROR, number, name, "multiple-window handling must be Error, First Match, or Active Match")
+    if target["process_name"] and ("/" in target["process_name"] or "\\" in target["process_name"]):
+        _add(issues, LEVEL_WARNING, number, name, "use only the process filename, for example notepad.exe")
+    if action_type in {ActionType.CLICK_WINDOW_RELATIVE.value, ActionType.MOVE_WINDOW_RELATIVE.value}:
+        _validate_coordinates(data, ("relative_x", "relative_y"), number, name, issues, "window-relative position")
+        if bool(data.get("scale_with_window", False)):
+            width = _finite_number(data.get("original_window_width"))
+            height = _finite_number(data.get("original_window_height"))
+            if width is None or width <= 0 or height is None or height <= 0:
+                _add(issues, LEVEL_ERROR, number, name, "resizing support needs the original window width and height")
+        fallback = data.get("use_absolute_fallback", False)
+        if not isinstance(fallback, bool):
+            _add(issues, LEVEL_ERROR, number, name, "absolute coordinate fallback setting must be true or false")
+        elif fallback:
+            _validate_coordinates(data, ("fallback_x", "fallback_y"), number, name, issues, "absolute fallback position")
+        if action_type == ActionType.CLICK_WINDOW_RELATIVE.value and str(data.get("button", "left")) not in {"left", "right", "middle"}:
+            _add(issues, LEVEL_ERROR, number, name, "window-relative click uses an unsupported mouse button")
+        if action_type == ActionType.MOVE_WINDOW_RELATIVE.value:
+            duration = _finite_number(data.get("duration", 0.2))
+            if duration is None or duration < 0:
+                _add(issues, LEVEL_ERROR, number, name, "mouse move duration must be non-negative")
+
+
 def _validate_action(
     action: RpaAction,
     data: dict[str, Any],
@@ -202,6 +267,9 @@ def _validate_action(
     issues: list[ValidationIssue],
 ) -> None:
     action_type = action.action
+    if action_type in _WINDOW_ACTIONS:
+        _validate_window_action(action_type, data, number, name, issues)
+        return
     fixed_conditions = {
         ActionType.IF_IMAGE_EXISTS.value: "image_exists",
         ActionType.IF_IMAGE_NOT_EXISTS.value: "image_not_exists",

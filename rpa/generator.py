@@ -189,13 +189,15 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
         "    raise RuntimeError(f'Image not found: {image}, best score={score:.3f}')",
         "",
         "def main():",
-        "    global RUNTIME_VARIABLES",
+        "    global RUNTIME_VARIABLES, SELECTED_WINDOW_TARGET",
         "    RUNTIME_VARIABLES = dict(VARIABLES)",
         "    RUNTIME_VARIABLES.update({'RUN_DATE': date.today().isoformat(), 'CLIPBOARD_TEXT': clipboard_text(), 'LAST_CLICK_X': 0, 'LAST_CLICK_Y': 0})",
         "    RUNTIME_VARIABLES.update(prompt_runtime_inputs())",
         f"    time.sleep({_delay_literal(project.settings.start_delay)})",
     ]
     lines.insert(11, "import re")
+    helper_insert = lines.index("def main():")
+    lines[helper_insert:helper_insert] = _generated_window_helpers()
     if function_lines:
         insert_at = lines.index("def main():")
         lines[insert_at:insert_at] = function_lines
@@ -364,6 +366,56 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
             lines.append(f"    drag_x, drag_y = as_int({data.get('end_x', 0)!r}), as_int({data.get('end_y', 0)!r})")
             lines.append(f"    pyautogui.dragTo(drag_x, drag_y, duration=as_float({data.get('duration', 0.5)!r}), button=resolve({data.get('button', 'left')!r}))")
             lines.append("    RUNTIME_VARIABLES['LAST_CLICK_X'], RUNTIME_VARIABLES['LAST_CLICK_Y'] = drag_x, drag_y")
+        elif action.action in {
+            ActionType.SELECT_WINDOW.value, ActionType.WAIT_WINDOW.value,
+            ActionType.ACTIVATE_WINDOW.value, ActionType.MAXIMIZE_WINDOW.value,
+            ActionType.MINIMIZE_WINDOW.value, ActionType.RESTORE_WINDOW.value,
+            ActionType.CLOSE_WINDOW.value, ActionType.CLICK_WINDOW_RELATIVE.value,
+            ActionType.MOVE_WINDOW_RELATIVE.value,
+        }:
+            window = data.get("window") if isinstance(data.get("window"), dict) else {
+                key: data[key] for key in (
+                    "process_name", "window_title", "title_match", "class_name",
+                    "timeout", "retry_interval", "multiple_match",
+                ) if key in data
+            }
+            use_selected = bool(data.get("use_selected_window", False))
+            target_var = f"__window_target_{index}"
+            window_var = f"__window_{index}"
+            lines.append(f"    {target_var} = prepare_window_target({window!r}, {use_selected!r})")
+            relative_action = action.action in {
+                ActionType.CLICK_WINDOW_RELATIVE.value, ActionType.MOVE_WINDOW_RELATIVE.value,
+            }
+            if not relative_action:
+                lines.append(f"    {window_var} = resolve_window({target_var})")
+            if action.action == ActionType.SELECT_WINDOW.value:
+                lines.append(f"    SELECTED_WINDOW_TARGET = dict({target_var})")
+                lines.append(f"    print('Step {index} selected window:', {window_var}['title'])")
+            elif action.action == ActionType.WAIT_WINDOW.value:
+                lines.append(f"    print('Step {index} found window:', {window_var}['title'])")
+            elif action.action == ActionType.ACTIVATE_WINDOW.value:
+                lines.append(f"    {window_var} = change_window({window_var}, 'activate')")
+            elif action.action in {
+                ActionType.MAXIMIZE_WINDOW.value, ActionType.MINIMIZE_WINDOW.value,
+                ActionType.RESTORE_WINDOW.value,
+            }:
+                state = {
+                    ActionType.MAXIMIZE_WINDOW.value: "maximize",
+                    ActionType.MINIMIZE_WINDOW.value: "minimize",
+                    ActionType.RESTORE_WINDOW.value: "restore",
+                }[action.action]
+                lines.append(f"    {window_var} = change_window({window_var}, {state!r})")
+            elif action.action == ActionType.CLOSE_WINDOW.value:
+                lines.append(f"    close_window({window_var})")
+            else:
+                operation = "click" if action.action == ActionType.CLICK_WINDOW_RELATIVE.value else "move"
+                lines.append(
+                    f"    relative_window_action({target_var}, {operation!r}, {data.get('relative_x', 0)!r}, "
+                    f"{data.get('relative_y', 0)!r}, scale={bool(data.get('scale_with_window', False))!r}, "
+                    f"original_width={data.get('original_window_width', 0)!r}, original_height={data.get('original_window_height', 0)!r}, "
+                    f"button={data.get('button', 'left')!r}, duration={data.get('duration', 0.2)!r}, "
+                    f"fallback={([data.get('fallback_x', 0), data.get('fallback_y', 0)] if data.get('use_absolute_fallback', False) else None)!r})"
+                )
         if indent_level != 1:
             prefix = "    " * indent_level
             for line_index in range(emitted_at, len(lines)):
@@ -406,6 +458,168 @@ def _condition_expression(action_type: str, data: dict, project: RpaProject) -> 
             f"{data.get('value', '')!r}, {bool(data.get('case_sensitive', False))!r})"
         )
     raise ValueError(f"Unsupported generated condition: {action_type}")
+
+
+def _generated_window_helpers() -> list[str]:
+    source = r'''
+SELECTED_WINDOW_TARGET = None
+
+def prepare_window_target(spec, use_selected=False):
+    global SELECTED_WINDOW_TARGET
+    spec = dict(spec or {})
+    has_criteria = any(str(spec.get(key, '')).strip() for key in ('process_name', 'window_title', 'class_name'))
+    if use_selected and not has_criteria:
+        if SELECTED_WINDOW_TARGET is None:
+            raise RuntimeError('No window has been selected by an earlier Select / Target Window step')
+        selected = dict(SELECTED_WINDOW_TARGET)
+        for key in ('timeout', 'retry_interval', 'multiple_match'):
+            if key in spec:
+                selected[key] = spec[key]
+        spec = selected
+    return {
+        'process_name': str(resolve(spec.get('process_name', ''))).strip(),
+        'window_title': str(resolve(spec.get('window_title', ''))).strip(),
+        'title_match': str(resolve(spec.get('title_match', 'contains'))).lower(),
+        'class_name': str(resolve(spec.get('class_name', ''))).strip(),
+        'timeout': as_float(spec.get('timeout', 10.0)),
+        'retry_interval': as_float(spec.get('retry_interval', 0.25)),
+        'multiple_match': str(resolve(spec.get('multiple_match', 'error'))).lower(),
+    }
+
+def enumerate_windows():
+    if os.name != 'nt':
+        raise RuntimeError('Window-aware automation is available on Windows only')
+    import ctypes
+    from ctypes import wintypes
+    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    windows = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def process_name(process_id):
+        process = kernel32.OpenProcess(0x1000, False, process_id)
+        if not process:
+            return ''
+        try:
+            size = wintypes.DWORD(32768)
+            buffer = ctypes.create_unicode_buffer(size.value)
+            return Path(buffer.value).name if kernel32.QueryFullProcessImageNameW(process, 0, buffer, ctypes.byref(size)) else ''
+        finally:
+            kernel32.CloseHandle(process)
+
+    @callback_type
+    def callback(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd) or user32.GetWindowTextLengthW(hwnd) <= 0:
+            return True
+        length = user32.GetWindowTextLengthW(hwnd) + 1
+        title = ctypes.create_unicode_buffer(length)
+        class_name = ctypes.create_unicode_buffer(256)
+        process_id = wintypes.DWORD()
+        rect = wintypes.RECT()
+        user32.GetWindowTextW(hwnd, title, length)
+        user32.GetClassNameW(hwnd, class_name, len(class_name))
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        if user32.GetWindowRect(hwnd, ctypes.byref(rect)) and rect.right > rect.left and rect.bottom > rect.top:
+            windows.append({
+                'handle': int(hwnd), 'title': title.value, 'class_name': class_name.value,
+                'process_name': process_name(process_id.value),
+                'left': int(rect.left), 'top': int(rect.top),
+                'width': int(rect.right - rect.left), 'height': int(rect.bottom - rect.top),
+                'minimized': bool(user32.IsIconic(hwnd)), 'maximized': bool(user32.IsZoomed(hwnd)),
+            })
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return windows
+
+def matching_windows(target):
+    pattern = None
+    if target['title_match'] == 'regex' and target['window_title']:
+        pattern = re.compile(target['window_title'], re.IGNORECASE)
+    result = []
+    wanted_process = target['process_name'].casefold()
+    for window in enumerate_windows():
+        process = window['process_name'].casefold()
+        if wanted_process and Path(wanted_process).stem != Path(process).stem:
+            continue
+        if target['class_name'] and window['class_name'].casefold() != target['class_name'].casefold():
+            continue
+        title = target['window_title']
+        if title and target['title_match'] == 'exact' and window['title'].casefold() != title.casefold():
+            continue
+        if title and target['title_match'] == 'contains' and title.casefold() not in window['title'].casefold():
+            continue
+        if pattern is not None and pattern.search(window['title']) is None:
+            continue
+        result.append(window)
+    return result
+
+def resolve_window(target):
+    deadline = time.monotonic() + max(0.0, target['timeout'])
+    while True:
+        matches = matching_windows(target)
+        if matches:
+            if len(matches) == 1 or target['multiple_match'] == 'first':
+                return matches[0]
+            if target['multiple_match'] == 'active':
+                import ctypes
+                active = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+                selected = next((item for item in matches if item['handle'] == active), None)
+                if selected:
+                    return selected
+                raise RuntimeError(f'{len(matches)} windows matched, but none is active')
+            raise RuntimeError(f'{len(matches)} windows matched; refine the process, title, or class')
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(max(0.05, min(target['retry_interval'], deadline - time.monotonic())))
+    raise RuntimeError(f"Window not found after {target['timeout']:.1f}s: {target['process_name']} {target['window_title']}")
+
+def change_window(window, operation):
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    hwnd = window['handle']
+    if operation == 'activate':
+        if window.get('minimized'):
+            user32.ShowWindow(hwnd, 9)
+        user32.BringWindowToTop(hwnd)
+        if not user32.SetForegroundWindow(hwnd) and int(user32.GetForegroundWindow() or 0) != hwnd:
+            raise PermissionError('Windows blocked target activation; use the same permission level as the target application')
+    else:
+        user32.ShowWindow(hwnd, {'maximize': 3, 'minimize': 6, 'restore': 9}[operation])
+    time.sleep(0.15)
+    return next((item for item in enumerate_windows() if item['handle'] == hwnd), window)
+
+def close_window(window):
+    import ctypes
+    if not ctypes.windll.user32.PostMessageW(window['handle'], 0x0010, 0, 0):
+        raise PermissionError('Windows blocked the request to close the target window')
+
+def relative_window_action(target, operation, relative_x, relative_y, scale=False,
+                           original_width=0, original_height=0, button='left', duration=0.2,
+                           fallback=None):
+    try:
+        window = change_window(resolve_window(target), 'activate')
+        offset_x, offset_y = as_float(relative_x), as_float(relative_y)
+        if scale:
+            offset_x *= window['width'] / max(1.0, as_float(original_width))
+            offset_y *= window['height'] / max(1.0, as_float(original_height))
+        x, y = window['left'] + round(offset_x), window['top'] + round(offset_y)
+        if not (window['left'] <= x < window['left'] + window['width'] and window['top'] <= y < window['top'] + window['height']):
+            raise RuntimeError('The relative point is outside the current window bounds')
+    except Exception:
+        if fallback is None:
+            raise
+        x, y = as_int(fallback[0]), as_int(fallback[1])
+    if operation == 'click':
+        time.sleep(PRE_CLICK_PAUSE)
+        pyautogui.click(x, y, button=resolve(button))
+        RUNTIME_VARIABLES['LAST_CLICK_X'], RUNTIME_VARIABLES['LAST_CLICK_Y'] = x, y
+    else:
+        pyautogui.moveTo(x, y, duration=as_float(duration))
+'''
+    return textwrap.dedent(source).strip("\n").splitlines() + [""]
 
 
 def _write_generated_requirements(out_dir: Path) -> None:

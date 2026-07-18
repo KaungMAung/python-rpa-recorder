@@ -14,6 +14,9 @@ from .models import ActionType, RpaAction, RpaProject, condition_summary
 from .control_flow import CONTROL_TYPES, IF_TYPES, LOOP_TYPES, parse_control_flow
 from .utils import MissingPlaceholderError, foreground_elevation_mismatch, resolve_placeholders_strict
 from .variables import prepare_runtime_variables
+from .windowing import (
+    WindowResolver, WindowTargetError, describe_window_target, normalize_window_target,
+)
 
 pyautogui = None
 
@@ -54,6 +57,9 @@ class ReplayRunner:
         self._best_image_confidence = 0.0
         self.evidence_dir = Path(evidence_dir) if evidence_dir else None
         self.step_results: list[dict[str, Any]] = []
+        self.selected_window_target: dict[str, Any] | None = None
+        self.window_resolver: WindowResolver | None = None
+        self._last_window_result: dict[str, Any] | None = None
 
     def request_stop(self) -> None:
         self._stop_event.set()
@@ -140,6 +146,7 @@ class ReplayRunner:
             if action.action not in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value):
                 self.sleep_checked(action.delay_before)
             try:
+                self._last_window_result = None
                 control_data = resolve_placeholders_strict(action.data, self.runtime_variables)
             except MissingPlaceholderError:
                 control_data = action.data
@@ -181,6 +188,8 @@ class ReplayRunner:
                         retry_callback(index, attempt + 1, max_attempts, reason)
                     self.sleep_checked(retry_delay)
             if final_error is not None:
+                if self._last_window_result:
+                    record["window_result"] = dict(self._last_window_result)
                 if action_callback:
                     action_callback(index, "failed")
                 failure_message = str(final_error)
@@ -213,6 +222,8 @@ class ReplayRunner:
                 raise ReplayActionError(index, action, RuntimeError(failure_message))
             if action_callback:
                 action_callback(index, "completed")
+            if self._last_window_result:
+                record["window_result"] = dict(self._last_window_result)
             self._capture_step_screenshot(record, index, "after", bool(action.data.get("capture_after")))
             self._finish_step_record(record, "Success")
             self.log(f"action completed: {index + 1} {action.action}")
@@ -462,6 +473,14 @@ class ReplayRunner:
             gui.moveTo(int(data.get("start_x", 0)), int(data.get("start_y", 0)), duration=float(data.get("move_duration", 0.2)))
             gui.dragTo(int(data.get("end_x", 0)), int(data.get("end_y", 0)), duration=float(data.get("duration", 0.5)), button=str(data.get("button", "left")))
             self._set_last_click(variables, int(data.get("end_x", 0)), int(data.get("end_y", 0)))
+        elif action.action in {
+            ActionType.SELECT_WINDOW.value, ActionType.WAIT_WINDOW.value,
+            ActionType.ACTIVATE_WINDOW.value, ActionType.MAXIMIZE_WINDOW.value,
+            ActionType.MINIMIZE_WINDOW.value, ActionType.RESTORE_WINDOW.value,
+            ActionType.CLOSE_WINDOW.value, ActionType.CLICK_WINDOW_RELATIVE.value,
+            ActionType.MOVE_WINDOW_RELATIVE.value,
+        }:
+            self._run_window_action(action, data, variables)
         elif action.action == ActionType.OPEN_FILE.value:
             opened_path = str(data.get("path", ""))
             subprocess.Popen([opened_path], shell=True)
@@ -471,6 +490,115 @@ class ReplayRunner:
             self.run_python_code(action, data, variables, step_number)
         else:
             raise ValueError(f"Unsupported action: {action.action}")
+
+    def _get_window_resolver(self) -> WindowResolver:
+        if self.window_resolver is None:
+            self.window_resolver = WindowResolver(sleep=self.sleep_checked)
+        return self.window_resolver
+
+    def _window_target_for(self, data: dict[str, Any]) -> dict[str, Any]:
+        target = normalize_window_target(data)
+        has_criteria = any(target[key] for key in ("process_name", "window_title", "class_name"))
+        if bool(data.get("use_selected_window", False)) and not has_criteria:
+            if self.selected_window_target is None:
+                raise WindowTargetError("no window has been selected by an earlier Select / Target Window step")
+            target = dict(self.selected_window_target)
+            # Per-step waiting settings may intentionally override the selected target.
+            nested = data.get("window") if isinstance(data.get("window"), dict) else data
+            for key in ("timeout", "retry_interval", "multiple_match"):
+                if key in nested:
+                    target[key] = nested[key]
+        return target
+
+    def _run_window_action(
+        self, action: RpaAction, data: dict[str, Any], variables: dict[str, Any],
+    ) -> None:
+        resolver = self._get_window_resolver()
+        target = self._window_target_for(data)
+        kind = action.action
+        try:
+            window = resolver.resolve(target, self.stop_requested)
+            if kind == ActionType.SELECT_WINDOW.value:
+                self.selected_window_target = dict(target)
+                operation = "selected"
+            elif kind == ActionType.WAIT_WINDOW.value:
+                operation = "found"
+            elif kind == ActionType.ACTIVATE_WINDOW.value:
+                window = resolver.activate(window)
+                operation = "activated"
+            elif kind in {
+                ActionType.MAXIMIZE_WINDOW.value, ActionType.MINIMIZE_WINDOW.value,
+                ActionType.RESTORE_WINDOW.value,
+            }:
+                state = {
+                    ActionType.MAXIMIZE_WINDOW.value: "maximize",
+                    ActionType.MINIMIZE_WINDOW.value: "minimize",
+                    ActionType.RESTORE_WINDOW.value: "restore",
+                }[kind]
+                window = resolver.change_state(window, state)
+                operation = state + "d" if state != "minimize" else "minimized"
+            elif kind == ActionType.CLOSE_WINDOW.value:
+                resolver.close(window)
+                operation = "close requested"
+            else:
+                window = resolver.activate(window)
+                x, y = self._window_relative_point(data, window)
+                gui = get_pyautogui()
+                if kind == ActionType.CLICK_WINDOW_RELATIVE.value:
+                    self.sleep_checked(float(data.get("pre_click_pause", self.project.settings.pre_click_pause)))
+                    gui.click(x, y, button=str(data.get("button", "left")))
+                    self._set_last_click(variables, x, y)
+                    operation = f"clicked at ({x}, {y})"
+                else:
+                    gui.moveTo(x, y, duration=float(data.get("duration", 0.2)))
+                    operation = f"moved to ({x}, {y})"
+            self._last_window_result = {
+                "operation": operation,
+                "target": describe_window_target(target),
+                "window": window.evidence(),
+            }
+            self.log(
+                f"window {operation}: {window.title or window.process_name} "
+                f"at ({window.left}, {window.top}, {window.width}x{window.height})"
+            )
+        except WindowTargetError as exc:
+            if kind in {ActionType.CLICK_WINDOW_RELATIVE.value, ActionType.MOVE_WINDOW_RELATIVE.value} and bool(data.get("use_absolute_fallback", False)):
+                x, y = int(data.get("fallback_x", 0)), int(data.get("fallback_y", 0))
+                if kind == ActionType.CLICK_WINDOW_RELATIVE.value:
+                    get_pyautogui().click(x, y, button=str(data.get("button", "left")))
+                    self._set_last_click(variables, x, y)
+                    operation = f"absolute fallback click at ({x}, {y})"
+                else:
+                    get_pyautogui().moveTo(x, y, duration=float(data.get("duration", 0.2)))
+                    operation = f"absolute fallback move to ({x}, {y})"
+                self._last_window_result = {
+                    "operation": operation, "target": describe_window_target(target),
+                    "fallback": True, "window_error": str(exc),
+                }
+                self.log(f"window target unavailable; {operation}: {exc}")
+                return
+            self._last_window_result = {
+                "operation": "failed", "target": describe_window_target(target), "error": str(exc),
+            }
+            raise
+
+    @staticmethod
+    def _window_relative_point(data: dict[str, Any], window) -> tuple[int, int]:
+        relative_x = float(data.get("relative_x", 0))
+        relative_y = float(data.get("relative_y", 0))
+        if bool(data.get("scale_with_window", False)):
+            original_width = max(1.0, float(data.get("original_window_width", window.width) or window.width))
+            original_height = max(1.0, float(data.get("original_window_height", window.height) or window.height))
+            relative_x = relative_x * window.width / original_width
+            relative_y = relative_y * window.height / original_height
+        x = window.left + round(relative_x)
+        y = window.top + round(relative_y)
+        if not window.contains(x, y):
+            raise WindowTargetError(
+                f"relative point ({relative_x:.0f}, {relative_y:.0f}) is outside the current window bounds "
+                f"({window.width}x{window.height})"
+            )
+        return x, y
 
     def run_python_code(self, action: RpaAction, data: dict[str, Any], variables: dict[str, Any], step_number: int) -> str:
         if self.stop_requested():

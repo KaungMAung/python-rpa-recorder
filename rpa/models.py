@@ -50,6 +50,15 @@ class ActionType(str, Enum):
     REPEAT_UNTIL = "repeat_until"
     END_LOOP = "end_loop"
     BREAK_LOOP = "break_loop"
+    SELECT_WINDOW = "select_window"
+    WAIT_WINDOW = "wait_window"
+    ACTIVATE_WINDOW = "activate_window"
+    MAXIMIZE_WINDOW = "maximize_window"
+    MINIMIZE_WINDOW = "minimize_window"
+    RESTORE_WINDOW = "restore_window"
+    CLOSE_WINDOW = "close_window"
+    CLICK_WINDOW_RELATIVE = "click_window_relative"
+    MOVE_WINDOW_RELATIVE = "move_window_relative"
 
 
 class ActionStatus(str, Enum):
@@ -183,6 +192,22 @@ class RpaAction:
             return "End Loop"
         if self.action == ActionType.BREAK_LOOP.value:
             return "Break Loop"
+        if self.action == ActionType.SELECT_WINDOW.value:
+            return f"Target window: {_window_target_label(data)}"
+        if self.action == ActionType.WAIT_WINDOW.value:
+            return f"Wait for window: {_window_target_label(data)}"
+        if self.action == ActionType.ACTIVATE_WINDOW.value:
+            return f"Activate window: {_window_target_label(data)}"
+        if self.action in {
+            ActionType.MAXIMIZE_WINDOW.value, ActionType.MINIMIZE_WINDOW.value,
+            ActionType.RESTORE_WINDOW.value, ActionType.CLOSE_WINDOW.value,
+        }:
+            verb = self.action.split("_", 1)[0].title()
+            return f"{verb} window: {_window_target_label(data)}"
+        if self.action == ActionType.CLICK_WINDOW_RELATIVE.value:
+            return f"Click ({data.get('relative_x', 0)}, {data.get('relative_y', 0)}) in {_window_target_label(data)}"
+        if self.action == ActionType.MOVE_WINDOW_RELATIVE.value:
+            return f"Move to ({data.get('relative_x', 0)}, {data.get('relative_y', 0)}) in {_window_target_label(data)}"
         return self.action
 
     def friendly_name(self) -> str:
@@ -303,6 +328,15 @@ FRIENDLY_ACTION_NAMES = {
     ActionType.REPEAT_UNTIL.value: "Repeat Until",
     ActionType.END_LOOP.value: "End Loop",
     ActionType.BREAK_LOOP.value: "Break Loop",
+    ActionType.SELECT_WINDOW.value: "Select / Target Window",
+    ActionType.WAIT_WINDOW.value: "Wait for Window",
+    ActionType.ACTIVATE_WINDOW.value: "Activate Window",
+    ActionType.MAXIMIZE_WINDOW.value: "Maximize Window",
+    ActionType.MINIMIZE_WINDOW.value: "Minimize Window",
+    ActionType.RESTORE_WINDOW.value: "Restore Window",
+    ActionType.CLOSE_WINDOW.value: "Close Window",
+    ActionType.CLICK_WINDOW_RELATIVE.value: "Click Relative to Window",
+    ActionType.MOVE_WINDOW_RELATIVE.value: "Move Relative to Window",
 }
 
 
@@ -318,3 +352,11 @@ def condition_summary(data: dict[str, Any]) -> str:
     operator = str(data.get("operator", "equals")).replace("_", " ")
     suffix = "" if operator == "is empty" else f" {data.get('value', '')}"
     return f"{data.get('variable') or 'variable'} {operator}{suffix}"
+
+
+def _window_target_label(data: dict[str, Any]) -> str:
+    source = data.get("window") if isinstance(data.get("window"), dict) else data
+    title = str(source.get("window_title", "")).strip()
+    process = str(source.get("process_name", "")).strip()
+    class_name = str(source.get("class_name", "")).strip()
+    return title or process or class_name or "selected window"
