@@ -99,14 +99,18 @@ class FloatingExecutionToolbar(QWidget):
         self.setWindowTitle("Automation Running")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 6, 10, 6)
-        status = QLabel("Running automation")
-        status.setStyleSheet("font-weight: 600;")
+        self.status = QLabel("Running automation")
+        self.status.setStyleSheet("font-weight: 600;")
         stop = QPushButton("Stop Run")
         stop.setStyleSheet("background: #ea580c; color: white; font-weight: 600; padding: 4px 12px;")
         stop.clicked.connect(self.stop_requested)
-        layout.addWidget(status)
+        layout.addWidget(self.status)
         layout.addWidget(stop)
         self.setStyleSheet("QWidget { background: #eff6ff; border: 1px solid #bfdbfe; }")
+
+    def set_status(self, text: str) -> None:
+        self.status.setText(text)
+        self.adjustSize()
 
     def moveEvent(self, event) -> None:
         super().moveEvent(event)

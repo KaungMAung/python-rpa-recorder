@@ -277,7 +277,7 @@ def test_history_panel_lists_and_filters_persisted_results(tmp_path: Path) -> No
     schedule = store.get("flow_a")
     schedule.history = [
         RunHistoryEntry("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:02+00:00", 2, "Success"),
-        RunHistoryEntry("2026-01-02T00:00:00+00:00", "2026-01-02T00:00:03+00:00", 3, "Failed", 2, "boom"),
+        RunHistoryEntry("2026-01-02T00:00:00+00:00", "2026-01-02T00:00:03+00:00", 3, "Failed", 2, "boom", 2),
         RunHistoryEntry("2026-01-03T00:00:00+00:00", "2026-01-03T00:00:00+00:00", 0, "Skipped (Already Running)"),
     ]
     schedule.last_status = "Failed"
@@ -290,8 +290,9 @@ def test_history_panel_lists_and_filters_persisted_results(tmp_path: Path) -> No
     assert dialog.table.item(0, 5).text() == "Failed"
     dialog.history_filter.setCurrentText("Failed")
     assert dialog.history_table.rowCount() == 1
-    assert dialog.history_table.item(0, 4).text() == "Step 2"
-    assert dialog.history_table.item(0, 5).text() == "boom"
+    assert dialog.history_table.item(0, 3).text() == "2"
+    assert dialog.history_table.item(0, 5).text() == "Step 2"
+    assert dialog.history_table.item(0, 6).text() == "boom"
     dialog.history_filter.setCurrentText("Skipped")
     assert dialog.history_table.rowCount() == 1
     dialog.close()

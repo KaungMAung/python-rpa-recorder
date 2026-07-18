@@ -34,6 +34,7 @@ class RunHistoryEntry:
     status: str = STATUS_RUNNING
     failed_step: int | None = None
     error: str | None = None
+    attempts: int | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RunHistoryEntry | None":
@@ -57,6 +58,7 @@ class RunHistoryEntry:
             status=str(data.get("status") or STATUS_RUNNING),
             failed_step=failed_step,
             error=data.get("error"),
+            attempts=_optional_int(data.get("attempts")),
         )
 
 
@@ -143,7 +145,7 @@ def mark_started(schedule: FlowSchedule, now: datetime | None = None) -> None:
     schedule.last_duration_seconds = None
     schedule.last_status = STATUS_RUNNING
     schedule.last_error = None
-    schedule.history.append(RunHistoryEntry(started_at=now.isoformat()))
+    schedule.history.append(RunHistoryEntry(started_at=now.isoformat(), attempts=0))
 
 
 def mark_finished(
@@ -152,6 +154,7 @@ def mark_finished(
     now: datetime | None = None,
     error: str | None = None,
     failed_step: int | None = None,
+    attempts: int | None = None,
 ) -> None:
     now = now or utc_now()
     was_running = schedule.last_status == STATUS_RUNNING
@@ -174,6 +177,8 @@ def mark_finished(
     entry.status = status
     entry.failed_step = failed_step
     entry.error = error
+    if attempts is not None:
+        entry.attempts = attempts
     schedule_next_run(schedule, now)
 
 
@@ -187,6 +192,7 @@ def mark_skipped(schedule: FlowSchedule, status: str, now: datetime | None = Non
         finished_at=now.isoformat(),
         duration_seconds=0.0,
         status=status,
+        attempts=0,
     ))
     # Retry soon instead of waiting a full interval, since this attempt never ran.
     schedule.next_run_at = (now + timedelta(minutes=1)).isoformat()
@@ -200,6 +206,13 @@ def _duration_seconds(started_at: str | None, finished_at: datetime) -> float | 
     except ValueError:
         return None
     return max(0.0, (finished_at - started).total_seconds())
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _trim_history(schedule: FlowSchedule, limit: int) -> None:

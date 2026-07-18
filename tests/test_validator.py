@@ -76,3 +76,21 @@ def test_invalid_python_and_empty_required_fields_are_errors(tmp_path: Path) -> 
     assert "key is required" in text
     assert "shortcut key is required" in text
     assert "wait duration" in text
+
+
+def test_retry_and_failure_settings_are_validated(tmp_path: Path) -> None:
+    project = RpaProject(actions=[RpaAction(ActionType.WAIT.value, {
+        "seconds": 1,
+        "retry_count": -1,
+        "retry_delay": -2,
+        "step_timeout": -3,
+        "failure_action": "jump",
+        "failure_jump_step": 9,
+        "capture_failure_screenshot": "yes",
+    })])
+    text = "\n".join(reasons(project, tmp_path))
+    assert "retry count" in text
+    assert "retry delay" in text
+    assert "step timeout" in text
+    assert "jump target" in text
+    assert "screenshot setting" in text

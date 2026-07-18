@@ -8,7 +8,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFormLayout
 
 from rpa.generator import generate_python
 from rpa.models import ActionType, RpaAction, RpaProject
@@ -211,6 +211,28 @@ def test_step_details_hide_advanced_fields_by_default() -> None:
     assert editor.advanced_widget.isHidden()
     editor.set_advanced_expanded(True)
     assert editor.advanced_widget.isVisibleTo(editor)
+
+
+def test_step_details_exposes_retry_and_failure_controls() -> None:
+    from PySide6.QtWidgets import QComboBox
+
+    app()
+    editor = ActionEditor()
+    action = RpaAction(ActionType.WAIT.value, {"seconds": 1})
+    editor.set_action(action, None)
+    labels = [
+        editor.advanced_form.itemAt(row, QFormLayout.LabelRole).widget().text()
+        for row in range(editor.advanced_form.rowCount())
+        if editor.advanced_form.itemAt(row, QFormLayout.LabelRole)
+        and editor.advanced_form.itemAt(row, QFormLayout.LabelRole).widget()
+    ]
+    assert "Retry count" in labels
+    assert "Delay between retries" in labels
+    assert "Step timeout (0 = off)" in labels
+    assert "On final failure" in labels
+    failure_combo = editor.advanced_widget.findChild(QComboBox)
+    assert failure_combo is not None
+    assert [failure_combo.itemData(i) for i in range(failure_combo.count())] == ["stop", "continue", "jump"]
 
 
 def test_enable_disable_and_range_commands_use_selected_step(monkeypatch) -> None:

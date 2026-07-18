@@ -77,7 +77,9 @@ def validate_project_detailed(
             issues.append(ValidationIssue(LEVEL_ERROR, step_number, name, f"action data cannot be resolved: {exc}"))
             resolved = action.data
 
-        _validate_common(action, resolved, step_number, name, issues)
+        _validate_common(
+            action, resolved, step_number, name, issues, len(project.actions), start_index + 1, end_index + 1,
+        )
         _validate_action(action, resolved, project, project_dir, step_number, name, issues)
         _collect_created_variables(action, variables)
     return issues
@@ -101,6 +103,7 @@ def _add(issues: list[ValidationIssue], level: str, number: int, name: str, reas
 
 def _validate_common(
     action: RpaAction, data: dict[str, Any], number: int, name: str, issues: list[ValidationIssue],
+    total_steps: int, run_start_step: int, run_end_step: int,
 ) -> None:
     for field_name, value in (("wait before", action.delay_before), ("recorded delay", action.recorded_delay)):
         numeric = _finite_number(value)
@@ -109,6 +112,32 @@ def _validate_common(
     button = data.get("button")
     if button is not None and str(button) not in {"left", "right", "middle"}:
         _add(issues, LEVEL_ERROR, number, name, f"unsupported mouse button: {button!r}")
+    retry_count = _integer(data.get("retry_count", 0))
+    if retry_count is None or not 0 <= retry_count <= 100:
+        _add(issues, LEVEL_ERROR, number, name, "retry count must be a whole number from 0 to 100")
+    retry_delay = _finite_number(data.get("retry_delay", 1.0))
+    if retry_delay is None or retry_delay < 0:
+        _add(issues, LEVEL_ERROR, number, name, "retry delay must be a non-negative number")
+    step_timeout = _finite_number(data.get("step_timeout", 0.0))
+    if step_timeout is None or step_timeout < 0:
+        _add(issues, LEVEL_ERROR, number, name, "step timeout must be a non-negative number")
+    failure_action = str(data.get("failure_action", "stop")).strip().lower()
+    if failure_action not in {"stop", "continue", "jump"}:
+        _add(issues, LEVEL_ERROR, number, name, "failure action must be Stop Flow, Continue, or Jump to Step")
+    elif failure_action == "jump":
+        jump_step = _integer(data.get("failure_jump_step"))
+        if jump_step is None or not 1 <= jump_step <= total_steps:
+            _add(issues, LEVEL_ERROR, number, name, f"failure jump target must be between Step 1 and Step {total_steps}")
+        elif not run_start_step <= jump_step <= run_end_step:
+            _add(
+                issues, LEVEL_ERROR, number, name,
+                f"failure jump target Step {jump_step} is outside this run range",
+            )
+        elif jump_step == number:
+            _add(issues, LEVEL_WARNING, number, name, "failure jump points back to the same step and may loop")
+    capture = data.get("capture_failure_screenshot", False)
+    if not isinstance(capture, bool):
+        _add(issues, LEVEL_ERROR, number, name, "failure screenshot setting must be true or false")
 
 
 def _validate_action(

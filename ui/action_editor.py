@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -226,6 +227,38 @@ class ActionEditor(QWidget):
             self.form.addRow("End X", self._spin(data.get("end_x", 0), lambda v: self._set_data("end_x", v), -99999, 99999))
             self.form.addRow("End Y", self._spin(data.get("end_y", 0), lambda v: self._set_data("end_y", v), -99999, 99999))
             self.advanced_form.addRow("Drag duration", self._double(data.get("duration", 0.5), lambda v: self._set_data("duration", v), 0, 60))
+        retry_heading = QLabel("Retry and failure handling")
+        retry_heading.setStyleSheet("font-weight: 600; margin-top: 8px;")
+        self.advanced_form.addRow(retry_heading)
+        self.advanced_form.addRow(
+            "Retry count",
+            self._spin(data.get("retry_count", 0), lambda v: self._set_data("retry_count", v), 0, 20),
+        )
+        self.advanced_form.addRow(
+            "Delay between retries",
+            self._double(data.get("retry_delay", 1.0), lambda v: self._set_data("retry_delay", v), 0, 3600),
+        )
+        self.advanced_form.addRow(
+            "Step timeout (0 = off)",
+            self._double(data.get("step_timeout", 0.0), lambda v: self._set_data("step_timeout", v), 0, 86400),
+        )
+        failure_options = [
+            ("Stop Flow", "stop"),
+            ("Continue", "continue"),
+            ("Jump to Step", "jump"),
+        ]
+        self.advanced_form.addRow(
+            "On final failure",
+            self._combo(failure_options, data.get("failure_action", "stop"), lambda v: self._set_data("failure_action", v)),
+        )
+        self.advanced_form.addRow(
+            "Jump target step",
+            self._spin(data.get("failure_jump_step", 1), lambda v: self._set_data("failure_jump_step", v), 1, 9999),
+        )
+        self.advanced_form.addRow(
+            "Capture final failure",
+            self._check(data.get("capture_failure_screenshot", False), lambda v: self._set_data("capture_failure_screenshot", v)),
+        )
         self._loading = False
 
     def _click_image_fields(self, data: dict) -> None:
@@ -291,6 +324,15 @@ class ActionEditor(QWidget):
         widget = QCheckBox()
         widget.setChecked(bool(value))
         widget.toggled.connect(callback)
+        return widget
+
+    def _combo(self, options: list[tuple[str, str]], value: str, callback) -> QComboBox:
+        widget = QComboBox()
+        for label, data in options:
+            widget.addItem(label, data)
+        index = widget.findData(str(value))
+        widget.setCurrentIndex(index if index >= 0 else 0)
+        widget.currentIndexChanged.connect(lambda: callback(widget.currentData()))
         return widget
 
     def _file_picker(self, value: str) -> QWidget:

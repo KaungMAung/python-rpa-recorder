@@ -144,13 +144,25 @@ def wait_for_image(
     poll_interval: float = 0.1,
     excluded_regions: list[tuple[int, int, int, int]] | None = None,
 ) -> ImageMatch:
+    started = time.monotonic()
     deadline = time.monotonic() + max(0.0, timeout)
-    last = ImageMatch(False)
+    best = ImageMatch(False)
     while time.monotonic() <= deadline:
         if stop_requested and stop_requested():
-            return last
-        last = find_image(image_path, confidence, excluded_regions)
-        if last.found:
-            return last
-        time.sleep(poll_interval)
-    return last
+            best.duration = time.monotonic() - started
+            return best
+        current = find_image(image_path, confidence, excluded_regions)
+        if current.confidence >= best.confidence:
+            best = current
+        if current.found:
+            current.duration = time.monotonic() - started
+            return current
+        remaining = max(0.0, min(poll_interval, deadline - time.monotonic()))
+        sleep_deadline = time.monotonic() + remaining
+        while time.monotonic() < sleep_deadline:
+            if stop_requested and stop_requested():
+                best.duration = time.monotonic() - started
+                return best
+            time.sleep(min(0.02, sleep_deadline - time.monotonic()))
+    best.duration = time.monotonic() - started
+    return best

@@ -19,7 +19,9 @@ def app() -> QApplication:
 def make_window(tmp_path: Path, monkeypatch) -> MainWindow:
     app()
     monkeypatch.setattr(main_window_module, "flows_root", lambda: tmp_path)
-    return MainWindow()
+    window = MainWindow()
+    monkeypatch.setattr(window, "_show_windows_desktop", lambda: None)
+    return window
 
 
 def _make_flow(tmp_path: Path, name: str) -> None:
@@ -190,11 +192,119 @@ def test_scheduled_execution_is_blocked_by_validation_errors(tmp_path, monkeypat
     flow_dir = tmp_path / "invalid_flow"
     project = RpaProject(actions=[RpaAction(ActionType.TYPE_TEXT.value, {"text": "{{missing}}"})])
     ProjectManager().save(project, flow_dir)
+    prepared: list[str] = []
+    monkeypatch.setattr(window, "_prepare_run_environment", lambda settings, label: prepared.append(label))
 
     window._run_flow_now("invalid_flow", scheduled=True)
     assert "invalid_flow" not in window._scheduled_runs
     schedule = window.schedule_store.get("invalid_flow")
     assert schedule.last_status == STATUS_FAILED
     assert schedule.history[-1].failed_step == 1
+    assert schedule.history[-1].attempts == 0
     assert "undefined variable" in (schedule.history[-1].error or "")
+    assert prepared == []
+    window.close()
+
+
+def test_real_scheduled_run_retries_and_records_success_attempts(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    import rpa.runner as runner_module
+    from rpa.models import ActionType, RpaAction, RpaProject
+    from rpa.project_manager import ProjectManager
+    from rpa.scheduler import STATUS_SUCCESS
+
+    window = make_window(tmp_path, monkeypatch)
+    flow_dir = tmp_path / "retry_flow"
+    project = RpaProject(actions=[RpaAction(ActionType.PYTHON_CODE.value, {
+        "code": "variables['tries'] = variables.get('tries', 0) + 1\nif variables['tries'] < 2: raise RuntimeError('again')",
+        "retry_count": 1,
+        "retry_delay": 0,
+    })])
+    project.settings.start_delay = 0
+    ProjectManager().save(project, flow_dir)
+    monkeypatch.setattr(runner_module, "pyautogui", SimpleNamespace(FAILSAFE=True))
+    lifecycle: list[str] = []
+    monkeypatch.setattr(window, "_prepare_run_environment", lambda settings, label: lifecycle.append("prepare"))
+    monkeypatch.setattr(window, "_restore_run_environment", lambda: lifecycle.append("restore"))
+
+    window._run_flow_now("retry_flow", scheduled=True)
+    for _ in range(300):
+        app().processEvents()
+        if "retry_flow" not in window._scheduled_runs:
+            break
+        QThread.msleep(5)
+    entry = window.schedule_store.get("retry_flow").history[-1]
+    assert entry.status == STATUS_SUCCESS
+    assert entry.attempts == 2
+    assert lifecycle == ["prepare", "restore"]
+    window.close()
+
+
+def test_real_scheduled_run_failure_records_step_error_and_cleanup(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    import rpa.runner as runner_module
+    from rpa.models import ActionType, RpaAction, RpaProject
+    from rpa.project_manager import ProjectManager
+    from rpa.scheduler import STATUS_FAILED
+
+    window = make_window(tmp_path, monkeypatch)
+    flow_dir = tmp_path / "failed_flow"
+    project = RpaProject(actions=[RpaAction(ActionType.PYTHON_CODE.value, {"code": "raise RuntimeError('boom')"})])
+    project.settings.start_delay = 0
+    ProjectManager().save(project, flow_dir)
+    monkeypatch.setattr(runner_module, "pyautogui", SimpleNamespace(FAILSAFE=True))
+    lifecycle: list[str] = []
+    monkeypatch.setattr(window, "_prepare_run_environment", lambda settings, label: lifecycle.append("prepare"))
+    monkeypatch.setattr(window, "_restore_run_environment", lambda: lifecycle.append("restore"))
+
+    window._run_flow_now("failed_flow", scheduled=True)
+    for _ in range(300):
+        app().processEvents()
+        if "failed_flow" not in window._scheduled_runs:
+            break
+        QThread.msleep(5)
+    entry = window.schedule_store.get("failed_flow").history[-1]
+    assert entry.status == STATUS_FAILED
+    assert entry.failed_step == 1
+    assert entry.attempts == 1
+    assert "boom" in (entry.error or "")
+    assert lifecycle == ["prepare", "restore"]
+    window.close()
+
+
+def test_real_scheduled_run_stop_interrupts_wait_and_restores(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    import rpa.runner as runner_module
+    from rpa.models import ActionType, RpaAction, RpaProject
+    from rpa.project_manager import ProjectManager
+    from rpa.scheduler import STATUS_STOPPED
+
+    window = make_window(tmp_path, monkeypatch)
+    flow_dir = tmp_path / "stopped_flow"
+    project = RpaProject(actions=[RpaAction(ActionType.WAIT.value, {"seconds": 5})])
+    project.settings.start_delay = 0
+    ProjectManager().save(project, flow_dir)
+    monkeypatch.setattr(runner_module, "pyautogui", SimpleNamespace(FAILSAFE=True))
+    lifecycle: list[str] = []
+    monkeypatch.setattr(window, "_prepare_run_environment", lambda settings, label: lifecycle.append("prepare"))
+    monkeypatch.setattr(window, "_restore_run_environment", lambda: lifecycle.append("restore"))
+
+    window._run_flow_now("stopped_flow", scheduled=True)
+    for _ in range(100):
+        app().processEvents()
+        entry = window._scheduled_runs.get("stopped_flow")
+        if entry and entry[1].runner.current_index == 0:
+            break
+        QThread.msleep(5)
+    window.stop_run()
+    for _ in range(200):
+        app().processEvents()
+        if "stopped_flow" not in window._scheduled_runs:
+            break
+        QThread.msleep(5)
+    entry = window.schedule_store.get("stopped_flow").history[-1]
+    assert entry.status == STATUS_STOPPED
+    assert entry.failed_step == 1
+    assert entry.attempts == 1
+    assert lifecycle == ["prepare", "restore"]
     window.close()

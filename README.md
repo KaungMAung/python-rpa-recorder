@@ -73,11 +73,13 @@ Select a row to open its Details panel. The panel shows the latest run, duration
 
 The header shows the auto-refresh state and refreshes every 5 seconds so `Running` status and countdowns stay current; use **Refresh** or `F5` for an immediate update. Click `Flow`, `Last run`, `Next run`, or `Last status` headers to sort (click again to reverse); column widths and the chosen sort order are remembered between openings. Row selection and all controls support keyboard navigation.
 
-Only one flow runs at a time: if a different flow is already running, new runs are queued until it finishes; if the *same* flow is asked to run again while its own previous run hasn't finished, that attempt is skipped and marked `Skipped (Already Running)`. Schedules and run history are stored permanently in `flows/schedules.json` and persist across app restarts. History keeps the latest 100 records per flow by default; adjust the retention control in the Details panel from 10 to 1,000 records. Existing schedule files are migrated automatically from their previous latest-run fields.
+Only one flow runs at a time: if a manual or different scheduled flow is already running, new scheduled runs wait in the queue; if the *same* flow is requested while its previous scheduled run is active, that attempt is skipped and marked `Skipped (Already Running)`. Scheduled runs use the same desktop lifecycle as manual Run: the recorder hides, Windows shows the desktop, the safely positioned floating **Stop Run** control remains available, and execution starts after desktop preparation. The recorder is restored after success, failure, timeout, or stop. Other minimized applications remain minimized.
+
+Schedules and run history are stored permanently in `flows/schedules.json` and persist across app restarts. History includes start/end time, duration, total step attempts, final status, failed/stopped step, and error. It keeps the latest 100 records per flow by default; adjust the retention control in the Details panel from 10 to 1,000 records. Existing schedule files are migrated automatically from their previous latest-run fields.
 
 ## Step Details
 
-Select a step to edit its friendly name and common settings on the right. Technical target settings such as match accuracy, timeout, image path, original coordinates, and click offsets are kept under `Advanced Settings`. Target previews retain their original aspect ratio and point out missing screenshots. Deselecting a step does not hide the step list.
+Select a step to edit its friendly name and common settings on the right. Technical target settings such as match accuracy, timeout, image path, original coordinates, click offsets, retries, and failure handling are kept under `Advanced Settings`. Target previews retain their original aspect ratio and point out missing screenshots. Deselecting a step does not hide the step list.
 
 The lower Logs/Status and Validation area has a practical minimum height and remains resizable. Window geometry, splitter positions, table widths, the logs state, and the Advanced section state are stored with `QSettings`.
 
@@ -87,7 +89,17 @@ Use **Add Step** to configure an action in plain language. Click, double-click, 
 
 For clicks, choose coordinate-only execution or capture/select an image target. Captured targets use image matching first and retain the selected coordinate as a fallback. Scroll uses direction and amount, typing accepts multiline text and variable insertion, waiting accepts milliseconds, keyboard steps offer common keys/shortcuts, and file/application steps use Browse.
 
-During Run, Run From Here, Run Until Here, and Test Step, the recorder hides by default, Windows shows the desktop (minimizing other windows), and a floating **Stop Run** control remains available. The recorder is restored when execution ends; other windows remain minimized. Turn this off in Settings with **Hide recorder while running**.
+During Run, Run From Here, Run Until Here, Test Step, and scheduled execution, the recorder hides by default, Windows shows the desktop (minimizing other windows), and a floating **Stop Run** control remains available. The recorder is restored when execution ends; other windows remain minimized. Turn this behavior off in Settings with **Hide recorder while running**.
+
+## Retries and Failure Handling
+
+Every step has compatible defaults of zero retries and **Stop Flow** on failure. Expand **Advanced Settings** to configure additional retry attempts, the interruptible delay between retries, an optional step timeout, and the final failure action:
+
+- **Stop Flow** ends the run immediately.
+- **Continue** marks the step failed and executes the next step.
+- **Jump to Step** marks the step failed and moves to a validated step number inside the current run range.
+
+Enable **Capture final failure** to save a full-screen PNG under `logs/failures`. Retry attempts and reasons appear in the Logs/Status view and floating runner. Image steps continue polling until their search timeout, retain the best confidence found, retry when configured, and only use coordinate fallback on the final attempt. Stop Run interrupts start delays, waits, retry delays, and image polling promptly. Step timeout applies to interruptible waits and image polling; Python code can cooperate through its existing `check_stop()` callback. A flow that continues or jumps after a failed step finishes its remaining work but retains a final `Failed` result and the first failure in schedule history.
 
 ## Validate Flow
 

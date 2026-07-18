@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 
 from rpa.generator import generate_python
 from rpa.image_matcher import find_image, save_crop_from_image, screenshot_image, virtual_screen_origin
-from rpa.models import ActionType, RecorderState, RpaAction, RpaProject
+from rpa.models import ActionType, ProjectSettings, RecorderState, RpaAction, RpaProject
 from rpa.project_manager import ProjectManager
 from rpa.recorder import RpaRecorder
 from rpa.runner import ReplayActionError, ReplayRunner, StopReplay
@@ -91,6 +91,7 @@ def sanitize_flow_name(name: str) -> str:
 
 class ReplayWorker(QObject):
     action_status = Signal(int, str)
+    retry_progress = Signal(int, int, int, str)
     log = Signal(str)
     finished = Signal()
     failed = Signal(int, str)
@@ -125,8 +126,15 @@ class ReplayWorker(QObject):
                 self.end_index,
                 self.include_start_delay,
                 self.respect_enabled,
+                self.retry_progress.emit,
             )
-            self.finished.emit()
+            if self.runner.had_continued_failures:
+                self.failed.emit(
+                    self.runner.first_failed_index if self.runner.first_failed_index is not None else -1,
+                    self.runner.first_failure_error or "One or more steps failed",
+                )
+            else:
+                self.finished.emit()
         except StopReplay:
             self.log.emit("replay stopped")
             self.stopped.emit()
@@ -156,6 +164,7 @@ class MainWindow(QMainWindow):
         self.recorder: RpaRecorder | None = None
         self.floating: FloatingRecorderToolbar | None = None
         self.execution_floating: FloatingExecutionToolbar | None = None
+        self._active_run_settings: ProjectSettings | None = None
         self.replay_was_maximized = False
         self.replay_thread: QThread | None = None
         self.replay_worker: ReplayWorker | None = None
@@ -658,7 +667,7 @@ class MainWindow(QMainWindow):
         self.update_buttons()
 
     def _show_windows_desktop(self) -> None:
-        """Send Win+D before hooks exist, so desktop preparation is never recorded."""
+        """Send Win+D before recording/replay hooks start; it never becomes an RPA step."""
         if sys.platform != "win32":
             return
         try:
@@ -671,7 +680,7 @@ class MainWindow(QMainWindow):
             user32.keybd_event(0x44, 0, key_up, 0)
             user32.keybd_event(0x5B, 0, key_up, 0)
         except Exception as exc:
-            self.log(f"Could not show the desktop before recording: {exc}")
+            self.log(f"Could not show the desktop before recording or replay: {exc}")
 
     def _begin_recording_countdown(self, seconds: int) -> None:
         if not self.recording_preparing or not self.floating:
@@ -951,6 +960,11 @@ class MainWindow(QMainWindow):
             self.schedule_store.save()
             self.log(f"[{flow_name}] schedule skipped: already running")
             return
+        if self.replay_thread is not None:
+            if flow_name not in self._schedule_queue:
+                self._schedule_queue.append(flow_name)
+                self.log(f"[{flow_name}] schedule queued: waiting for the current run to finish")
+            return
         if self._scheduled_runs:
             # Only one flow runs at a time; queue this one until the active run finishes.
             if flow_name not in self._schedule_queue:
@@ -975,7 +989,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.log(f"[{flow_name}] schedule failed to load: {exc}")
             schedule = self.schedule_store.get(flow_name)
-            mark_finished(schedule, STATUS_FAILED, error=f"Could not load flow: {exc}")
+            mark_finished(schedule, STATUS_FAILED, error=f"Could not load flow: {exc}", attempts=0)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
             return
@@ -986,7 +1000,7 @@ class MainWindow(QMainWindow):
             reason = errors[0].message()
             self.log(f"[{flow_name}] schedule blocked by validation: {reason}")
             schedule = self.schedule_store.get(flow_name)
-            mark_finished(schedule, STATUS_FAILED, error=reason, failed_step=errors[0].step_number)
+            mark_finished(schedule, STATUS_FAILED, error=reason, failed_step=errors[0].step_number, attempts=0)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
             return
@@ -995,23 +1009,39 @@ class MainWindow(QMainWindow):
             # while only errors block their execution.
             self.log(f"[{flow_name}] validation warning: {warning.message()}")
 
-        schedule = self.schedule_store.get(flow_name)
-        mark_started(schedule)
-        self.schedule_store.set(schedule)
-        self.schedule_store.save()
-
         thread = QThread()
         worker = ReplayWorker(project, flow_dir, 0, len(project.actions) - 1, True, True, None, [])
         worker.flow_name = flow_name
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.log.connect(self._scheduled_run_log)
+        worker.action_status.connect(self._scheduled_action_status)
+        if hasattr(worker, "retry_progress"):
+            worker.retry_progress.connect(self._scheduled_retry_progress)
         worker.finished.connect(self._scheduled_run_success)
         worker.stopped.connect(self._scheduled_run_stopped)
         worker.failed.connect(self._scheduled_run_failed)
         self._scheduled_runs[flow_name] = (thread, worker)
         prefix = "scheduled" if scheduled else "manual"
         self.log(f"[{flow_name}] {prefix} run starting")
+        try:
+            self._prepare_run_environment(getattr(project, "settings", ProjectSettings()), f"Running {flow_name}")
+        except Exception as exc:
+            self.log(f"[{flow_name}] desktop preparation failed: {exc}")
+            self._scheduled_run_finished(
+                flow_name, STATUS_FAILED, error=f"Desktop preparation failed: {exc}", attempts=0,
+            )
+            return
+        QTimer.singleShot(300, lambda name=flow_name, run_thread=thread: self._start_scheduled_worker(name, run_thread))
+
+    def _start_scheduled_worker(self, flow_name: str, thread: QThread) -> None:
+        entry = self._scheduled_runs.get(flow_name)
+        if entry is None or entry[0] is not thread or thread.isRunning():
+            return
+        schedule = self.schedule_store.get(flow_name)
+        mark_started(schedule)
+        self.schedule_store.set(schedule)
+        self.schedule_store.save()
         thread.start()
 
     def _scheduled_run_log(self, message: str) -> None:
@@ -1019,22 +1049,53 @@ class MainWindow(QMainWindow):
         flow_name = getattr(worker, "flow_name", "")
         self.log(f"[{flow_name}] {message}" if flow_name else message)
 
+    def _scheduled_action_status(self, index: int, status: str) -> None:
+        worker = self.sender()
+        flow_name = getattr(worker, "flow_name", "")
+        if self.execution_floating:
+            label = "Failed" if status == "failed" else "Running"
+            self.execution_floating.set_status(f"{flow_name} · Step {index + 1} · {label}")
+            self._position_execution_toolbar()
+        flow_dir = flows_root() / flow_name if flow_name else None
+        if flow_dir and self.project_dir and Path(self.project_dir).resolve() == flow_dir.resolve():
+            self.set_action_status(index, status)
+
+    def _scheduled_retry_progress(self, index: int, attempt: int, total: int, _reason: str) -> None:
+        worker = self.sender()
+        flow_name = getattr(worker, "flow_name", "")
+        if self.execution_floating:
+            self.execution_floating.set_status(f"{flow_name} · Step {index + 1} · Retry {attempt}/{total}")
+            self._position_execution_toolbar()
+
     def _scheduled_run_success(self) -> None:
         worker = self.sender()
-        self._scheduled_run_finished(getattr(worker, "flow_name", ""), STATUS_SUCCESS)
+        self._scheduled_run_finished(
+            getattr(worker, "flow_name", ""), STATUS_SUCCESS,
+            attempts=getattr(getattr(worker, "runner", None), "total_attempts", None),
+        )
 
     def _scheduled_run_stopped(self) -> None:
         worker = self.sender()
-        self._scheduled_run_finished(getattr(worker, "flow_name", ""), STATUS_STOPPED)
+        runner = getattr(worker, "runner", None)
+        current_index = getattr(runner, "current_index", None)
+        self._scheduled_run_finished(
+            getattr(worker, "flow_name", ""), STATUS_STOPPED,
+            error="Stopped by user",
+            failed_step=current_index + 1 if isinstance(current_index, int) else None,
+            attempts=getattr(runner, "total_attempts", None),
+        )
 
     def _scheduled_run_failed(self, index: int, message: str) -> None:
         worker = self.sender()
+        runner = getattr(worker, "runner", None)
         self._scheduled_run_finished(
             getattr(worker, "flow_name", ""), STATUS_FAILED, error=message, failed_step=index + 1,
+            attempts=getattr(runner, "total_attempts", None),
         )
 
     def _scheduled_run_finished(
         self, flow_name: str, status: str, error: str | None = None, failed_step: int | None = None,
+        attempts: int | None = None,
     ) -> None:
         entry = self._scheduled_runs.pop(flow_name, None)
         if entry:
@@ -1042,10 +1103,11 @@ class MainWindow(QMainWindow):
             thread.quit()
             thread.wait()
         schedule = self.schedule_store.get(flow_name)
-        mark_finished(schedule, status, error=error, failed_step=failed_step)
+        mark_finished(schedule, status, error=error, failed_step=failed_step, attempts=attempts)
         self.schedule_store.set(schedule)
         self.schedule_store.save()
         self.log(f"[{flow_name}] scheduled run {status}")
+        self._restore_run_environment()
         self._start_next_queued_flow()
 
     def _start_next_queued_flow(self) -> None:
@@ -1083,7 +1145,7 @@ class MainWindow(QMainWindow):
         validate: bool = True,
         runtime_variables: dict | None = None,
     ) -> None:
-        if self.replay_thread is not None or not self.project.actions:
+        if self.replay_thread is not None or self._scheduled_runs or not self.project.actions:
             return
         if not self.ensure_project_dir():
             return
@@ -1097,7 +1159,13 @@ class MainWindow(QMainWindow):
         self.run_started_at = time.monotonic()
         self._reset_action_statuses()
         self._hide_details_for_run()
-        self._hide_for_replay()
+        try:
+            self._prepare_run_environment(self.project.settings, "Running automation")
+        except Exception as exc:
+            self._restore_details_after_run()
+            self._restore_run_environment()
+            show_error(self, "Could not prepare desktop", str(exc))
+            return
         self.replay_thread = QThread()
         self.replay_worker = ReplayWorker(
             self.project,
@@ -1112,11 +1180,12 @@ class MainWindow(QMainWindow):
         self.replay_worker.moveToThread(self.replay_thread)
         self.replay_thread.started.connect(self.replay_worker.run)
         self.replay_worker.action_status.connect(self.set_action_status)
+        self.replay_worker.retry_progress.connect(self._retry_progress)
         self.replay_worker.log.connect(self.log)
         self.replay_worker.finished.connect(self.run_completed)
         self.replay_worker.stopped.connect(self.run_stopped)
         self.replay_worker.failed.connect(self.run_failed)
-        self.replay_thread.start()
+        QTimer.singleShot(300, self.replay_thread.start)
         self.update_buttons()
 
     def _image_match_exclusions(self) -> list[tuple[int, int, int, int]]:
@@ -1146,6 +1215,16 @@ class MainWindow(QMainWindow):
         if self.replay_worker:
             self.replay_worker.stop()
             self.log("stop replay requested")
+            return
+        if self._scheduled_runs:
+            _flow_name, (_thread, worker) = next(iter(self._scheduled_runs.items()))
+            worker.stop()
+            self.log("stop scheduled replay requested")
+
+    def _retry_progress(self, index: int, attempt: int, total: int, _reason: str) -> None:
+        if self.execution_floating:
+            self.execution_floating.set_status(f"Step {index + 1} · Retry {attempt}/{total}")
+            self._position_execution_toolbar()
 
     def run_finished(self) -> None:
         if self.replay_thread:
@@ -1155,7 +1234,7 @@ class MainWindow(QMainWindow):
         self.replay_worker = None
         self.running_action_index = None
         self._restore_details_after_run()
-        self._restore_after_replay()
+        self._restore_run_environment()
         self.update_buttons()
         self.update_status()
 
@@ -1163,12 +1242,15 @@ class MainWindow(QMainWindow):
         self.details_were_visible_before_run = self.editor_scroll.isVisible()
         self.editor_scroll.setVisible(False)
 
-    def _hide_for_replay(self) -> None:
-        if not self.project.settings.hide_window_during_replay:
+    def _prepare_run_environment(self, settings: ProjectSettings, label: str) -> None:
+        """Shared desktop preparation for interactive and scheduled replay."""
+        self._active_run_settings = settings
+        if not settings.hide_window_during_replay:
             return
         self.replay_was_maximized = self.isMaximized()
         self.execution_floating = FloatingExecutionToolbar()
         self.execution_floating.stop_requested.connect(self.stop_run)
+        self.execution_floating.set_status(label)
         self.execution_floating.show()
         self._position_execution_toolbar()
         self.execution_floating.position_changed.connect(self._execution_toolbar_moved)
@@ -1177,6 +1259,10 @@ class MainWindow(QMainWindow):
         # control remains available, and other windows are intentionally not
         # restored after the run.
         self._show_windows_desktop()
+
+    def _hide_for_replay(self) -> None:
+        """Compatibility wrapper used by existing UI tests and integrations."""
+        self._prepare_run_environment(self.project.settings, "Running automation")
 
     def _position_execution_toolbar(self) -> None:
         toolbar = self.execution_floating
@@ -1190,7 +1276,10 @@ class MainWindow(QMainWindow):
         saved = self.settings.value("execution_toolbar_position")
         if isinstance(saved, QPoint):
             saved_rect = QRect(saved, toolbar.size())
-            if bounds.contains(saved_rect):
+            saved_center = QPoint(saved_rect.center())
+            saved_screen = QApplication.screenAt(saved_center)
+            saved_bounds = saved_screen.availableGeometry() if saved_screen else bounds
+            if saved_bounds.contains(saved_rect):
                 toolbar.move(saved)
                 return
         margin = 32
@@ -1219,13 +1308,19 @@ class MainWindow(QMainWindow):
             toolbar.blockSignals(False)
         self.settings.setValue("execution_toolbar_position", safe)
 
-    def _restore_after_replay(self) -> None:
+    def _restore_run_environment(self) -> None:
         if self.execution_floating:
             self.execution_floating.close()
             self.execution_floating = None
-        if self.project.settings.hide_window_during_replay:
+        settings = self._active_run_settings
+        self._active_run_settings = None
+        if settings and settings.hide_window_during_replay:
             self.showMaximized() if self.replay_was_maximized else self.showNormal()
             self.raise_()
+
+    def _restore_after_replay(self) -> None:
+        """Compatibility wrapper used by existing UI tests and integrations."""
+        self._restore_run_environment()
 
     def _restore_details_after_run(self) -> None:
         self.editor_scroll.setVisible(self.details_were_visible_before_run)
@@ -1241,6 +1336,7 @@ class MainWindow(QMainWindow):
         if mode == "test":
             self.log(f"step {start + 1} test completed")
             QMessageBox.information(self, "Step Test", f"Step {start + 1} completed successfully in {elapsed:.2f} seconds.")
+            self._start_next_queued_flow()
             return
         self.log("automation completed")
         QMessageBox.information(
@@ -1248,6 +1344,7 @@ class MainWindow(QMainWindow):
             "Automation Completed",
             f"Automation completed\n\n{completed} completed\n{skipped} skipped\n0 failed\nDuration: {elapsed:.2f} seconds",
         )
+        self._start_next_queued_flow()
 
     def run_stopped(self) -> None:
         elapsed = time.monotonic() - self.run_started_at if self.run_started_at else 0.0
@@ -1255,24 +1352,34 @@ class MainWindow(QMainWindow):
         self.run_finished()
         self.log("automation stopped by user")
         QMessageBox.information(self, "Automation Stopped", f"Execution stopped at step {last_step}.\nDuration: {elapsed:.2f} seconds")
+        self._start_next_queued_flow()
 
     def run_failed(self, index: int, message: str) -> None:
         self.log(f"step failed: {message}")
+        failure_was_deferred = bool(
+            self.replay_worker and self.replay_worker.runner.had_continued_failures
+        )
         self.last_runtime_variables = dict(self.replay_worker.runner.runtime_variables) if self.replay_worker else {}
         self.run_finished()
         if index < 0 or index >= len(self.project.actions):
             show_error(self, "Automation stopped", message)
+            self._start_next_queued_flow()
             return
         self.table.selectRow(index)
-        self._show_actionable_failure(index, message)
+        self._show_actionable_failure(index, message, allow_skip=not failure_was_deferred)
+        self._start_next_queued_flow()
 
-    def _show_actionable_failure(self, index: int, message: str) -> None:
+    def _show_actionable_failure(self, index: int, message: str, allow_skip: bool = True) -> None:
         action = self.project.actions[index]
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle(f"Step {index + 1} needs attention")
         box.setText(message)
-        box.setInformativeText("Review the step, try a recovery option, or stop the automation.")
+        box.setInformativeText(
+            "Review the failed step and its recovery settings."
+            if not allow_skip else
+            "Review the step, try a recovery option, or stop the automation."
+        )
         test_button = None
         recapture_button = None
         original_button = None
@@ -1280,7 +1387,7 @@ class MainWindow(QMainWindow):
             test_button = box.addButton("Test Target", QMessageBox.ActionRole)
             recapture_button = box.addButton("Recapture Target", QMessageBox.ActionRole)
             original_button = box.addButton("Use Original Position", QMessageBox.ActionRole)
-        skip_button = box.addButton("Skip Step", QMessageBox.DestructiveRole)
+        skip_button = box.addButton("Skip Step", QMessageBox.DestructiveRole) if allow_skip else None
         box.addButton("Stop", QMessageBox.RejectRole)
         box.exec()
         clicked = box.clickedButton()
@@ -1292,7 +1399,7 @@ class MainWindow(QMainWindow):
             action.data["use_coordinate_fallback"] = True
             self.mark_dirty()
             QMessageBox.information(self, "Original Position Enabled", "This step will use its original click position when the target cannot be found.")
-        elif clicked is skip_button:
+        elif skip_button is not None and clicked is skip_button:
             action.status = "skipped"
             self.table.update_action(index, action)
             if self.run_mode != "test" and index < self.run_end_index:
@@ -1467,6 +1574,12 @@ class MainWindow(QMainWindow):
             self.table.selectRow(index)
             if status == "running":
                 self.log(f"[Step {index + 1}] Running: {self.project.actions[index].summary()}")
+                if self.execution_floating:
+                    self.execution_floating.set_status(f"Step {index + 1} · Running")
+                    self._position_execution_toolbar()
+            elif status == "failed" and self.execution_floating:
+                self.execution_floating.set_status(f"Step {index + 1} · Failed")
+                self._position_execution_toolbar()
             self.update_status("Running")
 
     def generate_python(self) -> None:

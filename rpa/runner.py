@@ -4,11 +4,12 @@ import subprocess
 import threading
 import time
 from contextlib import redirect_stdout
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
 
-from .image_matcher import wait_for_image
+from .image_matcher import screenshot_image, wait_for_image
 from .models import ActionType, RpaAction, RpaProject
 from .utils import MissingPlaceholderError, foreground_elevation_mismatch, resolve_placeholders_strict
 
@@ -41,6 +42,13 @@ class ReplayRunner:
         self._stop_event = threading.Event()
         self.runtime_variables: dict[str, Any] = dict(project.variables)
         self.excluded_regions = list(excluded_regions or [])
+        self.total_attempts = 0
+        self.current_index: int | None = None
+        self.had_continued_failures = False
+        self.first_failed_index: int | None = None
+        self.first_failure_error: str | None = None
+        self._step_deadline: float | None = None
+        self._best_image_confidence = 0.0
 
     def request_stop(self) -> None:
         self._stop_event.set()
@@ -53,7 +61,15 @@ class ReplayRunner:
         while time.monotonic() < deadline:
             if self.stop_requested():
                 raise StopReplay()
+            if self._step_timed_out():
+                raise TimeoutError("step timed out")
             time.sleep(min(0.05, deadline - time.monotonic()))
+
+    def _step_timed_out(self) -> bool:
+        return self._step_deadline is not None and time.monotonic() >= self._step_deadline
+
+    def _poll_cancelled(self) -> bool:
+        return self.stop_requested() or self._step_timed_out()
 
     def run(
         self,
@@ -62,6 +78,7 @@ class ReplayRunner:
         end_index: int | None = None,
         include_start_delay: bool = True,
         respect_enabled: bool = True,
+        retry_callback: Callable[[int, int, int, str], None] | None = None,
     ) -> None:
         gui = get_pyautogui()
         gui.FAILSAFE = self.project.settings.pyautogui_failsafe
@@ -74,13 +91,21 @@ class ReplayRunner:
         mismatch = foreground_elevation_mismatch()
         if mismatch:
             raise PermissionError(mismatch[1])
-        for index in range(start_index, end_index + 1):
+        index = start_index
+        transitions = 0
+        while index <= end_index:
+            transitions += 1
+            if transitions > max(1000, total * 100):
+                action = self.project.actions[index]
+                raise ReplayActionError(index, action, RuntimeError("failure jumps exceeded the safety limit"))
             action = self.project.actions[index]
+            self.current_index = index
             if self.stop_requested():
                 raise StopReplay()
             if respect_enabled and not action.enabled:
                 if action_callback:
                     action_callback(index, "skipped")
+                index += 1
                 continue
             if action_callback:
                 action_callback(index, "running")
@@ -92,29 +117,88 @@ class ReplayRunner:
             if action.action not in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value):
                 self.sleep_checked(action.delay_before)
             try:
-                self.run_action(action, self.runtime_variables, index + 1)
-            except MissingPlaceholderError as exc:
+                control_data = resolve_placeholders_strict(action.data, self.runtime_variables)
+            except MissingPlaceholderError:
+                control_data = action.data
+            retry_count = max(0, self._safe_int(control_data.get("retry_count", 0), 0))
+            retry_delay = max(0.0, self._safe_float(control_data.get("retry_delay", 1.0), 1.0))
+            step_timeout = max(0.0, self._safe_float(control_data.get("step_timeout", 0.0), 0.0))
+            max_attempts = retry_count + 1
+            final_error: Exception | None = None
+            self._best_image_confidence = 0.0
+            for attempt in range(1, max_attempts + 1):
+                self.total_attempts += 1
+                self.log(f"[Step {index + 1}] Attempt {attempt}/{max_attempts}")
+                self._step_deadline = time.monotonic() + step_timeout if step_timeout > 0 else None
+                try:
+                    self.run_action(
+                        action, self.runtime_variables, index + 1,
+                        allow_coordinate_fallback=(attempt == max_attempts),
+                    )
+                    if self._step_timed_out():
+                        raise TimeoutError("step timed out")
+                    final_error = None
+                    break
+                except MissingPlaceholderError as exc:
+                    final_error = ValueError(f"missing variable '{exc.variable}'")
+                except StopReplay:
+                    raise
+                except Exception as exc:
+                    final_error = self._friendly_runtime_error(exc)
+                finally:
+                    self._step_deadline = None
+                if attempt < max_attempts:
+                    reason = str(final_error)
+                    self.log(
+                        f"[Step {index + 1}] Retry {attempt + 1}/{max_attempts} in {retry_delay:.2f}s: {reason}"
+                    )
+                    if retry_callback:
+                        retry_callback(index, attempt + 1, max_attempts, reason)
+                    self.sleep_checked(retry_delay)
+            if final_error is not None:
                 if action_callback:
                     action_callback(index, "failed")
-                error = ValueError(f"missing variable '{exc.variable}'")
-                raise ReplayActionError(index, action, error) from exc
-            except StopReplay:
-                raise
-            except Exception as exc:
-                if action_callback:
-                    action_callback(index, "failed")
-                friendly = self._friendly_runtime_error(exc)
-                raise ReplayActionError(index, action, friendly) from exc
+                failure_message = str(final_error)
+                screenshot_path = self._capture_failure_screenshot(action, index)
+                if screenshot_path:
+                    failure_message = f"{failure_message} (failure screenshot: {screenshot_path})"
+                failure_action = str(control_data.get("failure_action", "stop")).strip().lower()
+                if failure_action in {"continue", "jump"}:
+                    self.had_continued_failures = True
+                    if self.first_failed_index is None:
+                        self.first_failed_index = index
+                        self.first_failure_error = failure_message
+                    self.log(f"[Step {index + 1}] Final failure: {failure_message}")
+                    if failure_action == "jump":
+                        jump_step = self._safe_int(control_data.get("failure_jump_step", 0), 0)
+                        jump_index = jump_step - 1
+                        if not start_index <= jump_index <= end_index:
+                            raise ReplayActionError(
+                                index, action, ValueError(f"jump target Step {jump_step} is outside this run range")
+                            )
+                        self.log(f"[Step {index + 1}] Jumping to Step {jump_step}")
+                        index = jump_index
+                        continue
+                    index += 1
+                    continue
+                raise ReplayActionError(index, action, RuntimeError(failure_message))
             if action_callback:
                 action_callback(index, "completed")
             self.log(f"action completed: {index + 1} {action.action}")
+            index += 1
         self.log("replay completed")
 
-    def run_action(self, action: RpaAction, variables: dict[str, Any] | None = None, step_number: int = 1) -> None:
+    def run_action(
+        self,
+        action: RpaAction,
+        variables: dict[str, Any] | None = None,
+        step_number: int = 1,
+        allow_coordinate_fallback: bool = True,
+    ) -> None:
         variables = self.runtime_variables if variables is None else variables
         data = resolve_placeholders_strict(action.data, variables)
         if action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value):
-            self._click_image(action, data)
+            self._click_image(action, data, allow_coordinate_fallback)
         elif action.action == ActionType.TYPE_TEXT.value:
             gui = get_pyautogui()
             if data.get("clear_first"):
@@ -155,6 +239,8 @@ class ReplayRunner:
     def run_python_code(self, action: RpaAction, data: dict[str, Any], variables: dict[str, Any], step_number: int) -> str:
         if self.stop_requested():
             raise StopReplay()
+        if self._step_timed_out():
+            raise TimeoutError("step timed out")
         code = str(data.get("code", ""))
         if not code.strip():
             raise ValueError(f"Step {step_number} {action.friendly_name()}: code is required")
@@ -177,6 +263,8 @@ class ReplayRunner:
                 raise RuntimeError(f"Step {step_number} {action.friendly_name()}: {exc}") from exc
         if self.stop_requested():
             raise StopReplay()
+        if self._step_timed_out():
+            raise TimeoutError("step timed out")
         text = output.getvalue().strip()
         if text:
             self.log(text)
@@ -185,6 +273,8 @@ class ReplayRunner:
     def _check_stop_for_code(self) -> bool:
         if self.stop_requested():
             raise StopReplay()
+        if self._step_timed_out():
+            raise TimeoutError("step timed out")
         return False
 
     def _friendly_runtime_error(self, exc: Exception) -> Exception:
@@ -195,18 +285,26 @@ class ReplayRunner:
             )
         return exc
 
-    def _click_image(self, action: RpaAction, data: dict) -> None:
+    def _click_image(self, action: RpaAction, data: dict, allow_coordinate_fallback: bool = True) -> None:
         image_path = self.project_dir / str(data.get("image", ""))
         required_confidence = float(data.get("confidence", self.project.settings.default_confidence))
         match = wait_for_image(
             image_path,
             required_confidence,
             float(data.get("timeout", self.project.settings.default_timeout)),
-            self.stop_requested,
+            self._poll_cancelled,
             excluded_regions=self.excluded_regions,
         )
         if self.stop_requested():
             raise StopReplay()
+        self._best_image_confidence = max(
+            self._best_image_confidence, float(getattr(match, "confidence", 0.0) or 0.0),
+        )
+        if self._step_timed_out():
+            raise TimeoutError(
+                "step timed out while searching for the image target; "
+                f"best confidence={self._best_image_confidence:.3f}, required={required_confidence:.3f}"
+            )
         if match.found:
             self.log(
                 f"image match: confidence={match.confidence:.3f} (required {required_confidence:.3f}), "
@@ -222,11 +320,40 @@ class ReplayRunner:
             f"image match: no match found, best confidence={getattr(match, 'confidence', 0.0):.3f} "
             f"(required {required_confidence:.3f}), search time={getattr(match, 'duration', 0.0):.2f}s"
         )
-        if data.get("use_coordinate_fallback", True):
+        if allow_coordinate_fallback and data.get("use_coordinate_fallback", True):
             self.sleep_checked(float(data.get("pre_click_pause", self.project.settings.pre_click_pause)))
             get_pyautogui().click(int(data.get("fallback_x", 0)), int(data.get("fallback_y", 0)), button=str(data.get("button", "left")))
             return
-        raise FileNotFoundError(f"Image not found: {image_path}")
+        raise FileNotFoundError(
+            f"Image not found: {image_path}; best confidence={self._best_image_confidence:.3f}, "
+            f"required={required_confidence:.3f}"
+        )
+
+    def _capture_failure_screenshot(self, action: RpaAction, index: int) -> str | None:
+        if not action.data.get("capture_failure_screenshot", False):
+            return None
+        try:
+            target_dir = self.project_dir / "logs" / "failures"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            path = target_dir / f"step_{index + 1}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
+            screenshot_image().save(path, "PNG")
+            self.log(f"[Step {index + 1}] Failure screenshot saved: {path}")
+            return str(path)
+        except Exception as exc:
+            self.log(f"[Step {index + 1}] Could not save failure screenshot: {exc}")
+            return None
+
+    def _safe_int(self, value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    def _safe_float(self, value: Any, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
 
 
 def get_pyautogui():

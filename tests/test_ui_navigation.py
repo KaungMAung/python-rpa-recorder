@@ -139,6 +139,21 @@ def test_execution_toolbar_uses_safe_saved_position(monkeypatch) -> None:
             window.settings.setValue("execution_toolbar_position", previous)
 
 
+def test_shared_run_lifecycle_prepares_desktop_and_restores_window(monkeypatch) -> None:
+    window = window_with_actions()
+    prepared: list[bool] = []
+    monkeypatch.setattr(window, "_show_windows_desktop", lambda: prepared.append(True))
+    window._prepare_run_environment(window.project.settings, "Running scheduled flow")
+    app().processEvents()
+    assert prepared == [True]
+    assert window.execution_floating is not None and window.execution_floating.isVisible()
+    assert not window.isVisible()
+    window._restore_run_environment()
+    app().processEvents()
+    assert window.execution_floating is None
+    assert window.isVisible()
+
+
 def test_undo_redo_restores_step_edits() -> None:
     window = window_with_actions()
     window._reset_history()
@@ -311,16 +326,20 @@ def test_click_image_picker_keeps_parent_open_until_add_step(tmp_path, monkeypat
 
 
 def test_startup_reopens_last_saved_flow(tmp_path) -> None:
+    app()
     project = RpaProject(actions=[RpaAction(ActionType.WAIT.value, {"seconds": 1})])
     ProjectManager().save(project, tmp_path)
     settings = QSettings("PythonRPARecorder", "PythonRPARecorder")
     previous = settings.value("last_project_path")
     settings.setValue("last_project_path", str(tmp_path / "project.json"))
+    window = None
     try:
         window = MainWindow()
         assert window.project_dir == tmp_path
         assert len(window.project.actions) == 1
     finally:
+        if window is not None:
+            window.close()
         if previous is None:
             settings.remove("last_project_path")
         else:

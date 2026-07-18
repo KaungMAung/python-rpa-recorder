@@ -110,7 +110,7 @@ def test_run_history_is_started_then_finalized_with_failed_step() -> None:
     assert schedule.history[0].status == STATUS_RUNNING
     assert schedule.history[0].finished_at is None
 
-    mark_finished(schedule, STATUS_FAILED, finished, error="target missing", failed_step=4)
+    mark_finished(schedule, STATUS_FAILED, finished, error="target missing", failed_step=4, attempts=3)
     assert len(schedule.history) == 1
     entry = schedule.history[0]
     assert entry.started_at == started.isoformat()
@@ -119,6 +119,7 @@ def test_run_history_is_started_then_finalized_with_failed_step() -> None:
     assert entry.status == STATUS_FAILED
     assert entry.failed_step == 4
     assert entry.error == "target missing"
+    assert entry.attempts == 3
 
 
 def test_mark_finished_clears_error_on_success_after_previous_failure() -> None:

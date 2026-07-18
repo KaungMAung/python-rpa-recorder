@@ -276,8 +276,8 @@ class ScheduleFlowsDialog(QDialog):
         history_heading.addWidget(self.history_filter)
         layout.addLayout(history_heading)
 
-        self.history_table = QTableWidget(0, 6)
-        self.history_table.setHorizontalHeaderLabels(["Started", "Ended", "Duration", "Result", "Failed step", "Error"])
+        self.history_table = QTableWidget(0, 7)
+        self.history_table.setHorizontalHeaderLabels(["Started", "Ended", "Duration", "Attempts", "Result", "Failed step", "Error"])
         self.history_table.verticalHeader().setVisible(False)
         self.history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.history_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -290,7 +290,8 @@ class ScheduleFlowsDialog(QDialog):
         history_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         history_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         history_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        history_header.setSectionResizeMode(5, QHeaderView.Stretch)
+        history_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        history_header.setSectionResizeMode(6, QHeaderView.Stretch)
         self.history_table.setMinimumHeight(150)
         layout.addWidget(self.history_table, 1)
 
@@ -622,11 +623,12 @@ class ScheduleFlowsDialog(QDialog):
             ended = self._readonly_item(self._format_time(entry.finished_at))
             ended.setToolTip(self._exact_time(entry.finished_at))
             duration = self._readonly_item(self._format_duration(entry.duration_seconds))
+            attempts = self._readonly_item(str(entry.attempts) if entry.attempts is not None else "-")
             result = self._badge_item(self._badge_name(entry.status), entry.status)
             failed_step = self._readonly_item(f"Step {entry.failed_step}" if entry.failed_step is not None else "-")
             error = self._readonly_item(entry.error or "-")
             error.setToolTip(entry.error or "No error")
-            for column, item in enumerate((started, ended, duration, result, failed_step, error)):
+            for column, item in enumerate((started, ended, duration, attempts, result, failed_step, error)):
                 self.history_table.setItem(row, column, item)
 
     def _history_status_matches(self, status: str, wanted: str) -> bool:
