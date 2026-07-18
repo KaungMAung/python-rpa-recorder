@@ -7,6 +7,7 @@ from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QMenu, QTableWidget, QTableWidgetItem
 
 from rpa.models import ActionStatus, RpaAction
+from rpa.control_flow import CONTROL_TYPES, parse_control_flow
 
 
 STATUS_COLORS = {
@@ -27,6 +28,10 @@ class ActionTable(QTableWidget):
     def __init__(self) -> None:
         super().__init__(0, len(self.HEADERS))
         self._columns_initialized = False
+        self._actions: list[RpaAction] = []
+        self._flow = parse_control_flow([])
+        self._collapsed_action_ids: set[str] = set()
+        self._filter_text = ""
         self.setHorizontalHeaderLabels(self.HEADERS)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -40,6 +45,7 @@ class ActionTable(QTableWidget):
         )
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._context_menu)
+        self.cellClicked.connect(self._cell_clicked)
         self.verticalHeader().setVisible(False)
         header = self.horizontalHeader()
         # Every column stays user-resizable (Interactive), except "What it does"
@@ -53,6 +59,10 @@ class ActionTable(QTableWidget):
         self.setToolTip("Select a step to review it. Right-click for step commands.")
 
     def set_actions(self, actions: list[RpaAction]) -> None:
+        self._actions = actions
+        self._flow = parse_control_flow(actions)
+        valid_ids = {actions[row].id for row in self._flow.group_ends}
+        self._collapsed_action_ids.intersection_update(valid_ids)
         self.blockSignals(True)
         self.setRowCount(len(actions))
         for row, action in enumerate(actions):
@@ -67,10 +77,13 @@ class ActionTable(QTableWidget):
             self._columns_initialized = True
 
     def apply_filter(self, text: str) -> None:
+        self._filter_text = text
         text = text.strip().lower()
         for row in range(self.rowCount()):
             haystack = " ".join(self.item(row, col).text() for col in range(self.columnCount()) if self.item(row, col)).lower()
-            self.setRowHidden(row, bool(text and text not in haystack))
+            filtered = bool(text and text not in haystack)
+            collapsed = not text and self._row_is_collapsed(row)
+            self.setRowHidden(row, filtered or collapsed)
 
     def update_action(self, row: int, action: RpaAction) -> None:
         if row < 0 or row >= self.rowCount():
@@ -80,10 +93,15 @@ class ActionTable(QTableWidget):
         self.blockSignals(False)
 
     def _set_row(self, row: int, action: RpaAction) -> None:
+        depth = self._flow.depths[row] if row < len(self._flow.depths) else 0
+        group = row in self._flow.group_ends
+        expanded = action.id not in self._collapsed_action_ids
+        step_text = f"{'▾' if expanded else '▸'} {row + 1}" if group else str(row + 1)
+        indent = "    " * depth
         values = [
-            str(row + 1),
-            action.friendly_name(),
-            action.summary(),
+            step_text,
+            indent + action.friendly_name(),
+            indent + action.summary(),
             f"{action.delay_before:.2f} s",
             Path(str(action.data.get("image", ""))).name,
             self._status_text(action),
@@ -94,6 +112,10 @@ class ActionTable(QTableWidget):
                 font = QFont(item.font())
                 font.setBold(True)
                 item.setFont(font)
+            if action.action in CONTROL_TYPES:
+                item.setBackground(QColor("#eef6ff"))
+                if col in (1, 2):
+                    font = QFont(item.font()); font.setBold(True); item.setFont(font)
             if col == 5:
                 color = STATUS_COLORS[ActionStatus.SKIPPED.value] if not action.enabled else STATUS_COLORS.get(action.status, STATUS_COLORS[ActionStatus.PENDING.value])
                 item.setForeground(QColor(color))
@@ -104,6 +126,27 @@ class ActionTable(QTableWidget):
             elif col == 3:
                 item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.setItem(row, col, item)
+
+    def _row_is_collapsed(self, row: int) -> bool:
+        for opener, closer in self._flow.group_ends.items():
+            if (
+                0 <= opener < len(self._actions)
+                and opener < row <= closer
+                and self._actions[opener].id in self._collapsed_action_ids
+            ):
+                return True
+        return False
+
+    def _cell_clicked(self, row: int, column: int) -> None:
+        if column != 0 or row not in self._flow.group_ends or not 0 <= row < len(self._actions):
+            return
+        action_id = self._actions[row].id
+        if action_id in self._collapsed_action_ids:
+            self._collapsed_action_ids.remove(action_id)
+        else:
+            self._collapsed_action_ids.add(action_id)
+        self._set_row(row, self._actions[row])
+        self.apply_filter(self._filter_text)
 
     def _status_text(self, action: RpaAction) -> str:
         if not action.enabled:

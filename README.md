@@ -91,6 +91,16 @@ For clicks, choose coordinate-only execution or capture/select an image target. 
 
 During Run, Run From Here, Run Until Here, Test Step, and scheduled execution, the recorder hides by default, Windows shows the desktop (minimizing other windows), and a floating **Stop Run** control remains available. The recorder is restored when execution ends; other windows remain minimized. Turn this behavior off in Settings with **Hide recorder while running**.
 
+## Visual Conditions and Loops
+
+Add logic from **Add Step** without writing Python. Available condition blocks are **If Image Exists**, **If Image Does Not Exist**, **If Window Exists**, **If File or Folder Exists**, and **If Variable** with Equals, Contains, and Is Empty comparisons. Add **Else** inside an If block when an alternative branch is needed. Loop blocks support **Repeat N Times**, **Repeat Until**, and **Break Loop**.
+
+Adding an If or Repeat opener automatically adds its matching **End If** or **End Loop**, preventing an incomplete new block. Insert Else or Break Loop at a selected position inside the appropriate block; invalid placement is rejected with a clear explanation. Nested blocks are indented in the step list. Click the disclosure arrow in the Step column to collapse or expand a block; searching temporarily searches all nested rows.
+
+Repeat Until always has a configurable maximum-iteration safety limit and optional interruptible delay. Validation blocks orphaned Else/End markers, missing closers, Break outside a loop, disabled structural markers, run ranges that cut through blocks, and failure jumps that cross or target control boundaries. Very large iteration limits are reported as warnings. **Stop Run** interrupts loop delays and image-condition checks promptly.
+
+During a run, condition outcomes, selected branches, loop iterations, completion, and breaks appear in the Logs/Status view and floating runner. The same results are stored per step in execution evidence and shown in Run Details under **Branch / Loop Result**. Generated Python emits normal readable `if`/`else` and `for` control structures and preserves the same variable, window, file/folder, and image conditions.
+
 ## Retries and Failure Handling
 
 Every step has compatible defaults of zero retries and **Stop Flow** on failure. Expand **Advanced Settings** to configure additional retry attempts, the interruptible delay between retries, an optional step timeout, and the final failure action:
@@ -105,7 +115,7 @@ App runs automatically save a full-screen screenshot on final step failure insid
 
 Use **Validate** in the Review toolbar or **Validate Flow** in the Execution menu before running. Run, Test Step, Run From Here, Run Until Here, Python generation, and scheduled execution also validate automatically.
 
-Validation checks required fields, variables, screenshots and file/application paths, coordinate data, image confidence/timeouts, Python syntax, action types, IDs, and other runtime values. Results appear in the Validation tab as `Error`, `Warning`, or `Info`, with the step number, step name, and reason. Double-click a result to clear the step filter, select the affected step, and scroll it into view. Errors block execution. Interactive warnings require confirmation; unattended scheduled runs record warnings in the log and continue, while validation errors are stored as failed schedule history.
+Validation checks required fields, variables, screenshots and file/application paths, coordinate data, image confidence/timeouts, control-block nesting and loop safety, Python syntax, action types, IDs, and other runtime values. Results appear in the Validation tab as `Error`, `Warning`, or `Info`, with the step number, step name, and reason. Double-click a result to clear the step filter, select the affected step, and scroll it into view. Errors block execution. Interactive warnings require confirmation; unattended scheduled runs record warnings in the log and continue, while validation errors are stored as failed schedule history.
 
 ## Log Viewer
 
@@ -258,6 +268,7 @@ Run these checks on the same Windows account and display configuration that will
 
 1. Click `Generate`, open `generated\generated_rpa.py`, and confirm each enabled step appears explicitly in the same order.
 2. Run `generated\run_generated.ps1` and verify the Notepad workflow completes before the `Flow completed` message appears.
+3. Add a nested If/Else inside Repeat N Times, generate again, and confirm the script contains readable nested `if`/`else` and `for` statements and produces the same branch/iteration results as the desktop runner.
 3. Repeat from the packaged application folder on a Windows PC without Python installed to verify the generated runner locates `PythonRPARecorder.exe`.
 
 ## Troubleshooting

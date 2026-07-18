@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from rpa.models import ActionType, ProjectSettings, RpaAction, RpaProject, RuntimeInputDefinition
 from rpa.variables import INPUT_TYPES, VARIABLE_NAME_PATTERN, validate_variable_configuration
+from ui.condition_editor import ConditionEditor
 
 
 def load_default_project_settings() -> ProjectSettings:
@@ -75,6 +76,17 @@ class ManualActionDialog(QDialog):
             ("Open File", ActionType.OPEN_FILE.value),
             ("Run Python", ActionType.RUN_PYTHON.value),
             ("Python Code", ActionType.PYTHON_CODE.value),
+            ("If Image Exists", ActionType.IF_IMAGE_EXISTS.value),
+            ("If Image Does Not Exist", ActionType.IF_IMAGE_NOT_EXISTS.value),
+            ("If Window Exists", ActionType.IF_WINDOW_EXISTS.value),
+            ("If File or Folder Exists", ActionType.IF_PATH_EXISTS.value),
+            ("If Variable", ActionType.IF_VARIABLE.value),
+            ("Else", ActionType.ELSE.value),
+            ("End If", ActionType.END_IF.value),
+            ("Repeat N Times", ActionType.REPEAT_COUNT.value),
+            ("Repeat Until", ActionType.REPEAT_UNTIL.value),
+            ("End Loop", ActionType.END_LOOP.value),
+            ("Break Loop", ActionType.BREAK_LOOP.value),
         ]:
             self.type_box.addItem(label, value)
         self.form = QFormLayout()
@@ -182,6 +194,43 @@ class ManualActionDialog(QDialog):
         elif kind == ActionType.HOTKEY.value:
             self.keys = QLineEdit("ctrl+s"); self.keys.setToolTip("Separate keys with +, for example Ctrl+Shift+S")
             self.form.addRow("Shortcut", self.keys)
+        elif kind in {
+            ActionType.IF_IMAGE_EXISTS.value, ActionType.IF_IMAGE_NOT_EXISTS.value,
+            ActionType.IF_WINDOW_EXISTS.value, ActionType.IF_PATH_EXISTS.value,
+            ActionType.IF_VARIABLE.value,
+        }:
+            fixed = {
+                ActionType.IF_IMAGE_EXISTS.value: "image_exists",
+                ActionType.IF_IMAGE_NOT_EXISTS.value: "image_not_exists",
+                ActionType.IF_WINDOW_EXISTS.value: "window_exists",
+                ActionType.IF_PATH_EXISTS.value: "path_exists",
+                ActionType.IF_VARIABLE.value: "variable",
+            }[kind]
+            self.condition_editor = ConditionEditor(fixed_type=fixed, variables=self.variables)
+            self.condition_editor.changed.connect(self._update_summary)
+            self.form.addRow(self.condition_editor)
+        elif kind == ActionType.REPEAT_COUNT.value:
+            self.repeat_count = QSpinBox(); self.repeat_count.setRange(0, 10000); self.repeat_count.setValue(3)
+            self.repeat_count.setToolTip("Use 0 to skip the block")
+            self.repeat_count.valueChanged.connect(self._update_summary)
+            self.form.addRow("Number of times", self.repeat_count)
+        elif kind == ActionType.REPEAT_UNTIL.value:
+            self.condition_editor = ConditionEditor(variables=self.variables)
+            self.condition_editor.changed.connect(self._update_summary)
+            self.max_iterations = QSpinBox(); self.max_iterations.setRange(1, 10000); self.max_iterations.setValue(1000)
+            self.iteration_delay = QDoubleSpinBox(); self.iteration_delay.setRange(0, 3600); self.iteration_delay.setDecimals(2)
+            self.condition_editor.changed.connect(self._update_summary)
+            self.form.addRow(self.condition_editor)
+            self.form.addRow("Safety limit", self.max_iterations)
+            self.form.addRow("Delay between loops", self.iteration_delay)
+        elif kind in {ActionType.ELSE.value, ActionType.END_IF.value, ActionType.END_LOOP.value, ActionType.BREAK_LOOP.value}:
+            note = QLabel({
+                ActionType.ELSE.value: "Starts the alternative branch of the nearest If block.",
+                ActionType.END_IF.value: "Closes the nearest If block.",
+                ActionType.END_LOOP.value: "Closes the nearest Repeat block.",
+                ActionType.BREAK_LOOP.value: "Leaves the nearest Repeat block immediately.",
+            }[kind])
+            note.setWordWrap(True); self.form.addRow(note)
         else:
             self.form.addRow(QLabel("This advanced step can be edited after insertion."))
         self._update_summary()
@@ -231,6 +280,19 @@ class ManualActionDialog(QDialog):
             return "Choose or enter a key to press."
         if action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value) and not str(data.get("image", "")).strip():
             return "Use Pick on Screen or Choose Image to set the target image."
+        if action.action in {ActionType.IF_IMAGE_EXISTS.value, ActionType.IF_IMAGE_NOT_EXISTS.value} and not str(data.get("image", "")).strip():
+            return "Choose an image for this condition."
+        if action.action == ActionType.IF_WINDOW_EXISTS.value and not str(data.get("window_title", "")).strip():
+            return "Enter part of the window title."
+        if action.action == ActionType.IF_PATH_EXISTS.value and not str(data.get("path", "")).strip():
+            return "Choose or enter a file or folder path."
+        if action.action == ActionType.IF_VARIABLE.value and not str(data.get("variable", "")).strip():
+            return "Choose a variable to compare."
+        if action.action == ActionType.REPEAT_UNTIL.value:
+            condition_type = str(data.get("condition_type", "variable"))
+            required_key = {"variable": "variable", "window_exists": "window_title", "path_exists": "path"}.get(condition_type, "image")
+            if not str(data.get(required_key, "")).strip():
+                return "Complete the Repeat Until condition."
         return None
 
     def _confirm(self) -> None:
@@ -279,6 +341,21 @@ class ManualActionDialog(QDialog):
             return RpaAction(kind, {"key": self.key.currentText().strip(), "count": 1, "interval": 0.0})
         if kind == ActionType.HOTKEY.value:
             return RpaAction(kind, {"keys": [part.strip().lower() for part in self.keys.text().split("+") if part.strip()]})
+        if kind in {
+            ActionType.IF_IMAGE_EXISTS.value, ActionType.IF_IMAGE_NOT_EXISTS.value,
+            ActionType.IF_WINDOW_EXISTS.value, ActionType.IF_PATH_EXISTS.value,
+            ActionType.IF_VARIABLE.value,
+        }:
+            return RpaAction(kind, self.condition_editor.data())
+        if kind == ActionType.REPEAT_COUNT.value:
+            return RpaAction(kind, {"count": self.repeat_count.value()})
+        if kind == ActionType.REPEAT_UNTIL.value:
+            return RpaAction(kind, {
+                **self.condition_editor.data(), "max_iterations": self.max_iterations.value(),
+                "iteration_delay": self.iteration_delay.value(),
+            })
+        if kind in {ActionType.ELSE.value, ActionType.END_IF.value, ActionType.END_LOOP.value, ActionType.BREAK_LOOP.value}:
+            return RpaAction(kind, {})
         defaults = {
             ActionType.WAIT.value: {"seconds": 1.0},
             ActionType.TYPE_TEXT.value: {"text": "", "interval": 0.02, "clear_first": False, "masked": False},

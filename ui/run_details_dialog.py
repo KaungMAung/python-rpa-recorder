@@ -1,6 +1,7 @@
 """Human-readable view of a persisted execution evidence folder."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from PySide6.QtCore import QUrl
@@ -42,7 +43,7 @@ class RunDetailsDialog(QDialog):
         layout.addLayout(buttons)
 
         tabs = QTabWidget()
-        self.steps_table = self._table(["Step", "Name", "Status", "Duration", "Attempts", "Error"])
+        self.steps_table = self._table(["Step", "Name", "Status", "Duration", "Attempts", "Branch / Loop Result", "Error"])
         self.validation_table = self._table(["Level", "Step", "Step name", "Reason"])
         self.inputs_table = self._table(["Runtime input", "Value"])
         tabs.addTab(self.steps_table, "Step Results")
@@ -99,7 +100,8 @@ class RunDetailsDialog(QDialog):
             values = (
                 step.get("step_number", "—"), step.get("step_name", "—"), step.get("status", "—"),
                 f"{float(duration):.2f}s" if isinstance(duration, (int, float)) else "—",
-                step.get("attempts", 0), step.get("error") or "—",
+                step.get("attempts", 0), self._control_result_text(step.get("control_result")),
+                step.get("error") or "—",
             )
             for column, value in enumerate(values):
                 self.steps_table.setItem(row, column, QTableWidgetItem(str(value)))
@@ -114,6 +116,18 @@ class RunDetailsDialog(QDialog):
         for row, (name, value) in enumerate(sorted(inputs.items())):
             self.inputs_table.setItem(row, 0, QTableWidgetItem(str(name)))
             self.inputs_table.setItem(row, 1, QTableWidgetItem(str(value)))
+
+    @staticmethod
+    def _control_result_text(result) -> str:
+        if not result:
+            return "—"
+        if not isinstance(result, dict):
+            return str(result)
+        values = []
+        for key in ("branch", "evaluated", "iteration", "iterations", "limit", "condition", "selected", "reason"):
+            if key in result:
+                values.append(f"{key.replace('_', ' ')}: {result[key]}")
+        return ", ".join(values) or json.dumps(result, ensure_ascii=False)
 
     def _open_path(self, path: Path) -> None:
         if not path.exists():

@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from rpa.generator import generate_python
+from rpa.control_flow import IF_TYPES, LOOP_TYPES, CONTROL_TYPES, parse_control_flow
 from rpa.evidence import RunEvidenceSession
 from rpa.image_matcher import find_image, save_crop_from_image, screenshot_image, virtual_screen_origin
 from rpa.models import ActionType, ProjectSettings, RecorderState, RpaAction, RpaProject
@@ -99,6 +100,7 @@ def sanitize_flow_name(name: str) -> str:
 class ReplayWorker(QObject):
     action_status = Signal(int, str)
     retry_progress = Signal(int, int, int, str)
+    control_progress = Signal(int, str)
     log = Signal(str)
     finished = Signal()
     failed = Signal(int, str)
@@ -135,6 +137,7 @@ class ReplayWorker(QObject):
                 self.include_start_delay,
                 self.respect_enabled,
                 self.retry_progress.emit,
+                self.control_progress.emit,
             )
             if self.runner.had_continued_failures:
                 self.failed.emit(
@@ -523,6 +526,12 @@ class MainWindow(QMainWindow):
         self.recorder_failed.connect(self._recorder_failed)
 
     def refresh(self) -> None:
+        self.editor.set_available_variables(
+            set(self.project.variables)
+            | set(self.project.runtime_inputs)
+            | set(self.project.output_variables)
+            | {"RUN_DATE", "CLIPBOARD_TEXT", "LAST_CLICK_X", "LAST_CLICK_Y"}
+        )
         self.table.set_actions(self.project.actions)
         self.table.apply_filter(self.filter_box.text())
         has_actions = bool(self.project.actions)
@@ -1143,6 +1152,8 @@ class MainWindow(QMainWindow):
         worker.action_status.connect(self._scheduled_action_status)
         if hasattr(worker, "retry_progress"):
             worker.retry_progress.connect(self._scheduled_retry_progress)
+        if hasattr(worker, "control_progress"):
+            worker.control_progress.connect(self._scheduled_control_progress)
         worker.finished.connect(self._scheduled_run_success)
         worker.stopped.connect(self._scheduled_run_stopped)
         worker.failed.connect(self._scheduled_run_failed)
@@ -1186,6 +1197,13 @@ class MainWindow(QMainWindow):
         flow_name = getattr(worker, "flow_name", "")
         if self.execution_floating:
             self.execution_floating.set_status(f"{flow_name} · Step {index + 1} · Retry {attempt}/{total}")
+            self._position_execution_toolbar()
+
+    def _scheduled_control_progress(self, index: int, message: str) -> None:
+        worker = self.sender()
+        flow_name = getattr(worker, "flow_name", "")
+        if self.execution_floating:
+            self.execution_floating.set_status(f"{flow_name} · Step {index + 1} · {message}")
             self._position_execution_toolbar()
 
     def _scheduled_run_success(self) -> None:
@@ -1374,6 +1392,7 @@ class MainWindow(QMainWindow):
         self.replay_thread.started.connect(self.replay_worker.run)
         self.replay_worker.action_status.connect(self.set_action_status)
         self.replay_worker.retry_progress.connect(self._retry_progress)
+        self.replay_worker.control_progress.connect(self._control_progress)
         self.replay_worker.log.connect(self.log)
         self.replay_worker.finished.connect(self.run_completed)
         self.replay_worker.stopped.connect(self.run_stopped)
@@ -1417,6 +1436,11 @@ class MainWindow(QMainWindow):
     def _retry_progress(self, index: int, attempt: int, total: int, _reason: str) -> None:
         if self.execution_floating:
             self.execution_floating.set_status(f"Step {index + 1} · Retry {attempt}/{total}")
+            self._position_execution_toolbar()
+
+    def _control_progress(self, index: int, message: str) -> None:
+        if self.execution_floating:
+            self.execution_floating.set_status(f"Step {index + 1} · {message}")
             self._position_execution_toolbar()
 
     def run_finished(self) -> None:
@@ -1830,7 +1854,8 @@ class MainWindow(QMainWindow):
         self._materialize_manual_image(action)
         if action.action == ActionType.PYTHON_CODE.value and not self.confirm_python_code_warning():
             return
-        self.insert_action(action, position)
+        if not self.insert_action(action, position):
+            return
         self.log(f"[Add Step] project steps: {before_count} -> {len(self.project.actions)}")
         self.update_status("Manual step added")
 
@@ -1917,7 +1942,7 @@ class MainWindow(QMainWindow):
             self.log(f"[Image Picker] closed: {result}")
             self.log("[Add Step] still open")
 
-    def insert_action(self, action: RpaAction, position: str | None = None) -> None:
+    def insert_action(self, action: RpaAction, position: str | None = None) -> bool:
         index = self.table.selected_index()
         if index < 0:
             insert_at = len(self.project.actions)
@@ -1925,7 +1950,23 @@ class MainWindow(QMainWindow):
             insert_at = index
         else:
             insert_at = index + 1
-        self.project.actions.insert(insert_at, action)
+        inserted = [action]
+        if action.action in IF_TYPES:
+            inserted.append(RpaAction(ActionType.END_IF.value, {}))
+        elif action.action in LOOP_TYPES:
+            inserted.append(RpaAction(ActionType.END_LOOP.value, {}))
+        prospective = self.project.actions[:insert_at] + inserted + self.project.actions[insert_at:]
+        structure = parse_control_flow(prospective)
+        if action.action in CONTROL_TYPES and structure.issues:
+            reason = structure.issues[0].reason
+            show_error(
+                self,
+                "Cannot insert control step",
+                f"This would create an invalid block: {reason}. Select a position inside the matching block and try again.",
+            )
+            self.log(f"[Add Step] control step rejected: {reason}")
+            return False
+        self.project.actions[insert_at:insert_at] = inserted
         self.mark_dirty()
         # A filtered list can otherwise make a successfully added step appear
         # to vanish. Show the new work immediately and select it for review.
@@ -1935,35 +1976,69 @@ class MainWindow(QMainWindow):
         self.table.selectRow(insert_at)
         self.table.scrollToItem(self.table.item(insert_at, 0))
         self.log(f"[Add Step] table refreshed to {self.table.rowCount()} rows; selected step {insert_at + 1}")
+        if len(inserted) == 2:
+            self.log(f"[Add Step] added matching {inserted[1].summary()} at Step {insert_at + 2}")
+        return True
 
     def delete_action(self) -> None:
         indices = self.table.selected_indices()
         if indices:
             index = indices[0]
-            for selected in reversed(indices):
+            flow = parse_control_flow(self.project.actions)
+            expanded = set(indices)
+            for selected in indices:
+                if selected in flow.group_ends and self.project.actions[selected].action in IF_TYPES | LOOP_TYPES:
+                    expanded.update(range(selected, flow.group_ends[selected] + 1))
+            prospective = [item for row, item in enumerate(self.project.actions) if row not in expanded]
+            issues = parse_control_flow(prospective).issues
+            if issues:
+                show_error(
+                    self, "Cannot delete part of a block",
+                    f"{issues[0].reason}. Select the If or Repeat row to delete its entire block.",
+                )
+                return
+            for selected in sorted(expanded, reverse=True):
                 del self.project.actions[selected]
             self.mark_dirty()
             self.refresh()
             if self.project.actions:
                 self.table.selectRow(min(index, len(self.project.actions) - 1))
-            self.log(f"deleted {len(indices)} step{'s' if len(indices) != 1 else ''}")
+            self.log(f"deleted {len(expanded)} step{'s' if len(expanded) != 1 else ''}")
 
     def duplicate_action(self) -> None:
         index = self.table.selected_index()
         if index < 0:
             return
-        clone = RpaAction.from_dict(deepcopy(self.project.actions[index].to_dict()))
-        clone.id = ""
-        clone = RpaAction(clone.action, deepcopy(clone.data), name=clone.name, enabled=clone.enabled, delay_before=clone.delay_before, recorded_delay=clone.recorded_delay)
-        self.project.actions.insert(index + 1, clone)
+        flow = parse_control_flow(self.project.actions)
+        source = self.project.actions[index]
+        if source.action in IF_TYPES | LOOP_TYPES and index in flow.group_ends:
+            source_actions = self.project.actions[index:flow.group_ends[index] + 1]
+            insert_at = flow.group_ends[index] + 1
+        elif source.action in CONTROL_TYPES:
+            show_error(self, "Cannot duplicate control marker", "Select the opening If or Repeat row to duplicate the complete block.")
+            return
+        else:
+            source_actions = [source]
+            insert_at = index + 1
+        clones = []
+        for original in source_actions:
+            clone = RpaAction.from_dict(deepcopy(original.to_dict()))
+            clones.append(RpaAction(
+                clone.action, deepcopy(clone.data), name=clone.name, enabled=clone.enabled,
+                delay_before=clone.delay_before, recorded_delay=clone.recorded_delay,
+            ))
+        self.project.actions[insert_at:insert_at] = clones
         self.mark_dirty()
         self.refresh()
-        self.table.selectRow(index + 1)
+        self.table.selectRow(insert_at)
 
     def move_action(self, delta: int) -> None:
         index = self.table.selected_index()
         target = index + delta
         if index < 0 or target < 0 or target >= len(self.project.actions):
+            return
+        if self.project.actions[index].action in CONTROL_TYPES:
+            show_error(self, "Cannot move a block marker", "Move steps within the block, or delete and recreate the complete If/Repeat block at the new position.")
             return
         self.project.actions[index], self.project.actions[target] = self.project.actions[target], self.project.actions[index]
         self.mark_dirty()
@@ -1972,6 +2047,9 @@ class MainWindow(QMainWindow):
 
     def toggle_action(self, index: int, enabled: bool) -> None:
         if 0 <= index < len(self.project.actions):
+            if self.project.actions[index].action in CONTROL_TYPES:
+                show_error(self, "Control steps stay enabled", "If, Else, End, Repeat, and Break markers cannot be disabled because they define the flow structure.")
+                return
             self.project.actions[index].enabled = enabled
             self.mark_dirty()
             self.table.update_action(index, self.project.actions[index])
@@ -1980,6 +2058,9 @@ class MainWindow(QMainWindow):
     def toggle_selected_action(self) -> None:
         indices = self.table.selected_indices()
         if not indices:
+            return
+        if any(self.project.actions[index].action in CONTROL_TYPES for index in indices):
+            show_error(self, "Control steps stay enabled", "Remove the complete block instead of disabling one of its structural markers.")
             return
         enable = not all(self.project.actions[index].enabled for index in indices)
         for index in indices:

@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
 )
 
 from rpa.models import ActionType, RpaAction
+from rpa.control_flow import CONTROL_TYPES
+from ui.condition_editor import ConditionEditor
 
 
 class ActionEditor(QWidget):
@@ -35,6 +37,7 @@ class ActionEditor(QWidget):
         super().__init__()
         self.action: RpaAction | None = None
         self.project_dir: Path | None = None
+        self.available_variables: list[str] = []
         self._loading = False
 
         self.title = QLabel("Step Details")
@@ -104,6 +107,9 @@ class ActionEditor(QWidget):
         self.project_dir = project_dir
         self._rebuild()
 
+    def set_available_variables(self, names) -> None:
+        self.available_variables = sorted({str(name) for name in names if str(name)})
+
     def set_advanced_expanded(self, expanded: bool) -> None:
         self.advanced_button.setChecked(bool(expanded))
 
@@ -163,16 +169,48 @@ class ActionEditor(QWidget):
         self.form.addRow("Status", QLabel("Disabled" if not action.enabled else str(action.status).title()))
         self.form.addRow("Enabled", self._check(action.enabled, lambda value: self._set("enabled", value)))
         is_click_image = action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value)
+        is_control = action.action in CONTROL_TYPES
         if is_click_image:
             note = QLabel("This step searches continuously for its target (see Search timeout below) instead of waiting a fixed time.")
             note.setWordWrap(True)
             note.setStyleSheet("color: #64748b;")
             self.form.addRow(note)
-        else:
+        elif not is_control:
             self.form.addRow("Wait before", self._double(action.delay_before, lambda value: self._set("delay_before", value), 0, 9999))
 
         data = action.data
-        if is_click_image:
+        if action.action in {
+            ActionType.IF_IMAGE_EXISTS.value, ActionType.IF_IMAGE_NOT_EXISTS.value,
+            ActionType.IF_WINDOW_EXISTS.value, ActionType.IF_PATH_EXISTS.value,
+            ActionType.IF_VARIABLE.value,
+        }:
+            fixed = {
+                ActionType.IF_IMAGE_EXISTS.value: "image_exists",
+                ActionType.IF_IMAGE_NOT_EXISTS.value: "image_not_exists",
+                ActionType.IF_WINDOW_EXISTS.value: "window_exists",
+                ActionType.IF_PATH_EXISTS.value: "path_exists",
+                ActionType.IF_VARIABLE.value: "variable",
+            }[action.action]
+            condition = ConditionEditor(data, fixed_type=fixed, variables=self.available_variables)
+            condition.changed.connect(lambda: self._set_condition_data(condition.data()))
+            self.form.addRow(condition)
+        elif action.action == ActionType.REPEAT_COUNT.value:
+            self.form.addRow("Number of times", self._number_field(data.get("count", 3), lambda v: self._set_data("count", v), integer=True))
+        elif action.action == ActionType.REPEAT_UNTIL.value:
+            condition = ConditionEditor(data, variables=self.available_variables)
+            condition.changed.connect(lambda: self._set_condition_data(condition.data()))
+            self.form.addRow(condition)
+            self.form.addRow("Safety limit", self._spin(data.get("max_iterations", 1000), lambda v: self._set_data("max_iterations", v), 1, 10000))
+            self.form.addRow("Delay between loops", self._double(data.get("iteration_delay", 0.0), lambda v: self._set_data("iteration_delay", v), 0, 3600))
+        elif action.action in {ActionType.ELSE.value, ActionType.END_IF.value, ActionType.END_LOOP.value, ActionType.BREAK_LOOP.value}:
+            note = QLabel({
+                ActionType.ELSE.value: "Runs when the matching If condition is false.",
+                ActionType.END_IF.value: "Closes the matching If block.",
+                ActionType.END_LOOP.value: "Closes the matching Repeat block.",
+                ActionType.BREAK_LOOP.value: "Leaves the nearest Repeat block immediately.",
+            }[action.action])
+            note.setWordWrap(True); self.form.addRow(note)
+        elif is_click_image:
             self._click_image_fields(data)
         elif action.action == ActionType.TYPE_TEXT.value:
             text = QPlainTextEdit(str(data.get("text", "")))
@@ -228,6 +266,9 @@ class ActionEditor(QWidget):
             self.form.addRow("End X", self._number_field(data.get("end_x", 0), lambda v: self._set_data("end_x", v), integer=True))
             self.form.addRow("End Y", self._number_field(data.get("end_y", 0), lambda v: self._set_data("end_y", v), integer=True))
             self.advanced_form.addRow("Drag duration", self._double(data.get("duration", 0.5), lambda v: self._set_data("duration", v), 0, 60))
+        if is_control:
+            self._loading = False
+            return
         retry_heading = QLabel("Retry and failure handling")
         retry_heading.setStyleSheet("font-weight: 600; margin-top: 8px;")
         self.advanced_form.addRow(retry_heading)
@@ -307,6 +348,17 @@ class ActionEditor(QWidget):
     def _set_data(self, key: str, value) -> None:
         if self.action and not self._loading:
             self.action.data[key] = value
+            self.action_changed.emit()
+
+    def _set_condition_data(self, values: dict) -> None:
+        if self.action and not self._loading:
+            condition_keys = {
+                "condition_type", "image", "confidence", "window_title", "case_sensitive",
+                "path", "path_type", "variable", "operator", "value",
+            }
+            for key in condition_keys:
+                self.action.data.pop(key, None)
+            self.action.data.update(values)
             self.action_changed.emit()
 
     def _line(self, value, callback) -> QLineEdit:
