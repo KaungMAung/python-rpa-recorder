@@ -137,3 +137,45 @@ def test_scheduled_worker_signal_handlers_are_bound_methods(tmp_path, monkeypatc
     assert window._scheduled_run_failed.__self__ is window
     assert window._scheduled_run_log.__self__ is window
     window.close()
+
+
+def test_failed_scheduled_run_persists_one_based_failed_step(tmp_path, monkeypatch) -> None:
+    from PySide6.QtCore import QObject, Signal
+
+    window = make_window(tmp_path, monkeypatch)
+    _make_flow(tmp_path, "flow_a")
+
+    class FailingWorker(QObject):
+        action_status = Signal(int, str)
+        log = Signal(str)
+        finished = Signal()
+        failed = Signal(int, str)
+        stopped = Signal()
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__()
+
+        def run(self) -> None:
+            self.failed.emit(2, "image not found")
+
+    class FakeProject:
+        actions = [object(), object(), object()]
+
+    class FakeProjectManager:
+        def load(self, _path):
+            return FakeProject()
+
+    monkeypatch.setattr(main_window_module, "ReplayWorker", FailingWorker)
+    monkeypatch.setattr(main_window_module, "ProjectManager", FakeProjectManager)
+    monkeypatch.setattr(main_window_module, "validate_project", lambda project, project_dir: [])
+    window._run_flow_now("flow_a", scheduled=True)
+    for _ in range(200):
+        app().processEvents()
+        if "flow_a" not in window._scheduled_runs:
+            break
+        QThread.msleep(5)
+
+    history = window.schedule_store.get("flow_a").history
+    assert history[-1].failed_step == 3
+    assert history[-1].error == "image not found"
+    window.close()

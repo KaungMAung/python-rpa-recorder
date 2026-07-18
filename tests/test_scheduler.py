@@ -99,6 +99,28 @@ def test_mark_finished_records_duration_and_error() -> None:
     assert schedule.last_error == "boom"
 
 
+def test_run_history_is_started_then_finalized_with_failed_step() -> None:
+    from rpa.scheduler import FlowSchedule, mark_finished, mark_started, STATUS_FAILED, STATUS_RUNNING
+
+    started = datetime.now(timezone.utc)
+    finished = started + timedelta(seconds=8)
+    schedule = FlowSchedule(flow_name="demo", enabled=True)
+    mark_started(schedule, started)
+    assert len(schedule.history) == 1
+    assert schedule.history[0].status == STATUS_RUNNING
+    assert schedule.history[0].finished_at is None
+
+    mark_finished(schedule, STATUS_FAILED, finished, error="target missing", failed_step=4)
+    assert len(schedule.history) == 1
+    entry = schedule.history[0]
+    assert entry.started_at == started.isoformat()
+    assert entry.finished_at == finished.isoformat()
+    assert entry.duration_seconds == pytest.approx(8.0)
+    assert entry.status == STATUS_FAILED
+    assert entry.failed_step == 4
+    assert entry.error == "target missing"
+
+
 def test_mark_finished_clears_error_on_success_after_previous_failure() -> None:
     from rpa.scheduler import FlowSchedule, mark_finished, mark_started, STATUS_SUCCESS
 
@@ -119,6 +141,10 @@ def test_mark_skipped_does_not_touch_duration_and_retries_soon() -> None:
     assert schedule.last_duration_seconds is None
     next_run = datetime.fromisoformat(schedule.next_run_at)
     assert next_run <= now + timedelta(minutes=2)
+    assert schedule.history[0].status == STATUS_SKIPPED_RUNNING
+    assert schedule.history[0].started_at == now.isoformat()
+    assert schedule.history[0].finished_at == now.isoformat()
+    assert schedule.history[0].duration_seconds == 0.0
 
 
 def test_schedule_store_persists_and_reloads(tmp_path: Path) -> None:
@@ -158,3 +184,47 @@ def test_schedule_store_removes_missing_flows(tmp_path: Path) -> None:
     store.remove_missing_flows()
     assert "ghost" not in store._schedules
     assert store.list_flow_names() == ["demo"]
+
+
+def test_history_persists_and_is_limited_per_flow(tmp_path: Path) -> None:
+    from rpa.scheduler import FlowSchedule, RunHistoryEntry, ScheduleStore
+
+    flows_root = tmp_path / "flows"
+    (flows_root / "demo").mkdir(parents=True)
+    (flows_root / "demo" / "project.json").write_text("{}", encoding="utf-8")
+    store = ScheduleStore(flows_root, history_limit=3)
+    schedule = FlowSchedule(flow_name="demo")
+    schedule.history = [
+        RunHistoryEntry(started_at=f"2026-01-01T00:0{index}:00+00:00", status="Success")
+        for index in range(5)
+    ]
+    store.set(schedule)
+    store.save()
+
+    reloaded = ScheduleStore(flows_root, history_limit=3)
+    assert len(reloaded.get("demo").history) == 3
+    assert reloaded.get("demo").history[0].started_at.endswith("02:00+00:00")
+
+
+def test_legacy_last_run_fields_are_migrated_to_history(tmp_path: Path) -> None:
+    import json
+    from rpa.scheduler import ScheduleStore
+
+    flows_root = tmp_path / "flows"
+    (flows_root / "demo").mkdir(parents=True)
+    (flows_root / "demo" / "project.json").write_text("{}", encoding="utf-8")
+    legacy = {
+        "demo": {
+            "enabled": True,
+            "last_run_at": "2026-01-01T00:00:00+00:00",
+            "last_finished_at": "2026-01-01T00:00:05+00:00",
+            "last_duration_seconds": 5,
+            "last_status": "Success",
+        }
+    }
+    (flows_root / "schedules.json").write_text(json.dumps(legacy), encoding="utf-8")
+
+    schedule = ScheduleStore(flows_root).get("demo")
+    assert len(schedule.history) == 1
+    assert schedule.history[0].status == "Success"
+    assert schedule.history[0].duration_seconds == 5

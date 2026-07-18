@@ -10,7 +10,7 @@ history) survives app restarts.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,43 @@ STATUS_RUNNING = "Running"
 STATUS_STOPPED = "Stopped"
 STATUS_SKIPPED_RUNNING = "Skipped (Already Running)"
 STATUS_SKIPPED_BUSY = "Skipped (Flow Open In Editor)"
+DEFAULT_HISTORY_LIMIT = 100
+
+
+@dataclass
+class RunHistoryEntry:
+    """One persisted scheduler run attempt."""
+
+    started_at: str
+    finished_at: str | None = None
+    duration_seconds: float | None = None
+    status: str = STATUS_RUNNING
+    failed_step: int | None = None
+    error: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RunHistoryEntry | None":
+        started_at = data.get("started_at")
+        if not isinstance(started_at, str) or not started_at:
+            return None
+        failed_step = data.get("failed_step")
+        try:
+            failed_step = int(failed_step) if failed_step is not None else None
+        except (TypeError, ValueError):
+            failed_step = None
+        duration = data.get("duration_seconds")
+        try:
+            duration = float(duration) if duration is not None else None
+        except (TypeError, ValueError):
+            duration = None
+        return cls(
+            started_at=started_at,
+            finished_at=data.get("finished_at"),
+            duration_seconds=duration,
+            status=str(data.get("status") or STATUS_RUNNING),
+            failed_step=failed_step,
+            error=data.get("error"),
+        )
 
 
 def utc_now() -> datetime:
@@ -39,9 +76,26 @@ class FlowSchedule:
     last_status: str | None = None
     last_error: str | None = None
     next_run_at: str | None = None
+    history: list[RunHistoryEntry] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, flow_name: str, data: dict[str, Any]) -> "FlowSchedule":
+        history = []
+        for raw_entry in data.get("history", []):
+            if isinstance(raw_entry, dict):
+                entry = RunHistoryEntry.from_dict(raw_entry)
+                if entry is not None:
+                    history.append(entry)
+        # Older schedules remain valid and gain one initial history record from
+        # their existing last-run fields when they are next saved.
+        if not history and data.get("last_status") and data.get("last_run_at"):
+            history.append(RunHistoryEntry(
+                started_at=data["last_run_at"],
+                finished_at=data.get("last_finished_at"),
+                duration_seconds=data.get("last_duration_seconds"),
+                status=data["last_status"],
+                error=data.get("last_error"),
+            ))
         return cls(
             flow_name=flow_name,
             enabled=bool(data.get("enabled", False)),
@@ -53,6 +107,7 @@ class FlowSchedule:
             last_status=data.get("last_status"),
             last_error=data.get("last_error"),
             next_run_at=data.get("next_run_at"),
+            history=history,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -88,6 +143,7 @@ def mark_started(schedule: FlowSchedule, now: datetime | None = None) -> None:
     schedule.last_duration_seconds = None
     schedule.last_status = STATUS_RUNNING
     schedule.last_error = None
+    schedule.history.append(RunHistoryEntry(started_at=now.isoformat()))
 
 
 def mark_finished(
@@ -95,12 +151,29 @@ def mark_finished(
     status: str,
     now: datetime | None = None,
     error: str | None = None,
+    failed_step: int | None = None,
 ) -> None:
     now = now or utc_now()
+    was_running = schedule.last_status == STATUS_RUNNING
     schedule.last_finished_at = now.isoformat()
     schedule.last_duration_seconds = _duration_seconds(schedule.last_run_at, now)
     schedule.last_status = status
     schedule.last_error = error
+    entry = next(
+        (item for item in reversed(schedule.history) if item.status == STATUS_RUNNING and item.finished_at is None),
+        None,
+    ) if was_running else None
+    if entry is None:
+        started_at = now.isoformat()
+        entry = RunHistoryEntry(started_at=started_at)
+        schedule.history.append(entry)
+        schedule.last_run_at = started_at
+        schedule.last_duration_seconds = 0.0
+    entry.finished_at = now.isoformat()
+    entry.duration_seconds = schedule.last_duration_seconds
+    entry.status = status
+    entry.failed_step = failed_step
+    entry.error = error
     schedule_next_run(schedule, now)
 
 
@@ -109,6 +182,12 @@ def mark_skipped(schedule: FlowSchedule, status: str, now: datetime | None = Non
     now = now or utc_now()
     schedule.last_status = status
     schedule.last_error = None
+    schedule.history.append(RunHistoryEntry(
+        started_at=now.isoformat(),
+        finished_at=now.isoformat(),
+        duration_seconds=0.0,
+        status=status,
+    ))
     # Retry soon instead of waiting a full interval, since this attempt never ran.
     schedule.next_run_at = (now + timedelta(minutes=1)).isoformat()
 
@@ -123,12 +202,19 @@ def _duration_seconds(started_at: str | None, finished_at: datetime) -> float | 
     return max(0.0, (finished_at - started).total_seconds())
 
 
+def _trim_history(schedule: FlowSchedule, limit: int) -> None:
+    limit = max(1, int(limit))
+    if len(schedule.history) > limit:
+        del schedule.history[:-limit]
+
+
 class ScheduleStore:
     """Persists per-flow schedule configuration to schedules.json inside flows_root."""
 
-    def __init__(self, flows_root: Path) -> None:
+    def __init__(self, flows_root: Path, history_limit: int = DEFAULT_HISTORY_LIMIT) -> None:
         self.flows_root = Path(flows_root)
         self.path = self.flows_root / "schedules.json"
+        self.history_limit = min(1000, max(1, int(history_limit)))
         self._schedules: dict[str, FlowSchedule] = {}
         self.load()
 
@@ -146,8 +232,16 @@ class ScheduleStore:
 
     def save(self) -> None:
         self.flows_root.mkdir(parents=True, exist_ok=True)
+        for schedule in self._schedules.values():
+            _trim_history(schedule, self.history_limit)
         payload = {name: schedule.to_dict() for name, schedule in self._schedules.items()}
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def set_history_limit(self, limit: int) -> None:
+        """Change retention and immediately trim persisted in-memory histories."""
+        self.history_limit = min(1000, max(1, int(limit)))
+        for schedule in self._schedules.values():
+            _trim_history(schedule, self.history_limit)
 
     def list_flow_names(self) -> list[str]:
         if not self.flows_root.exists():

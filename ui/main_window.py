@@ -177,7 +177,11 @@ class MainWindow(QMainWindow):
         self.manual_capture_dialog: ManualActionDialog | None = None
         self.manual_capture_role = "target"
         self.settings = QSettings("PythonRPARecorder", "PythonRPARecorder")
-        self.schedule_store = ScheduleStore(flows_root())
+        try:
+            schedule_history_limit = int(self.settings.value("scheduler/history_limit", 100))
+        except (TypeError, ValueError):
+            schedule_history_limit = 100
+        self.schedule_store = ScheduleStore(flows_root(), history_limit=schedule_history_limit)
         self._scheduled_runs: dict[str, tuple[QThread, ReplayWorker]] = {}
         self._schedule_queue: list[str] = []
         self.schedule_timer = QTimer(self)
@@ -832,6 +836,10 @@ class MainWindow(QMainWindow):
             project = ProjectManager().load(project_json)
         except Exception as exc:
             self.log(f"[{flow_name}] schedule failed to load: {exc}")
+            schedule = self.schedule_store.get(flow_name)
+            mark_finished(schedule, STATUS_FAILED, error=f"Could not load flow: {exc}")
+            self.schedule_store.set(schedule)
+            self.schedule_store.save()
             return
         errors = validate_project(project, flow_dir)
         if errors:
@@ -876,16 +884,20 @@ class MainWindow(QMainWindow):
 
     def _scheduled_run_failed(self, index: int, message: str) -> None:
         worker = self.sender()
-        self._scheduled_run_finished(getattr(worker, "flow_name", ""), STATUS_FAILED, error=message)
+        self._scheduled_run_finished(
+            getattr(worker, "flow_name", ""), STATUS_FAILED, error=message, failed_step=index + 1,
+        )
 
-    def _scheduled_run_finished(self, flow_name: str, status: str, error: str | None = None) -> None:
+    def _scheduled_run_finished(
+        self, flow_name: str, status: str, error: str | None = None, failed_step: int | None = None,
+    ) -> None:
         entry = self._scheduled_runs.pop(flow_name, None)
         if entry:
             thread, _worker = entry
             thread.quit()
             thread.wait()
         schedule = self.schedule_store.get(flow_name)
-        mark_finished(schedule, status, error=error)
+        mark_finished(schedule, status, error=error, failed_step=failed_step)
         self.schedule_store.set(schedule)
         self.schedule_store.save()
         self.log(f"[{flow_name}] scheduled run {status}")
