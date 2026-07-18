@@ -103,7 +103,7 @@ class ActionTable(QTableWidget):
             indent + action.friendly_name(),
             indent + action.summary(),
             f"{action.delay_before:.2f} s",
-            Path(str(action.data.get("image", ""))).name,
+            self._target_text(action),
             self._status_text(action),
         ]
         for col, value in enumerate(values):
@@ -126,6 +126,16 @@ class ActionTable(QTableWidget):
             elif col == 3:
                 item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.setItem(row, col, item)
+
+    @staticmethod
+    def _target_text(action: RpaAction) -> str:
+        image = str(action.data.get("image", ""))
+        if image:
+            return Path(image).name
+        window = action.data.get("window")
+        if isinstance(window, dict):
+            return str(window.get("window_title") or window.get("process_name") or window.get("class_name") or "Selected window")
+        return ""
 
     def _row_is_collapsed(self, row: int) -> bool:
         for opener, closer in self._flow.group_ends.items():

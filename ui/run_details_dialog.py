@@ -43,7 +43,7 @@ class RunDetailsDialog(QDialog):
         layout.addLayout(buttons)
 
         tabs = QTabWidget()
-        self.steps_table = self._table(["Step", "Name", "Status", "Duration", "Attempts", "Branch / Loop Result", "Error"])
+        self.steps_table = self._table(["Step", "Name", "Status", "Duration", "Attempts", "Execution Result", "Error"])
         self.validation_table = self._table(["Level", "Step", "Step name", "Reason"])
         self.inputs_table = self._table(["Runtime input", "Value"])
         tabs.addTab(self.steps_table, "Step Results")
@@ -100,7 +100,7 @@ class RunDetailsDialog(QDialog):
             values = (
                 step.get("step_number", "—"), step.get("step_name", "—"), step.get("status", "—"),
                 f"{float(duration):.2f}s" if isinstance(duration, (int, float)) else "—",
-                step.get("attempts", 0), self._control_result_text(step.get("control_result")),
+                step.get("attempts", 0), self._execution_result_text(step),
                 step.get("error") or "—",
             )
             for column, value in enumerate(values):
@@ -118,7 +118,17 @@ class RunDetailsDialog(QDialog):
             self.inputs_table.setItem(row, 1, QTableWidgetItem(str(value)))
 
     @staticmethod
-    def _control_result_text(result) -> str:
+    def _execution_result_text(step: dict) -> str:
+        window = step.get("window_result")
+        if isinstance(window, dict):
+            values = [str(window.get("operation") or "window action")]
+            details = window.get("window")
+            if isinstance(details, dict):
+                values.append(str(details.get("title") or details.get("process_name") or "window"))
+            if window.get("error"):
+                values.append(str(window["error"]))
+            return " — ".join(values)
+        result = step.get("control_result")
         if not result:
             return "—"
         if not isinstance(result, dict):

@@ -23,6 +23,16 @@ from PySide6.QtWidgets import (
 from rpa.models import ActionType, RpaAction
 from rpa.control_flow import CONTROL_TYPES
 from ui.condition_editor import ConditionEditor
+from ui.window_target_editor import WindowTargetEditor
+
+
+WINDOW_ACTIONS = {
+    ActionType.SELECT_WINDOW.value, ActionType.WAIT_WINDOW.value,
+    ActionType.ACTIVATE_WINDOW.value, ActionType.MAXIMIZE_WINDOW.value,
+    ActionType.MINIMIZE_WINDOW.value, ActionType.RESTORE_WINDOW.value,
+    ActionType.CLOSE_WINDOW.value, ActionType.CLICK_WINDOW_RELATIVE.value,
+    ActionType.MOVE_WINDOW_RELATIVE.value,
+}
 
 
 class ActionEditor(QWidget):
@@ -210,6 +220,28 @@ class ActionEditor(QWidget):
                 ActionType.BREAK_LOOP.value: "Leaves the nearest Repeat block immediately.",
             }[action.action])
             note.setWordWrap(True); self.form.addRow(note)
+        elif action.action in WINDOW_ACTIONS:
+            target = WindowTargetEditor(data, allow_selected=action.action != ActionType.SELECT_WINDOW.value)
+            target.pick_button.setVisible(False)
+            target.captured_label.setText("Edit matching details here. Use Pick Window when adding a new step.")
+            target.changed.connect(lambda: self._set_window_data(target.data()))
+            self.form.addRow(target)
+            if action.action in {ActionType.CLICK_WINDOW_RELATIVE.value, ActionType.MOVE_WINDOW_RELATIVE.value}:
+                self.form.addRow("X from window left", self._number_field(data.get("relative_x", 0), lambda v: self._set_data("relative_x", v), integer=True))
+                self.form.addRow("Y from window top", self._number_field(data.get("relative_y", 0), lambda v: self._set_data("relative_y", v), integer=True))
+                self.form.addRow("Scale when resized", self._check(data.get("scale_with_window", False), lambda v: self._set_data("scale_with_window", v)))
+                self.advanced_form.addRow("Original window width", self._number_field(data.get("original_window_width", 0), lambda v: self._set_data("original_window_width", v), integer=True))
+                self.advanced_form.addRow("Original window height", self._number_field(data.get("original_window_height", 0), lambda v: self._set_data("original_window_height", v), integer=True))
+                self.advanced_form.addRow("Use absolute fallback", self._check(data.get("use_absolute_fallback", False), lambda v: self._set_data("use_absolute_fallback", v)))
+                self.advanced_form.addRow("Fallback X", self._number_field(data.get("fallback_x", 0), lambda v: self._set_data("fallback_x", v), integer=True))
+                self.advanced_form.addRow("Fallback Y", self._number_field(data.get("fallback_y", 0), lambda v: self._set_data("fallback_y", v), integer=True))
+                if action.action == ActionType.CLICK_WINDOW_RELATIVE.value:
+                    self.form.addRow("Mouse button", self._combo(
+                        [("Left", "left"), ("Right", "right"), ("Middle", "middle")],
+                        data.get("button", "left"), lambda v: self._set_data("button", v),
+                    ))
+                else:
+                    self.form.addRow("Move duration", self._double(data.get("duration", 0.2), lambda v: self._set_data("duration", v), 0, 60))
         elif is_click_image:
             self._click_image_fields(data)
         elif action.action == ActionType.TYPE_TEXT.value:
@@ -359,6 +391,12 @@ class ActionEditor(QWidget):
             for key in condition_keys:
                 self.action.data.pop(key, None)
             self.action.data.update(values)
+            self.action_changed.emit()
+
+    def _set_window_data(self, values: dict) -> None:
+        if self.action and not self._loading:
+            self.action.data["use_selected_window"] = bool(values.get("use_selected_window", False))
+            self.action.data["window"] = dict(values.get("window") or {})
             self.action_changed.emit()
 
     def _line(self, value, callback) -> QLineEdit:

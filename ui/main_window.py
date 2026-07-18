@@ -5,6 +5,7 @@ from copy import deepcopy
 import shutil
 from datetime import datetime, timezone
 from html import escape
+import os
 import time
 import sys
 
@@ -69,6 +70,7 @@ from rpa.variables import (
     validate_variable_configuration,
 )
 from rpa.utils import foreground_elevation_mismatch
+from rpa.windowing import NativeWindowBackend
 from ui.action_editor import ActionEditor
 from ui.action_table import ActionTable
 from ui.dialogs import ManualActionDialog, SettingsDialog, VariablesDialog, load_default_project_settings, show_error
@@ -77,6 +79,7 @@ from ui.schedule_dialog import ScheduleFlowsDialog
 from ui.run_details_dialog import RunDetailsDialog
 from ui.runtime_inputs_dialog import RuntimeInputsDialog
 from ui.target_capture import TargetCaptureOverlay
+from ui.window_picker import WindowPickOverlay
 
 
 def app_root() -> Path:
@@ -212,6 +215,7 @@ class MainWindow(QMainWindow):
         self.target_capture_was_maximized = False
         self.manual_capture_dialog: ManualActionDialog | None = None
         self.manual_capture_role = "target"
+        self.window_pick_overlay: WindowPickOverlay | None = None
         self.settings = QSettings("PythonRPARecorder", "PythonRPARecorder")
         try:
             schedule_history_limit = int(self.settings.value("scheduler/history_limit", 100))
@@ -1881,8 +1885,49 @@ class MainWindow(QMainWindow):
         # non-interactive behind the independent picker overlay.
         dialog.setWindowOpacity(0.0)
         self.hide()
-        self.log("[Image Picker] opened")
-        QTimer.singleShot(200, self._start_manual_target_capture)
+        if role == "window_target":
+            self.log("[Window Picker] opened")
+            QTimer.singleShot(200, self._start_manual_window_capture)
+        else:
+            self.log("[Image Picker] opened")
+            QTimer.singleShot(200, self._start_manual_target_capture)
+
+    def _start_manual_window_capture(self) -> None:
+        dialog = self.manual_capture_dialog
+        if dialog is None:
+            return
+        try:
+            self.window_pick_overlay = WindowPickOverlay(parent=dialog)
+            self.window_pick_overlay.picked.connect(self._complete_manual_window_capture)
+            self.window_pick_overlay.canceled.connect(self._cancel_manual_target_capture)
+            self.window_pick_overlay.show()
+        except Exception as exc:
+            self._cancel_manual_target_capture()
+            show_error(self, "Pick Window Failed", str(exc))
+
+    def _complete_manual_window_capture(self, x: int, y: int) -> None:
+        dialog = self.manual_capture_dialog
+        try:
+            backend = NativeWindowBackend()
+            # Native cursor coordinates stay aligned with GetWindowRect under
+            # per-monitor DPI scaling; the Qt point is retained as a fallback.
+            try:
+                x, y = backend.cursor_position()
+            except OSError:
+                pass
+            window = backend.window_at_point(x, y, exclude_process_id=os.getpid())
+            if dialog is None:
+                return
+            dialog.set_window_target(window.target(), window.evidence(), (x, y))
+            self.log(
+                f"[Window Picker] captured: process={window.process_name or 'unknown'}, "
+                f"title={window.title!r}, class={window.class_name!r}"
+            )
+            self._restore_manual_capture_dialog("accepted")
+        except Exception as exc:
+            self.log(f"[Window Picker] failed: {exc}")
+            self._restore_manual_capture_dialog("rejected")
+            show_error(self, "Pick Window Failed", str(exc))
 
     def _start_manual_target_capture(self) -> None:
         dialog = self.manual_capture_dialog
@@ -1928,9 +1973,13 @@ class MainWindow(QMainWindow):
     def _restore_manual_capture_dialog(self, result: str) -> None:
         overlay, dialog = self.target_capture_overlay, self.manual_capture_dialog
         self.target_capture_overlay = None
+        window_overlay = self.window_pick_overlay
+        self.window_pick_overlay = None
         self.manual_capture_dialog = None
         if overlay:
             overlay.deleteLater()
+        if window_overlay:
+            window_overlay.deleteLater()
         if self.target_capture_was_maximized:
             self.showMaximized()
         else:
@@ -1939,7 +1988,8 @@ class MainWindow(QMainWindow):
             dialog.setWindowOpacity(1.0)
             dialog.raise_()
             dialog.activateWindow()
-            self.log(f"[Image Picker] closed: {result}")
+            picker = "Window Picker" if self.manual_capture_role == "window_target" else "Image Picker"
+            self.log(f"[{picker}] closed: {result}")
             self.log("[Add Step] still open")
 
     def insert_action(self, action: RpaAction, position: str | None = None) -> bool:

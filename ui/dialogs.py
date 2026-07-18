@@ -28,6 +28,16 @@ from PySide6.QtWidgets import (
 from rpa.models import ActionType, ProjectSettings, RpaAction, RpaProject, RuntimeInputDefinition
 from rpa.variables import INPUT_TYPES, VARIABLE_NAME_PATTERN, validate_variable_configuration
 from ui.condition_editor import ConditionEditor
+from ui.window_target_editor import WindowTargetEditor
+
+
+WINDOW_ACTIONS = {
+    ActionType.SELECT_WINDOW.value, ActionType.WAIT_WINDOW.value,
+    ActionType.ACTIVATE_WINDOW.value, ActionType.MAXIMIZE_WINDOW.value,
+    ActionType.MINIMIZE_WINDOW.value, ActionType.RESTORE_WINDOW.value,
+    ActionType.CLOSE_WINDOW.value, ActionType.CLICK_WINDOW_RELATIVE.value,
+    ActionType.MOVE_WINDOW_RELATIVE.value,
+}
 
 
 def load_default_project_settings() -> ProjectSettings:
@@ -87,6 +97,15 @@ class ManualActionDialog(QDialog):
             ("Repeat Until", ActionType.REPEAT_UNTIL.value),
             ("End Loop", ActionType.END_LOOP.value),
             ("Break Loop", ActionType.BREAK_LOOP.value),
+            ("Select / Target Window", ActionType.SELECT_WINDOW.value),
+            ("Wait for Window", ActionType.WAIT_WINDOW.value),
+            ("Activate Window", ActionType.ACTIVATE_WINDOW.value),
+            ("Maximize Window", ActionType.MAXIMIZE_WINDOW.value),
+            ("Minimize Window", ActionType.MINIMIZE_WINDOW.value),
+            ("Restore Window", ActionType.RESTORE_WINDOW.value),
+            ("Close Window", ActionType.CLOSE_WINDOW.value),
+            ("Click Relative to Window", ActionType.CLICK_WINDOW_RELATIVE.value),
+            ("Move Mouse Relative to Window", ActionType.MOVE_WINDOW_RELATIVE.value),
         ]:
             self.type_box.addItem(label, value)
         self.form = QFormLayout()
@@ -231,6 +250,40 @@ class ManualActionDialog(QDialog):
                 ActionType.BREAK_LOOP.value: "Leaves the nearest Repeat block immediately.",
             }[kind])
             note.setWordWrap(True); self.form.addRow(note)
+        elif kind in WINDOW_ACTIONS:
+            allow_selected = kind != ActionType.SELECT_WINDOW.value
+            self.window_editor = WindowTargetEditor(allow_selected=allow_selected)
+            self.window_editor.changed.connect(self._update_summary)
+            self.window_editor.pick_requested.connect(lambda: self.screen_pick_requested.emit("window_target"))
+            self.form.addRow(self.window_editor)
+            if kind in {ActionType.CLICK_WINDOW_RELATIVE.value, ActionType.MOVE_WINDOW_RELATIVE.value}:
+                self.relative_x = QSpinBox(); self.relative_y = QSpinBox()
+                for field in (self.relative_x, self.relative_y):
+                    field.setRange(-99999, 99999); field.valueChanged.connect(self._update_summary)
+                point_row = QHBoxLayout(); point_row.setContentsMargins(0, 0, 0, 0)
+                point_row.addWidget(QLabel("X from left")); point_row.addWidget(self.relative_x)
+                point_row.addWidget(QLabel("Y from top")); point_row.addWidget(self.relative_y)
+                point_wrap = QWidget(); point_wrap.setLayout(point_row)
+                self.form.addRow("Position in window", point_wrap)
+                self.scale_window = QCheckBox("Scale this position when the window is resized")
+                self.scale_window.setChecked(True); self.scale_window.toggled.connect(self._update_summary)
+                self.form.addRow("", self.scale_window)
+                self.absolute_fallback = QCheckBox("Use the picked absolute position if the window cannot be used")
+                self.absolute_fallback.setChecked(False)
+                self.absolute_fallback.setToolTip("Off by default. Enable only when an absolute screen click is safe.")
+                self.absolute_fallback.toggled.connect(self._update_summary)
+                self.form.addRow("Fallback", self.absolute_fallback)
+                self.original_window_size = (0, 0)
+                self.absolute_point = (0, 0)
+                if kind == ActionType.CLICK_WINDOW_RELATIVE.value:
+                    self.window_button = QComboBox()
+                    for label, value in (("Left", "left"), ("Right", "right"), ("Middle", "middle")):
+                        self.window_button.addItem(label, value)
+                    self.form.addRow("Mouse button", self.window_button)
+                else:
+                    self.window_move_duration = QDoubleSpinBox(); self.window_move_duration.setRange(0, 60)
+                    self.window_move_duration.setDecimals(2); self.window_move_duration.setValue(0.2); self.window_move_duration.setSuffix(" s")
+                    self.form.addRow("Move duration", self.window_move_duration)
         else:
             self.form.addRow(QLabel("This advanced step can be edited after insertion."))
         self._update_summary()
@@ -242,6 +295,21 @@ class ManualActionDialog(QDialog):
             self.image_file.setText(image); self.capture_image.setChecked(True)
         if offsets and role == "target":
             self.target_offsets = offsets
+        self._update_summary()
+
+    def set_window_target(self, target: dict, window_info: dict, point: tuple[int, int]) -> None:
+        self.window_editor.set_target(
+            target,
+            f"Captured {window_info.get('process_name') or 'window'} — {window_info.get('title') or 'untitled'}",
+        )
+        if hasattr(self, "relative_x"):
+            x, y = point
+            self.relative_x.setValue(x - int(window_info.get("left", 0)))
+            self.relative_y.setValue(y - int(window_info.get("top", 0)))
+            self.original_window_size = (
+                int(window_info.get("width", 0)), int(window_info.get("height", 0)),
+            )
+            self.absolute_point = (x, y)
         self._update_summary()
 
     def _choose_image(self) -> None:
@@ -293,6 +361,17 @@ class ManualActionDialog(QDialog):
             required_key = {"variable": "variable", "window_exists": "window_title", "path_exists": "path"}.get(condition_type, "image")
             if not str(data.get(required_key, "")).strip():
                 return "Complete the Repeat Until condition."
+        if action.action in WINDOW_ACTIONS:
+            window = data.get("window", {})
+            has_target = any(str(window.get(key, "")).strip() for key in ("process_name", "window_title", "class_name"))
+            if not has_target and not data.get("use_selected_window"):
+                return "Use Pick Window or enter a process, title, or class name."
+            if action.action in {ActionType.CLICK_WINDOW_RELATIVE.value, ActionType.MOVE_WINDOW_RELATIVE.value}:
+                if data.get("scale_with_window") and (
+                    int(data.get("original_window_width", 0) or 0) <= 0
+                    or int(data.get("original_window_height", 0) or 0) <= 0
+                ):
+                    return "Use Pick Window before enabling resize-aware positioning."
         return None
 
     def _confirm(self) -> None:
@@ -356,6 +435,23 @@ class ManualActionDialog(QDialog):
             })
         if kind in {ActionType.ELSE.value, ActionType.END_IF.value, ActionType.END_LOOP.value, ActionType.BREAK_LOOP.value}:
             return RpaAction(kind, {})
+        if kind in WINDOW_ACTIONS:
+            data = self.window_editor.data()
+            if kind in {ActionType.CLICK_WINDOW_RELATIVE.value, ActionType.MOVE_WINDOW_RELATIVE.value}:
+                width, height = getattr(self, "original_window_size", (0, 0))
+                fallback_x, fallback_y = getattr(self, "absolute_point", (0, 0))
+                data.update({
+                    "relative_x": self.relative_x.value(), "relative_y": self.relative_y.value(),
+                    "scale_with_window": self.scale_window.isChecked(),
+                    "original_window_width": width, "original_window_height": height,
+                    "use_absolute_fallback": self.absolute_fallback.isChecked(),
+                    "fallback_x": fallback_x, "fallback_y": fallback_y,
+                })
+                if kind == ActionType.CLICK_WINDOW_RELATIVE.value:
+                    data["button"] = self.window_button.currentData()
+                else:
+                    data["duration"] = self.window_move_duration.value()
+            return RpaAction(kind, data)
         defaults = {
             ActionType.WAIT.value: {"seconds": 1.0},
             ActionType.TYPE_TEXT.value: {"text": "", "interval": 0.02, "clear_first": False, "masked": False},

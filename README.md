@@ -13,6 +13,7 @@ The main workflow is `Record -> Review -> Test -> Run`. The step list remains vi
 - `rpa/recorder.py` uses `pynput` to capture global mouse and keyboard input.
 - `rpa/runner.py` replays actions with `pyautogui` in a worker thread.
 - `rpa/image_matcher.py` captures screenshots and locates images with OpenCV.
+- `rpa/windowing.py` discovers, matches, activates, and controls native Windows application windows.
 - `rpa/generator.py` creates `generated/generated_rpa.py`.
 - `rpa/scheduler.py` stores and evaluates per-flow automatic run schedules (`flows/schedules.json`).
 - `ui/schedule_dialog.py` is the Schedule Flows page used to enable, adjust, and monitor those schedules.
@@ -99,7 +100,24 @@ Adding an If or Repeat opener automatically adds its matching **End If** or **En
 
 Repeat Until always has a configurable maximum-iteration safety limit and optional interruptible delay. Validation blocks orphaned Else/End markers, missing closers, Break outside a loop, disabled structural markers, run ranges that cut through blocks, and failure jumps that cross or target control boundaries. Very large iteration limits are reported as warnings. **Stop Run** interrupts loop delays and image-condition checks promptly.
 
-During a run, condition outcomes, selected branches, loop iterations, completion, and breaks appear in the Logs/Status view and floating runner. The same results are stored per step in execution evidence and shown in Run Details under **Branch / Loop Result**. Generated Python emits normal readable `if`/`else` and `for` control structures and preserves the same variable, window, file/folder, and image conditions.
+During a run, condition outcomes, selected branches, loop iterations, completion, and breaks appear in the Logs/Status view and floating runner. The same results are stored per step in execution evidence and shown in Run Details under **Execution Result**. Generated Python emits normal readable `if`/`else` and `for` control structures and preserves the same variable, window, file/folder, and image conditions.
+
+## Window-Aware Automation
+
+Use the window actions in **Add Step** when a flow should keep working after an application window moves or changes monitor:
+
+- **Select / Target Window** finds a window and makes it available to later window steps.
+- **Wait for Window** waits up to the configured timeout without activating it.
+- **Activate Window**, **Maximize Window**, **Minimize Window**, **Restore Window**, and **Close Window** perform the named native Windows operation.
+- **Click Relative to Window** and **Move Mouse Relative to Window** activate the located window and calculate the screen position from its current top-left corner.
+
+Click **Pick Window**, then click a visible application window. The recorder stays hidden while the crosshair is active and captures the process filename, visible title, native class, window bounds, and—when adding a relative action—the clicked offset inside that window. Esc or right-click cancels without changing the step. Picking and runtime coordinates support negative multi-monitor positions.
+
+Targets can match process filename, window title, optional native class, or a combination. Title matching supports **Contains**, **Exact**, and **Regular Expression**. When several windows match, choose a clear error (default), the top-most match, or the currently active match. Timeout and retry interval control how long the runner waits for a window to appear.
+
+Relative actions can optionally scale their saved offset when the window is resized. Minimized targets are restored before relative input and the target is activated immediately before the mouse action. Absolute coordinate fallback is disabled by default and is used only when **Use absolute fallback** is explicitly enabled. Missing and ambiguous windows produce distinct errors; activation/control failures explain that the recorder and target application may need the same Windows permission level.
+
+Window matching and operation results are logged and stored with the step result in execution evidence. Run Details shows the operation and resolved window. Generated Python includes equivalent standalone Win32 discovery and control helpers. Existing Click Position and Mouse Move steps retain their original behavior and project format.
 
 ## Retries and Failure Handling
 
@@ -257,6 +275,15 @@ Run these checks on the same Windows account and display configuration that will
 3. Add a 10-second Wait step, run again, click `Stop Run` during the wait, and confirm execution stops promptly.
 4. Test Stop Run while a Click step is searching for an image that is not visible.
 5. With PyAutoGUI failsafe enabled, run and move the pointer into a screen corner. Confirm the run stops with the friendly safety message.
+
+### Window-Aware Steps
+
+1. Open Notepad, add **Select / Target Window**, click **Pick Window**, and click Notepad. Confirm its process, title, and class are populated.
+2. Add **Click Relative to Window** using the selected window, pick a point inside Notepad, and leave absolute fallback disabled.
+3. Move Notepad to another monitor and run. Confirm the click keeps the same window-relative position.
+4. Resize Notepad and run with **Scale this position when the window is resized** enabled, then minimize it and run again. Confirm it is restored and activated before the click.
+5. Open a second matching Notepad window and confirm the default multiple-match behavior reports an ambiguous target. Refine the title or choose an explicit multiple-match policy.
+6. Close Notepad and confirm the missing-window error includes the configured timeout. If testing an elevated application, confirm a permission mismatch produces the permission guidance rather than an absolute click.
 
 ### Windows Permission Boundary
 
