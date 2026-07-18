@@ -62,8 +62,7 @@ class ActionEditor(QWidget):
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumSize(260, 140)
         self.preview.setMaximumHeight(220)
-        self.preview.setStyleSheet("background: #f8fafc; border: 1px solid #d8dee8; color: #64748b;")
-        self.preview.setScaledContents(True)
+        self.preview.setStyleSheet("background: #f8fafc; border: 1px solid #d8dee8; color: #64748b; padding: 4px;")
 
         self.advanced_button = QPushButton("Advanced Settings")
         self.advanced_button.setCheckable(True)
@@ -232,7 +231,10 @@ class ActionEditor(QWidget):
         if self.project_dir and data.get("image"):
             image = self.project_dir / str(data["image"])
             if image.exists():
-                self.preview.setPixmap(QPixmap(str(image)))
+                pixmap = QPixmap(str(image))
+                self.preview.setPixmap(pixmap.scaled(self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                self.preview.setText("Target image is missing. Recapture it or update the image path in Advanced Settings.")
 
     def _suggested_name(self, action: RpaAction) -> str:
         summary = action.summary()

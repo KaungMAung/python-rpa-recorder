@@ -148,6 +148,11 @@ class MainWindow(QMainWindow):
         self.recording_started_at: float | None = None
         self.recording_start_action_count = 0
         self.recording_was_dirty = False
+        self.recording_preparing = False
+        self.recording_prepare_seconds = 3
+        self._history: list[dict] = []
+        self._history_index = -1
+        self._restoring_history = False
         self.warned_recording_permission_pids: set[int] = set()
         self.recording_permission_timer = QTimer(self)
         self.recording_permission_timer.setInterval(1000)
@@ -177,6 +182,7 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._install_shortcuts()
         self.refresh()
+        self._reset_history()
         self._restore_layout_settings()
 
     def _build_ui(self) -> None:
@@ -327,7 +333,7 @@ class MainWindow(QMainWindow):
             ("File", ["New", "Open", "Save", "Save As"]),
             ("Record Actions", ["Record", "Pause", "Resume", "Stop"]),
             ("Execution", ["Run", "Test This Step", "Run From Here", "Run Until Here", "Stop Run", "Schedule Flows", "Generate Python"]),
-            ("Step Editing", ["Add Manual Action", "Insert Before", "Insert After", "Duplicate", "Delete Action", "Move Up", "Move Down", "Enable/Disable", "Deselect All"]),
+            ("Step Editing", ["Undo", "Redo", "Add Manual Action", "Insert Before", "Insert After", "Duplicate", "Delete Action", "Move Up", "Move Down", "Enable/Disable", "Deselect All"]),
             ("Project", ["Variables", "Settings"]),
         ]
         for menu_name, names in menus:
@@ -347,6 +353,8 @@ class MainWindow(QMainWindow):
             "Generate Python": "Ctrl+G",
             "Delete Action": "Delete",
             "Deselect All": "Esc",
+            "Undo": "Ctrl+Z",
+            "Redo": "Ctrl+Y",
         }.get(name, "")
         friendly = {
             "Add Manual Action": "Add Step",
@@ -359,6 +367,8 @@ class MainWindow(QMainWindow):
         self.menu_actions["Open"].triggered.connect(self.open_project)
         self.menu_actions["Save"].triggered.connect(self.save_project)
         self.menu_actions["Save As"].triggered.connect(self.save_as_project)
+        self.menu_actions["Undo"].triggered.connect(self.undo)
+        self.menu_actions["Redo"].triggered.connect(self.redo)
         self.buttons["Record"].clicked.connect(self.start_recording)
         self.menu_actions["Record"].triggered.connect(self.start_recording)
         self.buttons["Pause"].clicked.connect(self.pause_recording)
@@ -436,12 +446,13 @@ class MainWindow(QMainWindow):
     def update_buttons(self) -> None:
         recording = self.recorder is not None and self.recorder.state == RecorderState.RECORDING
         paused = self.recorder is not None and self.recorder.state == RecorderState.PAUSED
+        preparing = self.recording_preparing
         running = self.replay_thread is not None
         self.buttons["Pause"].setEnabled(recording)
         self.buttons["Resume"].setEnabled(paused)
-        self.buttons["Stop"].setEnabled(recording or paused)
-        self.buttons["Run"].setEnabled(bool(self.project.actions) and not recording and not paused and not running)
-        self.buttons["Record"].setEnabled(not running and not recording and not paused)
+        self.buttons["Stop"].setEnabled(recording or paused or preparing)
+        self.buttons["Run"].setEnabled(bool(self.project.actions) and not recording and not paused and not preparing and not running)
+        self.buttons["Record"].setEnabled(not running and not recording and not paused and not preparing)
         self.buttons["Stop Run"].setEnabled(running)
         for name in ("Pause", "Resume", "Stop", "Run", "Record", "Stop Run"):
             self.menu_actions[name].setEnabled(self.buttons[name].isEnabled())
@@ -451,6 +462,8 @@ class MainWindow(QMainWindow):
             self.menu_actions[name].setEnabled(selected)
         for name in ("Test This Step", "Run From Here", "Run Until Here"):
             self.menu_actions[name].setEnabled(selected and not recording and not paused and not running)
+        self.menu_actions["Undo"].setEnabled(self._history_index > 0 and not recording and not paused and not preparing and not running)
+        self.menu_actions["Redo"].setEnabled(self._history_index + 1 < len(self._history) and not recording and not paused and not preparing and not running)
         self.workflow_buttons["Record"].setEnabled(self.buttons["Record"].isEnabled())
         self.workflow_buttons["Review"].setEnabled(bool(self.project.actions))
         self.workflow_buttons["Test"].setEnabled(selected and not running and not recording and not paused)
@@ -507,6 +520,7 @@ class MainWindow(QMainWindow):
                 self.project = self.manager.load(flow_dir / "project.json")
                 self.project_dir = flow_dir
                 self.dirty = False
+                self._reset_history()
                 self.log(f"opened flow: {flow_dir}")
                 return True
             except Exception as exc:
@@ -516,6 +530,7 @@ class MainWindow(QMainWindow):
         self.project_dir = flow_dir
         self.manager.save(self.project, self.project_dir)
         self.dirty = False
+        self._reset_history()
         self.log(f"created flow: {flow_dir}")
         return True
 
@@ -546,9 +561,49 @@ class MainWindow(QMainWindow):
     def start_recording(self) -> None:
         if not self.ensure_project_dir():
             return
+        if self.recording_preparing or self.recorder:
+            return
+        self.recording_start_action_count = len(self.project.actions)
+        self.recording_was_dirty = self.dirty
+        self.recording_preparing = True
+        self.floating = FloatingRecorderToolbar()
+        self.floating.pause_requested.connect(self.pause_recording)
+        self.floating.resume_requested.connect(self.resume_recording)
+        self.floating.stop_requested.connect(self.stop_recording)
+        self.floating.cancel_requested.connect(self.cancel_recording)
+        self.hide()
+        self.floating.show()
+        self._position_floating_toolbar()
+        if self.project.settings.show_desktop_before_recording:
+            self._show_windows_desktop()
+        self._begin_recording_countdown(self.recording_prepare_seconds)
+        self.update_buttons()
+
+    def _show_windows_desktop(self) -> None:
+        """Send Win+D before hooks exist, so desktop preparation is never recorded."""
+        if sys.platform != "win32":
+            return
         try:
-            self.recording_start_action_count = len(self.project.actions)
-            self.recording_was_dirty = self.dirty
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            key_up = 0x0002
+            user32.keybd_event(0x5B, 0, 0, 0)
+            user32.keybd_event(0x44, 0, 0, 0)
+            user32.keybd_event(0x44, 0, key_up, 0)
+            user32.keybd_event(0x5B, 0, key_up, 0)
+        except Exception as exc:
+            self.log(f"Could not show the desktop before recording: {exc}")
+
+    def _begin_recording_countdown(self, seconds: int) -> None:
+        if not self.recording_preparing or not self.floating:
+            return
+        self.floating.set_preparing(seconds)
+        self.update_status(f"Preparing recording ({seconds}s)")
+        if seconds > 0:
+            QTimer.singleShot(1000, lambda: self._begin_recording_countdown(seconds - 1))
+            return
+        try:
             self.recorder = RpaRecorder(
                 self.project_dir,
                 self.project.settings,
@@ -557,22 +612,18 @@ class MainWindow(QMainWindow):
                 on_error=self.recorder_failed.emit,
             )
             self.recorder.start()
+            self.recording_preparing = False
             self.recording_started_at = time.monotonic()
-            self.floating = FloatingRecorderToolbar()
-            self.floating.pause_requested.connect(self.pause_recording)
-            self.floating.resume_requested.connect(self.resume_recording)
-            self.floating.stop_requested.connect(self.stop_recording)
-            self.floating.cancel_requested.connect(self.cancel_recording)
-            self.floating.show()
-            self._position_floating_toolbar()
-            self.hide()
+            self.floating.set_recording()
             self.warned_recording_permission_pids.clear()
             self.recording_permission_timer.start()
             self.update_buttons()
             self.update_status("Recording")
         except Exception as exc:
             self.recorder = None
+            self.recording_preparing = False
             self.recording_started_at = None
+            self._finish_recording()
             show_error(self, "Recorder failed", str(exc))
 
     def pause_recording(self) -> None:
@@ -592,6 +643,9 @@ class MainWindow(QMainWindow):
         self.update_status("Recording")
 
     def stop_recording(self) -> None:
+        if self.recording_preparing:
+            self.cancel_recording()
+            return
         before_count = self.recording_start_action_count
         if self.recorder:
             self.recorder.stop(True)
@@ -636,6 +690,7 @@ class MainWindow(QMainWindow):
 
     def _finish_recording(self) -> None:
         self.recording_permission_timer.stop()
+        self.recording_preparing = False
         if self.floating:
             self.floating.close()
             self.floating = None
@@ -1219,13 +1274,16 @@ class MainWindow(QMainWindow):
         self.table.selectRow(insert_at)
 
     def delete_action(self) -> None:
-        index = self.table.selected_index()
-        if index >= 0:
-            del self.project.actions[index]
+        indices = self.table.selected_indices()
+        if indices:
+            index = indices[0]
+            for selected in reversed(indices):
+                del self.project.actions[selected]
             self.mark_dirty()
             self.refresh()
             if self.project.actions:
                 self.table.selectRow(min(index, len(self.project.actions) - 1))
+            self.log(f"deleted {len(indices)} step{'s' if len(indices) != 1 else ''}")
 
     def duplicate_action(self) -> None:
         index = self.table.selected_index()
@@ -1257,10 +1315,16 @@ class MainWindow(QMainWindow):
             self.update_buttons()
 
     def toggle_selected_action(self) -> None:
-        index = self.table.selected_index()
-        if index >= 0:
-            self.toggle_action(index, not self.project.actions[index].enabled)
-            self.editor.set_action(self.project.actions[index], self.project_dir)
+        indices = self.table.selected_indices()
+        if not indices:
+            return
+        enable = not all(self.project.actions[index].enabled for index in indices)
+        for index in indices:
+            self.project.actions[index].enabled = enable
+            self.table.update_action(index, self.project.actions[index])
+        self.mark_dirty()
+        self.editor.set_action(self.project.actions[indices[0]], self.project_dir)
+        self.log(f"{'enabled' if enable else 'disabled'} {len(indices)} step{'s' if len(indices) != 1 else ''}")
 
     def select_action(self) -> None:
         index = self.table.selected_index()
@@ -1296,11 +1360,56 @@ class MainWindow(QMainWindow):
 
     def mark_dirty(self) -> None:
         self.dirty = True
+        self._record_history()
         index = self.table.selected_index()
         if 0 <= index < len(self.project.actions):
             self.table.update_action(index, self.project.actions[index])
             self.table.apply_filter(self.filter_box.text())
         self.update_status()
+
+    def _reset_history(self) -> None:
+        self._history = [self.project.to_dict()]
+        self._history_index = 0
+
+    def _record_history(self) -> None:
+        if self._restoring_history or self.recorder is not None:
+            return
+        snapshot = self.project.to_dict()
+        if self._history and self._history[self._history_index] == snapshot:
+            return
+        del self._history[self._history_index + 1:]
+        self._history.append(snapshot)
+        self._history_index = len(self._history) - 1
+        # Keep editing history useful without allowing a long recording session
+        # to grow memory without bound.
+        if len(self._history) > 100:
+            self._history.pop(0)
+            self._history_index -= 1
+        self.update_buttons()
+
+    def undo(self) -> None:
+        if self._history_index <= 0:
+            return
+        self._restore_history(self._history_index - 1, "Undo")
+
+    def redo(self) -> None:
+        if self._history_index + 1 >= len(self._history):
+            return
+        self._restore_history(self._history_index + 1, "Redo")
+
+    def _restore_history(self, index: int, label: str) -> None:
+        selected = self.table.selected_index()
+        self._restoring_history = True
+        try:
+            self.project = RpaProject.from_dict(self._history[index])
+            self._history_index = index
+            self.dirty = True
+            self.refresh()
+            if 0 <= selected < len(self.project.actions):
+                self.table.selectRow(selected)
+            self.log(f"{label.lower()} applied")
+        finally:
+            self._restoring_history = False
 
     def log(self, message: str) -> None:
         self.logs.append(message)
@@ -1329,6 +1438,7 @@ class MainWindow(QMainWindow):
             self.project = self.manager.load(path)
             self.project_dir = path.parent
             self.dirty = False
+            self._reset_history()
             self.log(f"opened project: {path}")
             self.refresh()
         except Exception as exc:
@@ -1367,6 +1477,8 @@ class MainWindow(QMainWindow):
             ("Ctrl+N", self.new_project),
             ("Ctrl+O", self.open_project),
             ("Ctrl+S", self.save_project),
+            ("Ctrl+Z", self.undo),
+            ("Ctrl+Y", self.redo),
             ("Esc", self.clear_step_selection),
             ("Delete", self.delete_action),
             ("Ctrl+Insert", lambda: self.add_manual_action("before")),

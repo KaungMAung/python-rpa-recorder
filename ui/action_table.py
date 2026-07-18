@@ -29,6 +29,7 @@ class ActionTable(QTableWidget):
         self._columns_initialized = False
         self.setHorizontalHeaderLabels(self.HEADERS)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setAlternatingRowColors(True)
         self.setStyleSheet(
@@ -112,6 +113,9 @@ class ActionTable(QTableWidget):
     def selected_index(self) -> int:
         rows = self.selectionModel().selectedRows()
         return rows[0].row() if rows else -1
+
+    def selected_indices(self) -> list[int]:
+        return sorted(row.row() for row in self.selectionModel().selectedRows())
 
     def mousePressEvent(self, event) -> None:
         position = event.position().toPoint() if hasattr(event, "position") else event.pos()
