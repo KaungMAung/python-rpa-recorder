@@ -8,6 +8,7 @@ import textwrap
 from pathlib import Path
 
 from .models import ActionType, RpaProject
+from .control_flow import CONTROL_TYPES, parse_control_flow
 
 
 def generate_python(project: RpaProject, project_dir: Path) -> Path:
@@ -149,6 +150,25 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
         "        time.sleep(0.1)",
         "    return last",
         "",
+        "def window_exists(title, case_sensitive=False):",
+        "    wanted = str(title) if case_sensitive else str(title).casefold()",
+        "    return any(wanted in (item if case_sensitive else item.casefold()) for item in pyautogui.getAllTitles())",
+        "",
+        "def path_exists(value, path_type='either'):",
+        "    path = Path(resolve(value)).expanduser()",
+        "    if not path.is_absolute():",
+        "        path = PROJECT_DIR / path",
+        "    return path.is_file() if path_type == 'file' else path.is_dir() if path_type == 'folder' else path.exists()",
+        "",
+        "def variable_condition(name, operator='equals', expected='', case_sensitive=False):",
+        "    actual = RUNTIME_VARIABLES.get(name)",
+        "    if operator == 'is_empty':",
+        "        return actual is None or str(actual).strip() == ''",
+        "    left, right = str(actual if actual is not None else ''), str(resolve(expected))",
+        "    if not case_sensitive:",
+        "        left, right = left.casefold(), right.casefold()",
+        "    return right in left if operator == 'contains' else left == right",
+        "",
         "def click_image(image, offset_x, offset_y, button='left', confidence=0.86, timeout=10, fallback=None, clicks=1):",
         "    image, button = resolve(image), resolve(button)",
         "    offset_x, offset_y = as_int(offset_x), as_int(offset_y)",
@@ -179,10 +199,89 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
     if function_lines:
         insert_at = lines.index("def main():")
         lines[insert_at:insert_at] = function_lines
-    for index, action in enumerate(project.actions, start=1):
-        if not action.enabled:
-            lines.append(f"    # Action {index} disabled: {action.summary()}")
+    flow = parse_control_flow(project.actions)
+    if flow.issues:
+        reasons = "; ".join(issue.reason for issue in flow.issues)
+        raise ValueError(f"Cannot generate Python for an invalid control-flow structure: {reasons}")
+    indent_level = 1
+    for action_index, action in enumerate(project.actions):
+        index = action_index + 1
+        if action.action in CONTROL_TYPES:
+            if not action.enabled:
+                raise ValueError(f"Control step {index} cannot be disabled")
+            prefix = "    " * indent_level
+            data = action.data
+            if action.action in (
+                ActionType.IF_IMAGE_EXISTS.value,
+                ActionType.IF_IMAGE_NOT_EXISTS.value,
+                ActionType.IF_WINDOW_EXISTS.value,
+                ActionType.IF_PATH_EXISTS.value,
+                ActionType.IF_VARIABLE.value,
+            ):
+                expression = _condition_expression(action.action, data, project)
+                variable = f"__condition_step_{index}"
+                lines.append(f"{prefix}{variable} = {expression}")
+                lines.append(f"{prefix}print('Step {index} condition:', {variable})")
+                lines.append(f"{prefix}if {variable}:")
+                indent_level += 1
+            elif action.action == ActionType.ELSE.value:
+                indent_level -= 1
+                prefix = "    " * indent_level
+                lines.append(f"{prefix}else:")
+                indent_level += 1
+            elif action.action == ActionType.END_IF.value:
+                indent_level -= 1
+                lines.append(f"{'    ' * indent_level}# End If (step {index})")
+            elif action.action == ActionType.REPEAT_COUNT.value:
+                loop_var = f"__loop_step_{index}"
+                count_var = f"__loop_count_{index}"
+                lines.append(f"{prefix}{count_var} = as_int({data.get('count', 1)!r})")
+                lines.append(f"{prefix}for {loop_var} in range({count_var}):")
+                indent_level += 1
+                nested = "    " * indent_level
+                lines.append(f"{nested}print(f'Step {index} loop: {{{loop_var} + 1}}/{{{count_var}}}')")
+            elif action.action == ActionType.REPEAT_UNTIL.value:
+                loop_var = f"__loop_step_{index}"
+                max_var = f"__loop_max_{index}"
+                lines.append(f"{prefix}{max_var} = as_int({data.get('max_iterations', 100)!r})")
+                lines.append(f"{prefix}for {loop_var} in range({max_var}):")
+                indent_level += 1
+                lines.append(f"{'    ' * indent_level}print(f'Step {index} loop iteration: {{{loop_var} + 1}}')")
+            elif action.action == ActionType.END_LOOP.value:
+                start_index = flow.end_loop_start[action_index]
+                start_action = project.actions[start_index]
+                if start_action.action == ActionType.REPEAT_UNTIL.value:
+                    start_step = start_index + 1
+                    nested = "    " * indent_level
+                    result_var = f"__until_step_{start_step}"
+                    expression = _condition_expression(
+                        str(start_action.data.get("condition_type", ActionType.IF_VARIABLE.value)),
+                        start_action.data,
+                        project,
+                    )
+                    lines.append(f"{nested}{result_var} = {expression}")
+                    lines.append(f"{nested}print('Step {start_step} repeat-until condition:', {result_var})")
+                    lines.append(f"{nested}if {result_var}:")
+                    lines.append(f"{nested}    break")
+                    lines.append(
+                        f"{nested}if __loop_step_{start_step} + 1 >= __loop_max_{start_step}:"
+                    )
+                    lines.append(
+                        f"{nested}    raise RuntimeError('Repeat Until step {start_step} reached its safety limit')"
+                    )
+                    lines.append(
+                        f"{nested}time.sleep(as_float({start_action.data.get('iteration_delay', 0.1)!r}))"
+                    )
+                indent_level -= 1
+                lines.append(f"{'    ' * indent_level}# End Loop (step {index})")
+            elif action.action == ActionType.BREAK_LOOP.value:
+                lines.append(f"{prefix}print('Step {index}: break loop')")
+                lines.append(f"{prefix}break")
             continue
+        if not action.enabled:
+            lines.append(f"{'    ' * indent_level}# Action {index} disabled: {action.summary()}")
+            continue
+        emitted_at = len(lines)
         data = action.data
         delay = float(action.delay_before)
         is_click_image = action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value)
@@ -265,6 +364,11 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
             lines.append(f"    drag_x, drag_y = as_int({data.get('end_x', 0)!r}), as_int({data.get('end_y', 0)!r})")
             lines.append(f"    pyautogui.dragTo(drag_x, drag_y, duration=as_float({data.get('duration', 0.5)!r}), button=resolve({data.get('button', 'left')!r}))")
             lines.append("    RUNTIME_VARIABLES['LAST_CLICK_X'], RUNTIME_VARIABLES['LAST_CLICK_Y'] = drag_x, drag_y")
+        if indent_level != 1:
+            prefix = "    " * indent_level
+            for line_index in range(emitted_at, len(lines)):
+                if lines[line_index].startswith("    "):
+                    lines[line_index] = prefix + lines[line_index][4:]
     lines.extend([
         "",
         "if __name__ == '__main__':",
@@ -280,6 +384,28 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
     ])
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+def _condition_expression(action_type: str, data: dict, project: RpaProject) -> str:
+    if action_type in (ActionType.IF_IMAGE_EXISTS.value, ActionType.IF_IMAGE_NOT_EXISTS.value):
+        expression = (
+            f"find_image(PROJECT_DIR / resolve({data.get('image', '')!r}), "
+            f"as_float({data.get('confidence', project.settings.default_confidence)!r}))[0]"
+        )
+        return f"not ({expression})" if action_type == ActionType.IF_IMAGE_NOT_EXISTS.value else expression
+    if action_type == ActionType.IF_WINDOW_EXISTS.value:
+        return (
+            f"window_exists(resolve({data.get('window_title', '')!r}), "
+            f"{bool(data.get('case_sensitive', False))!r})"
+        )
+    if action_type == ActionType.IF_PATH_EXISTS.value:
+        return f"path_exists({data.get('path', '')!r}, {data.get('path_type', 'either')!r})"
+    if action_type == ActionType.IF_VARIABLE.value:
+        return (
+            f"variable_condition({data.get('variable', '')!r}, {data.get('operator', 'equals')!r}, "
+            f"{data.get('value', '')!r}, {bool(data.get('case_sensitive', False))!r})"
+        )
+    raise ValueError(f"Unsupported generated condition: {action_type}")
 
 
 def _write_generated_requirements(out_dir: Path) -> None:

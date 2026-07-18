@@ -9,6 +9,7 @@ import shutil
 from typing import Any
 
 from .models import ActionType, RpaAction, RpaProject, RuntimeInputDefinition
+from .control_flow import CONTROL_TYPES, parse_control_flow, range_structure_issues
 from .utils import MissingPlaceholderError, resolve_placeholders_strict
 from .variables import VARIABLE_NAME_PATTERN, built_in_variables
 
@@ -66,6 +67,27 @@ def validate_project_detailed(
         variables = {}
     supported = {action.value for action in ActionType}
     end_index = len(project.actions) - 1 if end_index is None else min(end_index, len(project.actions) - 1)
+    flow = parse_control_flow(project.actions)
+    for issue in flow.issues + range_structure_issues(flow, start_index, end_index):
+        action = project.actions[issue.step_number - 1] if 0 < issue.step_number <= len(project.actions) else None
+        issues.append(ValidationIssue(
+            issue.level, issue.step_number, _step_name(action) if action else "Control Flow", issue.reason,
+        ))
+    for index, action in enumerate(project.actions):
+        if action.action in CONTROL_TYPES and not action.enabled:
+            issues.append(ValidationIssue(
+                LEVEL_ERROR, index + 1, _step_name(action),
+                "control steps cannot be disabled; remove the block or keep its structure enabled",
+            ))
+        if isinstance(action.data, dict) and str(action.data.get("failure_action", "")).lower() == "jump":
+            target = _integer(action.data.get("failure_jump_step"))
+            if target and 1 <= target <= len(project.actions):
+                target_index = target - 1
+                if flow.depths[index] != flow.depths[target_index] or project.actions[target_index].action in CONTROL_TYPES:
+                    issues.append(ValidationIssue(
+                        LEVEL_ERROR, index + 1, _step_name(action),
+                        "failure jump target cannot enter, leave, or land on a control block",
+                    ))
 
     seen: set[str] = set()
     for index, action in enumerate(project.actions):
@@ -180,6 +202,40 @@ def _validate_action(
     issues: list[ValidationIssue],
 ) -> None:
     action_type = action.action
+    fixed_conditions = {
+        ActionType.IF_IMAGE_EXISTS.value: "image_exists",
+        ActionType.IF_IMAGE_NOT_EXISTS.value: "image_not_exists",
+        ActionType.IF_WINDOW_EXISTS.value: "window_exists",
+        ActionType.IF_PATH_EXISTS.value: "path_exists",
+        ActionType.IF_VARIABLE.value: "variable",
+    }
+    if action_type in fixed_conditions:
+        _validate_condition_data(data, project_dir, number, name, issues, fixed_conditions[action_type])
+        return
+    if action_type == ActionType.REPEAT_COUNT.value:
+        count = _integer(data.get("count"))
+        if count is None or count < 0:
+            _add(issues, LEVEL_ERROR, number, name, "repeat count must be a non-negative whole number")
+        elif count > 10000:
+            _add(issues, LEVEL_WARNING, number, name, "repeat count is very high and may take a long time")
+        return
+    if action_type == ActionType.REPEAT_UNTIL.value:
+        _validate_condition_data(data, project_dir, number, name, issues, str(data.get("condition_type", "variable")))
+        maximum = _integer(data.get("max_iterations", 1000))
+        if maximum is None or maximum < 1:
+            _add(issues, LEVEL_ERROR, number, name, "Repeat Until needs a maximum iteration limit of at least 1")
+        elif maximum > 10000:
+            _add(issues, LEVEL_WARNING, number, name, "maximum iterations is very high and risks a long-running loop")
+        delay = _finite_number(data.get("iteration_delay", 0.0))
+        if delay is None or delay < 0:
+            _add(issues, LEVEL_ERROR, number, name, "loop iteration delay must be non-negative")
+        _add(issues, LEVEL_INFO, number, name, f"loop safety limit: {maximum or '?'} iterations")
+        return
+    if action_type in {
+        ActionType.ELSE.value, ActionType.END_IF.value,
+        ActionType.END_LOOP.value, ActionType.BREAK_LOOP.value,
+    }:
+        return
     image_actions = {ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value}
     if action_type in image_actions:
         image = str(data.get("image") or "").strip()
@@ -248,6 +304,37 @@ def _validate_action(
             except (SyntaxError, ValueError) as exc:
                 reason = getattr(exc, "msg", str(exc))
                 _add(issues, LEVEL_ERROR, number, name, f"Python code is invalid: {reason}")
+
+
+def _validate_condition_data(
+    data: dict[str, Any], project_dir: Path | None, number: int, name: str,
+    issues: list[ValidationIssue], condition_type: str,
+) -> None:
+    if condition_type in {"image_exists", "image_not_exists"}:
+        image = str(data.get("image") or "").strip()
+        if not image:
+            _add(issues, LEVEL_ERROR, number, name, "condition image is required")
+        elif project_dir and not _resolve_path(image, project_dir).is_file():
+            _add(issues, LEVEL_ERROR, number, name, f"condition image is missing: {image}")
+        confidence = _finite_number(data.get("confidence", 0.86))
+        if confidence is None or not 0 < confidence <= 1:
+            _add(issues, LEVEL_ERROR, number, name, "image confidence must be greater than 0 and at most 1")
+    elif condition_type == "window_exists":
+        if not str(data.get("window_title") or "").strip():
+            _add(issues, LEVEL_ERROR, number, name, "window title is required")
+    elif condition_type == "path_exists":
+        if not str(data.get("path") or "").strip():
+            _add(issues, LEVEL_ERROR, number, name, "file or folder path is required")
+        if str(data.get("path_type", "either")) not in {"either", "file", "folder"}:
+            _add(issues, LEVEL_ERROR, number, name, "path type must be File, Folder, or Either")
+    elif condition_type == "variable":
+        if not str(data.get("variable") or "").strip():
+            _add(issues, LEVEL_ERROR, number, name, "variable name is required")
+        operator = str(data.get("operator", "equals"))
+        if operator not in {"equals", "contains", "is_empty"}:
+            _add(issues, LEVEL_ERROR, number, name, "variable comparison must be Equals, Contains, or Is Empty")
+    else:
+        _add(issues, LEVEL_ERROR, number, name, f"unsupported condition type: {condition_type}")
 
 
 def _validate_coordinates(

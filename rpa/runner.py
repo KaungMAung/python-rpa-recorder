@@ -9,8 +9,9 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
 
-from .image_matcher import screenshot_image, wait_for_image
-from .models import ActionType, RpaAction, RpaProject
+from .image_matcher import find_image, screenshot_image, wait_for_image
+from .models import ActionType, RpaAction, RpaProject, condition_summary
+from .control_flow import CONTROL_TYPES, IF_TYPES, LOOP_TYPES, parse_control_flow
 from .utils import MissingPlaceholderError, foreground_elevation_mismatch, resolve_placeholders_strict
 from .variables import prepare_runtime_variables
 
@@ -83,6 +84,7 @@ class ReplayRunner:
         include_start_delay: bool = True,
         respect_enabled: bool = True,
         retry_callback: Callable[[int, int, int, str], None] | None = None,
+        control_callback: Callable[[int, str], None] | None = None,
     ) -> None:
         gui = get_pyautogui()
         gui.FAILSAFE = self.project.settings.pyautogui_failsafe
@@ -95,17 +97,30 @@ class ReplayRunner:
         mismatch = foreground_elevation_mismatch()
         if mismatch:
             raise PermissionError(mismatch[1])
+        flow = parse_control_flow(self.project.actions)
+        if flow.issues:
+            issue = flow.issues[0]
+            action = self.project.actions[max(0, issue.step_number - 1)]
+            raise ReplayActionError(max(0, issue.step_number - 1), action, ValueError(issue.reason))
+        loop_states: dict[int, dict[str, Any]] = {}
         index = start_index
         transitions = 0
         while index <= end_index:
             transitions += 1
-            if transitions > max(1000, total * 100):
+            if transitions > 1_000_000:
                 action = self.project.actions[index]
                 raise ReplayActionError(index, action, RuntimeError("failure jumps exceeded the safety limit"))
             action = self.project.actions[index]
             self.current_index = index
             if self.stop_requested():
                 raise StopReplay()
+            if action.action in CONTROL_TYPES:
+                if respect_enabled and not action.enabled:
+                    raise ReplayActionError(index, action, ValueError("control steps cannot be disabled"))
+                index = self._run_control_step(
+                    index, end_index, flow, loop_states, action_callback, control_callback,
+                )
+                continue
             if respect_enabled and not action.enabled:
                 record = self._start_step_record(action, index)
                 self._finish_step_record(record, "Skipped")
@@ -203,6 +218,205 @@ class ReplayRunner:
             self.log(f"action completed: {index + 1} {action.action}")
             index += 1
         self.log("replay completed")
+
+    def _run_control_step(
+        self,
+        index: int,
+        end_index: int,
+        flow,
+        loop_states: dict[int, dict[str, Any]],
+        action_callback: Callable[[int, str], None] | None,
+        control_callback: Callable[[int, str], None] | None,
+    ) -> int:
+        action = self.project.actions[index]
+        if self.stop_requested():
+            raise StopReplay()
+        if action_callback:
+            action_callback(index, "running")
+        record = self._start_step_record(action, index)
+        record["attempts"] = 1
+        self.total_attempts += 1
+        try:
+            data = resolve_placeholders_strict(action.data, self.runtime_variables)
+            kind = action.action
+            result: dict[str, Any] = {}
+            next_index = index + 1
+            if kind in IF_TYPES:
+                condition_type = {
+                    ActionType.IF_IMAGE_EXISTS.value: "image_exists",
+                    ActionType.IF_IMAGE_NOT_EXISTS.value: "image_not_exists",
+                    ActionType.IF_WINDOW_EXISTS.value: "window_exists",
+                    ActionType.IF_PATH_EXISTS.value: "path_exists",
+                    ActionType.IF_VARIABLE.value: "variable",
+                }[kind]
+                matched, detail = self._evaluate_condition(data, condition_type)
+                else_index = flow.if_else.get(index)
+                end_if = flow.group_ends[index]
+                branch = "If" if matched else ("Else" if else_index is not None else "Skipped")
+                message = f"Condition {condition_summary({**data, 'condition_type': condition_type})}: {matched} · branch={branch}"
+                self._report_control(index, message, control_callback)
+                result = {"kind": "condition", "evaluated": matched, "detail": detail, "branch": branch}
+                if not matched:
+                    skip_end = else_index if else_index is not None else end_if
+                    self._record_skipped_steps(index + 1, skip_end - 1, "If condition was false", action_callback)
+                    next_index = (else_index + 1) if else_index is not None else end_if + 1
+            elif kind == ActionType.ELSE.value:
+                start = flow.else_if[index]
+                end_if = flow.group_ends[start]
+                self._record_skipped_steps(index + 1, end_if - 1, "If branch was selected", action_callback)
+                message = "Else branch skipped because the If condition was true"
+                self._report_control(index, message, control_callback)
+                result = {"kind": "else", "selected": False}
+                next_index = end_if + 1
+            elif kind == ActionType.END_IF.value:
+                result = {"kind": "end_if"}
+            elif kind in LOOP_TYPES:
+                end_loop = flow.loop_end[index]
+                state = loop_states.get(index)
+                if state is None:
+                    state = {"iteration": 1, "type": kind}
+                    loop_states[index] = state
+                if kind == ActionType.REPEAT_COUNT.value:
+                    count = max(0, self._safe_int(data.get("count", 1), 1))
+                    state["limit"] = count
+                    if count == 0:
+                        self._record_skipped_steps(index + 1, end_loop - 1, "Repeat count is zero", action_callback)
+                        loop_states.pop(index, None)
+                        next_index = end_loop + 1
+                        message = "Loop skipped · 0 iterations"
+                    else:
+                        message = f"Loop iteration {state['iteration']}/{count}"
+                else:
+                    state["limit"] = max(1, self._safe_int(data.get("max_iterations", 1000), 1000))
+                    state["data"] = data
+                    message = f"Repeat Until iteration {state['iteration']}/{state['limit']}"
+                self._report_control(index, message, control_callback)
+                result = {
+                    "kind": "loop_start", "loop_type": kind,
+                    "iteration": state["iteration"], "limit": state["limit"],
+                }
+            elif kind == ActionType.END_LOOP.value:
+                start = flow.end_loop_start[index]
+                state = loop_states.get(start)
+                if state is None:
+                    raise ValueError("loop state is missing")
+                if state["type"] == ActionType.REPEAT_COUNT.value:
+                    if state["iteration"] < state["limit"]:
+                        state["iteration"] += 1
+                        message = f"Loop iteration {state['iteration']}/{state['limit']}"
+                        self._report_control(index, message, control_callback)
+                        result = {"kind": "loop_end", "continue": True, "iteration": state["iteration"], "limit": state["limit"]}
+                        next_index = start + 1
+                    else:
+                        message = f"Loop completed · {state['iteration']} iterations"
+                        self._report_control(index, message, control_callback)
+                        result = {"kind": "loop_end", "continue": False, "iterations": state["iteration"]}
+                        loop_states.pop(start, None)
+                else:
+                    matched, detail = self._evaluate_condition(state["data"], str(state["data"].get("condition_type", "variable")))
+                    if matched:
+                        message = f"Repeat Until condition true · completed after {state['iteration']} iterations"
+                        result = {"kind": "loop_end", "condition": True, "detail": detail, "iterations": state["iteration"]}
+                        loop_states.pop(start, None)
+                    elif state["iteration"] >= state["limit"]:
+                        message = f"Repeat Until safety limit reached after {state['iteration']} iterations"
+                        self._report_control(index, message, control_callback)
+                        raise RuntimeError(message)
+                    else:
+                        state["iteration"] += 1
+                        delay = max(0.0, self._safe_float(state["data"].get("iteration_delay", 0.0), 0.0))
+                        if delay:
+                            self.sleep_checked(delay)
+                        message = f"Repeat Until condition false · iteration {state['iteration']}/{state['limit']}"
+                        result = {"kind": "loop_end", "condition": False, "detail": detail, "iteration": state["iteration"]}
+                        next_index = start + 1
+                    self._report_control(index, message, control_callback)
+            elif kind == ActionType.BREAK_LOOP.value:
+                loops = flow.enclosing_loops.get(index, [])
+                if not loops:
+                    raise ValueError("Break Loop is not inside a loop")
+                start = loops[-1]
+                end_loop = flow.loop_end[start]
+                for nested_start in [key for key in loop_states if key >= start]:
+                    loop_states.pop(nested_start, None)
+                self._record_skipped_steps(index + 1, end_loop - 1, "Break Loop selected", action_callback)
+                message = f"Break Loop · leaving loop at Step {start + 1}"
+                self._report_control(index, message, control_callback)
+                result = {"kind": "break", "loop_step": start + 1}
+                next_index = end_loop + 1
+            record["control_result"] = result
+            self._finish_step_record(record, "Success")
+            if action_callback:
+                action_callback(index, "completed")
+            return next_index
+        except StopReplay:
+            raise
+        except Exception as exc:
+            record["control_result"] = {"kind": "control_error"}
+            self._finish_step_record(record, "Failed", str(exc))
+            if action_callback:
+                action_callback(index, "failed")
+            raise ReplayActionError(index, action, exc) from exc
+
+    def _evaluate_condition(self, data: dict[str, Any], condition_type: str) -> tuple[bool, str]:
+        if self.stop_requested():
+            raise StopReplay()
+        if condition_type in {"image_exists", "image_not_exists"}:
+            image = self.project_dir / str(data.get("image", ""))
+            match = find_image(image, float(data.get("confidence", self.project.settings.default_confidence)), self.excluded_regions)
+            found = bool(match.found)
+            result = not found if condition_type == "image_not_exists" else found
+            return result, f"found={found}, confidence={float(getattr(match, 'confidence', 0.0)):.3f}"
+        if condition_type == "window_exists":
+            wanted = str(data.get("window_title", ""))
+            case_sensitive = bool(data.get("case_sensitive", False))
+            titles = get_pyautogui().getAllTitles() if hasattr(get_pyautogui(), "getAllTitles") else []
+            compare = wanted if case_sensitive else wanted.casefold()
+            matched_title = next((title for title in titles if compare in (title if case_sensitive else title.casefold())), None)
+            return matched_title is not None, f"matched={matched_title or 'none'}"
+        if condition_type == "path_exists":
+            path = Path(str(data.get("path", ""))).expanduser()
+            if not path.is_absolute():
+                path = self.project_dir / path
+            path_type = str(data.get("path_type", "either"))
+            result = path.is_file() if path_type == "file" else path.is_dir() if path_type == "folder" else path.exists()
+            return result, f"path={path}, type={path_type}"
+        if condition_type == "variable":
+            name = str(data.get("variable", ""))
+            actual = self.runtime_variables.get(name)
+            operator = str(data.get("operator", "equals"))
+            expected = data.get("value", "")
+            case_sensitive = bool(data.get("case_sensitive", False))
+            actual_text, expected_text = str(actual if actual is not None else ""), str(expected)
+            if not case_sensitive:
+                actual_text, expected_text = actual_text.casefold(), expected_text.casefold()
+            if operator == "is_empty":
+                result = actual is None or str(actual).strip() == ""
+            elif operator == "contains":
+                result = expected_text in actual_text
+            else:
+                result = actual_text == expected_text
+            return result, f"variable={name}, operator={operator}, result={result}"
+        raise ValueError(f"unsupported condition type: {condition_type}")
+
+    def _report_control(
+        self, index: int, message: str, callback: Callable[[int, str], None] | None,
+    ) -> None:
+        self.log(f"[Step {index + 1}] {message}")
+        if callback:
+            callback(index, message)
+
+    def _record_skipped_steps(
+        self, start: int, end: int, reason: str,
+        action_callback: Callable[[int, str], None] | None,
+    ) -> None:
+        for skipped_index in range(max(0, start), min(end, len(self.project.actions) - 1) + 1):
+            skipped_action = self.project.actions[skipped_index]
+            record = self._start_step_record(skipped_action, skipped_index)
+            record["control_result"] = {"kind": "branch_skip", "reason": reason}
+            self._finish_step_record(record, "Skipped")
+            if action_callback:
+                action_callback(skipped_index, "skipped")
 
     def run_action(
         self,

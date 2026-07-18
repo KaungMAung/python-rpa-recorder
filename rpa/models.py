@@ -39,6 +39,17 @@ class ActionType(str, Enum):
     CLICK_COORDINATE = "click_coordinate"
     MOUSE_MOVE = "mouse_move"
     DRAG = "drag"
+    IF_IMAGE_EXISTS = "if_image_exists"
+    IF_IMAGE_NOT_EXISTS = "if_image_not_exists"
+    IF_WINDOW_EXISTS = "if_window_exists"
+    IF_PATH_EXISTS = "if_path_exists"
+    IF_VARIABLE = "if_variable"
+    ELSE = "else"
+    END_IF = "end_if"
+    REPEAT_COUNT = "repeat_count"
+    REPEAT_UNTIL = "repeat_until"
+    END_LOOP = "end_loop"
+    BREAK_LOOP = "break_loop"
 
 
 class ActionStatus(str, Enum):
@@ -148,6 +159,30 @@ class RpaAction:
             return f"Move mouse to ({data.get('x')}, {data.get('y')})"
         if self.action == ActionType.DRAG.value:
             return f"Drag from ({data.get('start_x')}, {data.get('start_y')}) to ({data.get('end_x')}, {data.get('end_y')})"
+        if self.action == ActionType.IF_IMAGE_EXISTS.value:
+            return f"If image exists: {data.get('image') or 'choose an image'}"
+        if self.action == ActionType.IF_IMAGE_NOT_EXISTS.value:
+            return f"If image does not exist: {data.get('image') or 'choose an image'}"
+        if self.action == ActionType.IF_WINDOW_EXISTS.value:
+            return f"If window exists: {data.get('window_title') or 'enter a title'}"
+        if self.action == ActionType.IF_PATH_EXISTS.value:
+            return f"If {data.get('path_type', 'file or folder')} exists: {data.get('path') or 'choose a path'}"
+        if self.action == ActionType.IF_VARIABLE.value:
+            operator = str(data.get("operator", "equals")).replace("_", " ")
+            value = "" if operator == "is empty" else f" {data.get('value', '')}"
+            return f"If {data.get('variable') or 'variable'} {operator}{value}"
+        if self.action == ActionType.ELSE.value:
+            return "Else"
+        if self.action == ActionType.END_IF.value:
+            return "End If"
+        if self.action == ActionType.REPEAT_COUNT.value:
+            return f"Repeat {data.get('count', 1)} times"
+        if self.action == ActionType.REPEAT_UNTIL.value:
+            return f"Repeat until {condition_summary(data)}"
+        if self.action == ActionType.END_LOOP.value:
+            return "End Loop"
+        if self.action == ActionType.BREAK_LOOP.value:
+            return "Break Loop"
         return self.action
 
     def friendly_name(self) -> str:
@@ -257,4 +292,29 @@ FRIENDLY_ACTION_NAMES = {
     ActionType.CLICK_COORDINATE.value: "Click Position",
     ActionType.MOUSE_MOVE.value: "Mouse Move",
     ActionType.DRAG.value: "Drag",
+    ActionType.IF_IMAGE_EXISTS.value: "If Image Exists",
+    ActionType.IF_IMAGE_NOT_EXISTS.value: "If Image Does Not Exist",
+    ActionType.IF_WINDOW_EXISTS.value: "If Window Exists",
+    ActionType.IF_PATH_EXISTS.value: "If File or Folder Exists",
+    ActionType.IF_VARIABLE.value: "If Variable",
+    ActionType.ELSE.value: "Else",
+    ActionType.END_IF.value: "End If",
+    ActionType.REPEAT_COUNT.value: "Repeat N Times",
+    ActionType.REPEAT_UNTIL.value: "Repeat Until",
+    ActionType.END_LOOP.value: "End Loop",
+    ActionType.BREAK_LOOP.value: "Break Loop",
 }
+
+
+def condition_summary(data: dict[str, Any]) -> str:
+    kind = str(data.get("condition_type", "variable"))
+    if kind in {"image_exists", "image_not_exists"}:
+        verb = "does not exist" if kind == "image_not_exists" else "exists"
+        return f"image {data.get('image') or '?'} {verb}"
+    if kind == "window_exists":
+        return f"window '{data.get('window_title') or '?'}' exists"
+    if kind == "path_exists":
+        return f"{data.get('path') or 'path'} exists"
+    operator = str(data.get("operator", "equals")).replace("_", " ")
+    suffix = "" if operator == "is empty" else f" {data.get('value', '')}"
+    return f"{data.get('variable') or 'variable'} {operator}{suffix}"
