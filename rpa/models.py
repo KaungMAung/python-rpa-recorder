@@ -62,6 +62,7 @@ class ProjectSettings:
     pre_click_pause: float = 0.10
     ignore_application_window: bool = True
     pyautogui_failsafe: bool = True
+    show_desktop_before_recording: bool = True
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ProjectSettings":

@@ -37,10 +37,10 @@ python -m venv .venv
 
 1. Click `New` or open an existing project.
 2. Click `Record` and select a project folder if prompted.
-3. The main window hides and a compact always-on-top toolbar appears.
-4. Perform actions in other applications.
+3. By default, the app hides, shows the Windows desktop, and displays a three-second countdown in the compact always-on-top toolbar. Input capture begins only after that countdown, so neither preparation nor the desktop shortcut becomes a step. Turn this off in Settings with **Show desktop before recording**.
+4. Perform actions in other applications. Stopping or cancelling restores only Python RPA Recorder; the other desktop windows remain as they are.
 5. Use `Pause`, `Resume`, `Stop`, or `Cancel` from the floating toolbar.
-6. Review, rename, edit, enable, disable, test, delete, or reorder recorded steps.
+6. Review, rename, edit, enable, disable, test, delete, or reorder recorded steps. Use the step search box to narrow a flow, Ctrl/Cmd-click or Shift-click rows for bulk enable/disable and deletion, and Ctrl+Z / Ctrl+Y for undo/redo.
 
 The recorder buffers printable typing into `type_text` actions, stores hotkeys as one action, preserves recorded runtime delays, and saves click screenshots under `screenshots/`.
 
@@ -77,7 +77,7 @@ Only one flow runs at a time: if a different flow is already running, new runs a
 
 ## Step Details
 
-Select a step to edit its friendly name and common settings on the right. Technical target settings such as match accuracy, timeout, image path, original coordinates, and click offsets are kept under `Advanced Settings`. Deselecting a step does not hide the step list.
+Select a step to edit its friendly name and common settings on the right. Technical target settings such as match accuracy, timeout, image path, original coordinates, and click offsets are kept under `Advanced Settings`. Target previews retain their original aspect ratio and point out missing screenshots. Deselecting a step does not hide the step list.
 
 The logs panel starts collapsed and can be expanded from its header. Window geometry, splitter positions, table widths, the logs state, and the Advanced section state are stored with `QSettings`.
 
@@ -166,7 +166,7 @@ Run these checks on the same Windows account and display configuration that will
 ### Recording, Pause, Resume, and Stop
 
 1. Start the recorder with `.\.venv\Scripts\python.exe app.py` and create a flow named `Notepad Verification`.
-2. Open Notepad and click `Record`. Confirm the main window hides and the floating recording toolbar remains on top.
+2. Open Notepad and click `Record`. Confirm the main window hides, Windows shows the desktop, the floating recording toolbar remains on top, and capture does not begin until its three-second countdown ends.
 3. Click in Notepad, type `Hello from Python RPA Recorder`, press Enter, type `Second line`, and press Ctrl+S.
 4. Click `Pause`, type `THIS MUST NOT BE RECORDED`, and click `Resume`.
 5. Close or cancel the Notepad Save dialog, return to Notepad, scroll, then click `Stop`.

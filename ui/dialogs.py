@@ -163,6 +163,9 @@ class SettingsDialog(QDialog):
         self.ignore_app.setChecked(settings.ignore_application_window)
         self.failsafe = QCheckBox()
         self.failsafe.setChecked(settings.pyautogui_failsafe)
+        self.show_desktop = QCheckBox()
+        self.show_desktop.setChecked(settings.show_desktop_before_recording)
+        self.show_desktop.setToolTip("Minimize open windows before capture begins. Windows are not restored afterward.")
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -179,6 +182,7 @@ class SettingsDialog(QDialog):
         layout.addRow("Start delay", self.start_delay)
         layout.addRow("Pre-click pause", self.pre_click_pause)
         layout.addRow("Ignore application window", self.ignore_app)
+        layout.addRow("Show desktop before recording", self.show_desktop)
         layout.addRow("PyAutoGUI failsafe", self.failsafe)
         layout.addWidget(buttons)
 
@@ -208,6 +212,7 @@ class SettingsDialog(QDialog):
         self.settings.start_delay = self.start_delay.value()
         self.settings.pre_click_pause = self.pre_click_pause.value()
         self.settings.ignore_application_window = self.ignore_app.isChecked()
+        self.settings.show_desktop_before_recording = self.show_desktop.isChecked()
         self.settings.pyautogui_failsafe = self.failsafe.isChecked()
         qsettings = QSettings("PythonRPARecorder", "PythonRPARecorder")
         for key, value in self.settings.__dict__.items():

@@ -39,6 +39,22 @@ class FloatingRecorderToolbar(QWidget):
         self.timer.start(250)
         self._apply_colors()
 
+    def set_preparing(self, seconds: int) -> None:
+        """Show preparation without enabling capture controls yet."""
+        self.status.setText(f"Starting in {seconds}…")
+        self.pause_btn.setEnabled(False)
+        self.stop_btn.setEnabled(False)
+        self.setStyleSheet(
+            "QWidget { background: #eff6ff; border: 1px solid #bfdbfe; } "
+            "QLabel { color: #1d4ed8; font-weight: 600; } "
+            "QPushButton { padding: 4px 10px; }"
+        )
+
+    def set_recording(self) -> None:
+        self.pause_btn.setEnabled(True)
+        self.stop_btn.setEnabled(True)
+        self.set_paused(False)
+
     def _tick(self) -> None:
         seconds = int(time.monotonic() - self.started)
         self.elapsed.setText(f"{seconds // 60:02d}:{seconds % 60:02d}")
