@@ -4,12 +4,13 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QTimer, Qt
+from PySide6.QtCore import QEvent, QSettings, QTimer, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialogButtonBox, QPlainTextEdit
 
-from rpa.models import ActionType, ProjectSettings, RpaAction
+from rpa.models import ActionType, ProjectSettings, RpaAction, RpaProject
+from rpa.project_manager import ProjectManager
 from ui.dialogs import ManualActionDialog
 from ui.main_window import MainWindow
 from ui.main_window import sanitize_flow_name
@@ -191,3 +192,20 @@ def test_toolbar_add_step_updates_and_persists_active_flow(tmp_path) -> None:
     assert loaded.actions[-1].action == ActionType.CLICK_COORDINATE.value
     generated = generate_python(loaded, tmp_path).read_text(encoding="utf-8")
     assert "pyautogui.click(0, 0" in generated
+
+
+def test_startup_reopens_last_saved_flow(tmp_path) -> None:
+    project = RpaProject(actions=[RpaAction(ActionType.WAIT.value, {"seconds": 1})])
+    ProjectManager().save(project, tmp_path)
+    settings = QSettings("PythonRPARecorder", "PythonRPARecorder")
+    previous = settings.value("last_project_path")
+    settings.setValue("last_project_path", str(tmp_path / "project.json"))
+    try:
+        window = MainWindow()
+        assert window.project_dir == tmp_path
+        assert len(window.project.actions) == 1
+    finally:
+        if previous is None:
+            settings.remove("last_project_path")
+        else:
+            settings.setValue("last_project_path", previous)

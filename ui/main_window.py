@@ -191,6 +191,7 @@ class MainWindow(QMainWindow):
         self.refresh()
         self._reset_history()
         self._restore_layout_settings()
+        self._open_last_project()
 
     def _build_ui(self) -> None:
         self.toolbar = QToolBar()
@@ -540,6 +541,7 @@ class MainWindow(QMainWindow):
                 self.project_dir = flow_dir
                 self.dirty = False
                 self._reset_history()
+                self._remember_project_path()
                 self.log(f"opened flow: {flow_dir}")
                 return True
             except Exception as exc:
@@ -550,6 +552,7 @@ class MainWindow(QMainWindow):
         self.manager.save(self.project, self.project_dir)
         self.dirty = False
         self._reset_history()
+        self._remember_project_path()
         self.log(f"created flow: {flow_dir}")
         return True
 
@@ -565,6 +568,7 @@ class MainWindow(QMainWindow):
         self.log(f"[Project Save] writing {len(self.project.actions)} steps to {self.project_dir}")
         self.manager.save(self.project, self.project_dir)
         self.dirty = False
+        self._remember_project_path()
         self.log("project saved")
         self.update_status()
 
@@ -575,6 +579,7 @@ class MainWindow(QMainWindow):
         self.manager.save_as(self.project, self.project_dir, Path(folder))
         self.project_dir = Path(folder)
         self.dirty = False
+        self._remember_project_path()
         self.log("project saved as")
         self.update_status()
 
@@ -1618,10 +1623,34 @@ class MainWindow(QMainWindow):
             self.project_dir = path.parent
             self.dirty = False
             self._reset_history()
+            self._remember_project_path()
             self.log(f"opened project: {path}")
             self.refresh()
         except Exception as exc:
             show_error(self, "Open failed", str(exc))
+
+    def _remember_project_path(self) -> None:
+        if self.project_dir:
+            self.settings.setValue("last_project_path", str(self.project_dir / "project.json"))
+
+    def _open_last_project(self) -> None:
+        value = self.settings.value("last_project_path", "", type=str)
+        if not value:
+            return
+        path = Path(value)
+        if not path.is_file():
+            self.settings.remove("last_project_path")
+            return
+        try:
+            self.project = self.manager.load(path)
+            self.project_dir = path.parent
+            self.dirty = False
+            self._reset_history()
+            self.log(f"reopened last project: {path}")
+            self.refresh()
+        except Exception as exc:
+            self.settings.remove("last_project_path")
+            self.log(f"could not reopen last project: {exc}")
 
     def closeEvent(self, event) -> None:
         self._save_layout_settings()
