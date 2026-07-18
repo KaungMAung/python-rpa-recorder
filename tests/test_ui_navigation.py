@@ -6,7 +6,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import QApplication, QPlainTextEdit
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QPlainTextEdit
 
 from rpa.models import ActionType, ProjectSettings, RpaAction
 from ui.dialogs import ManualActionDialog
@@ -153,35 +154,40 @@ def test_inserted_step_clears_filter_and_is_visible() -> None:
     assert window.table.selected_index() == 2
 
 
-def test_manual_step_is_saved_to_active_flow(tmp_path, monkeypatch) -> None:
+def test_toolbar_add_step_updates_and_persists_active_flow(tmp_path) -> None:
     from rpa.generator import generate_python
     from rpa.project_manager import ProjectManager
 
     window = window_with_actions()
+    window.project.actions.extend(RpaAction(ActionType.WAIT.value, {"seconds": 1}) for _ in range(7))
     window.project_dir = tmp_path
-    window._reset_history()
-    original_exec = ManualActionDialog.exec
+    ProjectManager().save(window.project, tmp_path)
+    window.open_project_path(tmp_path / "project.json")
+    assert len(window.project.actions) == 9
+    def accept_real_dialog() -> None:
+        dialogs = [widget for widget in QApplication.topLevelWidgets() if isinstance(widget, ManualActionDialog) and widget.isVisible()]
+        if not dialogs:
+            QTimer.singleShot(10, accept_real_dialog)
+            return
+        button_box = dialogs[0].findChild(QDialogButtonBox)
+        QTest.mouseClick(button_box.button(QDialogButtonBox.Ok), Qt.LeftButton)
 
-    def accept_default_step(dialog):
-        QTimer.singleShot(0, dialog.accept)
-        return original_exec(dialog)
+    QTimer.singleShot(10, accept_real_dialog)
+    QTest.mouseClick(window.buttons["Add Manual Action"], Qt.LeftButton)
 
-    monkeypatch.setattr(ManualActionDialog, "exec", accept_default_step)
-    window.add_manual_action()
-
-    assert len(window.project.actions) == 3
-    assert window.table.rowCount() == 3
-    assert window.table.selected_index() == 2
+    assert len(window.project.actions) == 10
+    assert window.table.rowCount() == 10
+    assert window.table.selected_index() == 9
     assert window.dirty
 
     window.undo()
-    assert len(window.project.actions) == 2
+    assert len(window.project.actions) == 9
     window.redo()
-    assert len(window.project.actions) == 3
+    assert len(window.project.actions) == 10
 
     window.save_project()
     loaded = ProjectManager().load(tmp_path / "project.json")
-    assert len(loaded.actions) == 3
+    assert len(loaded.actions) == 10
     assert loaded.actions[-1].action == ActionType.CLICK_COORDINATE.value
     generated = generate_python(loaded, tmp_path).read_text(encoding="utf-8")
     assert "pyautogui.click(0, 0" in generated

@@ -562,6 +562,7 @@ class MainWindow(QMainWindow):
     def save_project(self) -> None:
         if not self.ensure_project_dir():
             return
+        self.log(f"[Project Save] writing {len(self.project.actions)} steps to {self.project_dir}")
         self.manager.save(self.project, self.project_dir)
         self.dirty = False
         self.log("project saved")
@@ -1308,15 +1309,22 @@ class MainWindow(QMainWindow):
     def add_manual_action(self, position: str | None = None) -> None:
         if not self.ensure_project_dir():
             return
+        before_count = len(self.project.actions)
+        self.log(f"[Add Step] opening dialog; project has {before_count} steps")
         dialog = ManualActionDialog(self.project.settings, self.project.variables, self)
         dialog.screen_pick_requested.connect(lambda role: self._begin_manual_target_capture(dialog, role))
-        if dialog.exec() == QDialog.Accepted:
-            action = dialog.action()
-            self._materialize_manual_image(action)
-            if action.action == ActionType.PYTHON_CODE.value and not self.confirm_python_code_warning():
-                return
-            self.insert_action(action, position)
-            self.update_status("Manual step added")
+        result = dialog.exec()
+        self.log(f"[Add Step] dialog result: {'accepted' if result == QDialog.Accepted else 'cancelled'}")
+        if result != QDialog.Accepted:
+            return
+        action = dialog.action()
+        self.log(f"[Add Step] action created: {action.action} ({action.summary()})")
+        self._materialize_manual_image(action)
+        if action.action == ActionType.PYTHON_CODE.value and not self.confirm_python_code_warning():
+            return
+        self.insert_action(action, position)
+        self.log(f"[Add Step] inserted; project now has {len(self.project.actions)} steps")
+        self.update_status("Manual step added")
 
     def _materialize_manual_image(self, action: RpaAction) -> None:
         """Import a manually chosen image into the flow so projects stay portable."""
@@ -1406,7 +1414,7 @@ class MainWindow(QMainWindow):
         self.refresh()
         self.table.selectRow(insert_at)
         self.table.scrollToItem(self.table.item(insert_at, 0))
-        self.log(f"step {insert_at + 1} added: {action.summary()}")
+        self.log(f"[Add Step] table refreshed to {self.table.rowCount()} rows; selected step {insert_at + 1}")
 
     def delete_action(self) -> None:
         indices = self.table.selected_indices()
