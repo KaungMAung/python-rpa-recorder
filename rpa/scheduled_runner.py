@@ -1,7 +1,6 @@
 """Standalone scheduled execution invoked by Windows Task Scheduler."""
 from __future__ import annotations
 
-import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -10,6 +9,9 @@ from PySide6.QtCore import QObject, QPoint, QRect, QSettings, QTimer, Signal
 from PySide6.QtWidgets import QApplication
 
 from .evidence import RunEvidenceSession
+from .desktop_lifecycle import (
+    recorder_window_handles, restore_recorder_windows, show_windows_desktop,
+)
 from .models import RpaProject
 from .project_manager import ProjectManager
 from .runner import ReplayActionError, ReplayRunner, StopReplay
@@ -55,8 +57,17 @@ class ScheduledRunController(QObject):
             self._finish({"status": STATUS_FAILED, "error": error, "failed_step": None, "attempts": 0, "steps": []})
             return
         if self.project is not None and self.project.settings.hide_window_during_replay:
-            self._recorder_windows = _recorder_window_handles()
-            _show_windows_desktop()
+            try:
+                self._prepare_desktop()
+            except Exception as exc:
+                self._finish({
+                    "status": STATUS_FAILED,
+                    "error": f"Could not prepare the Windows desktop: {exc}",
+                    "failed_step": None,
+                    "attempts": 0,
+                    "steps": [],
+                })
+                return
         self.toolbar = FloatingExecutionToolbar()
         self.toolbar.stop_requested.connect(self.stop)
         self.toolbar.set_status(f"Scheduled: {self.schedule.flow_name}")
@@ -188,6 +199,10 @@ class ScheduledRunController(QObject):
             )
             self.store.set(self.schedule)
             self.store.save()
+        if self.toolbar:
+            self.toolbar.close()
+            self.toolbar = None
+        self._restore_desktop()
         if self.evidence is not None:
             try:
                 self.evidence.finalize(
@@ -196,10 +211,6 @@ class ScheduledRunController(QObject):
                 )
             except Exception:
                 self.evidence.close()
-        if self.toolbar:
-            self.toolbar.close()
-            self.toolbar = None
-        _restore_windows(self._recorder_windows)
         self.exit_code = 0 if status == STATUS_SUCCESS else 2
         self.app.exit(self.exit_code)
 
@@ -207,6 +218,25 @@ class ScheduledRunController(QObject):
         safe = mask_sensitive_text(str(message), self.secret_values)
         if self.evidence:
             self.evidence.logger.info(safe)
+
+    def _prepare_desktop(self) -> None:
+        self._log("scheduled desktop preparation started")
+        self._recorder_windows = recorder_window_handles()
+        minimized = show_windows_desktop()
+        self._log(
+            f"scheduled desktop prepared: minimized {minimized} window(s); "
+            f"recorder windows to restore: {len(self._recorder_windows)}"
+        )
+
+    def _restore_desktop(self) -> None:
+        handles = self._recorder_windows
+        self._recorder_windows = []
+        try:
+            restored = restore_recorder_windows(handles)
+        except Exception as exc:
+            self._log(f"scheduled cleanup could not restore the recorder window: {exc}")
+            return
+        self._log(f"scheduled cleanup restored {restored} recorder window(s)")
 
     def _position_toolbar(self) -> None:
         if not self.toolbar:
@@ -237,50 +267,6 @@ def scheduled_run_main(app: QApplication, project_json: Path, schedule_id: str) 
     controller = ScheduledRunController(app, project_json, schedule_id)
     QTimer.singleShot(0, controller.start)
     return controller, app.exec()
-
-
-def _show_windows_desktop() -> None:
-    if sys.platform != "win32":
-        return
-    import ctypes
-    user32 = ctypes.windll.user32
-    key_up = 0x0002
-    user32.keybd_event(0x5B, 0, 0, 0)
-    user32.keybd_event(0x44, 0, 0, 0)
-    user32.keybd_event(0x44, 0, key_up, 0)
-    user32.keybd_event(0x5B, 0, key_up, 0)
-
-
-def _recorder_window_handles() -> list[int]:
-    if sys.platform != "win32":
-        return []
-    import ctypes
-    from ctypes import wintypes
-    handles: list[int] = []
-    user32 = ctypes.windll.user32
-    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-
-    def callback(hwnd, _lparam):
-        length = user32.GetWindowTextLengthW(hwnd)
-        if length and user32.IsWindowVisible(hwnd):
-            buffer = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, buffer, length + 1)
-            if buffer.value == "Python RPA Recorder":
-                handles.append(int(hwnd))
-        return True
-
-    user32.EnumWindows(callback_type(callback), 0)
-    return handles
-
-
-def _restore_windows(handles: list[int]) -> None:
-    if sys.platform != "win32" or not handles:
-        return
-    import ctypes
-    user32 = ctypes.windll.user32
-    for hwnd in handles:
-        if user32.IsWindow(hwnd):
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE; does not restore other desktop windows.
 
 
 def _mask(value: Any, secrets: set[str]) -> Any:

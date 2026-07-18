@@ -746,18 +746,13 @@ class MainWindow(QMainWindow):
         self.update_buttons()
 
     def _show_windows_desktop(self) -> None:
-        """Send Win+D before recording/replay hooks start; it never becomes an RPA step."""
+        """Minimize normal windows before hooks start; it never becomes an RPA step."""
         if sys.platform != "win32":
             return
         try:
-            import ctypes
+            from rpa.desktop_lifecycle import show_windows_desktop
 
-            user32 = ctypes.windll.user32
-            key_up = 0x0002
-            user32.keybd_event(0x5B, 0, 0, 0)
-            user32.keybd_event(0x44, 0, 0, 0)
-            user32.keybd_event(0x44, 0, key_up, 0)
-            user32.keybd_event(0x5B, 0, key_up, 0)
+            show_windows_desktop()
         except Exception as exc:
             self.log(f"Could not show the desktop before recording or replay: {exc}")
 

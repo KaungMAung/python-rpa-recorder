@@ -158,7 +158,7 @@ def test_query_reports_deleted_windows_task_as_missing(tmp_path: Path, monkeypat
     assert result.status == TASK_MISSING
 
 
-def test_scheduled_controller_updates_existing_history_and_evidence(tmp_path: Path) -> None:
+def test_scheduled_controller_updates_existing_history_and_evidence(tmp_path: Path, monkeypatch) -> None:
     from PySide6.QtWidgets import QApplication
     import rpa.runner as runner_module
     from rpa.scheduled_runner import ScheduledRunController
@@ -173,6 +173,7 @@ def test_scheduled_controller_updates_existing_history_and_evidence(tmp_path: Pa
     runner_module.pyautogui = SimpleNamespace(FAILSAFE=True)
 
     controller = ScheduledRunController(app, project_json, schedule.schedule_id)
+    monkeypatch.setattr(controller.app, "exit", lambda _code=0: None)
     assert controller._prepare() is None
     controller.runner.run(include_start_delay=False)
     controller._finish({
@@ -186,6 +187,38 @@ def test_scheduled_controller_updates_existing_history_and_evidence(tmp_path: Pa
     assert restored.history[-1].evidence_path
     evidence = tmp_path / "scheduled_flow" / restored.history[-1].evidence_path
     assert (evidence / "summary.json").exists()
+
+
+def test_scheduled_desktop_lifecycle_restores_only_captured_recorder_windows(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from PySide6.QtWidgets import QApplication
+    import rpa.scheduled_runner as scheduled_module
+
+    app = QApplication.instance() or QApplication([])
+    project_json = _project(tmp_path, "desktop_flow")
+    store = ScheduleStore(tmp_path)
+    schedule = store.get("desktop_flow")
+    store.set(schedule)
+    store.save()
+    controller = scheduled_module.ScheduledRunController(app, project_json, schedule.schedule_id)
+    messages = []
+    restored = []
+    monkeypatch.setattr(scheduled_module, "recorder_window_handles", lambda: [101, 202])
+    monkeypatch.setattr(scheduled_module, "show_windows_desktop", lambda: 6)
+    monkeypatch.setattr(
+        scheduled_module, "restore_recorder_windows",
+        lambda handles: restored.extend(handles) or len(handles),
+    )
+    monkeypatch.setattr(controller, "_log", messages.append)
+
+    controller._prepare_desktop()
+    controller._restore_desktop()
+
+    assert restored == [101, 202]
+    assert controller._recorder_windows == []
+    assert "minimized 6 window(s)" in messages[1]
+    assert "restored 2 recorder window(s)" in messages[2]
 
 
 def test_sanitized_task_component_removes_scheduler_reserved_characters() -> None:

@@ -18,6 +18,7 @@ The main workflow is `Record -> Review -> Test -> Run`. The step list remains vi
 - `rpa/scheduler.py` stores schedules and persistent run history (`flows/schedules.json`).
 - `rpa/windows_tasks.py` registers one Windows Task Scheduler task per saved schedule and builds the standalone runner command.
 - `rpa/scheduled_runner.py` runs a scheduled flow without requiring the main recorder window to remain open.
+- `rpa/desktop_lifecycle.py` performs deterministic Windows desktop preparation and recorder-only restoration.
 - `ui/schedule_dialog.py` is the Schedule Flows page used to enable, adjust, and monitor those schedules.
 - `ui/debug_variables_dialog.py` presents editable non-sensitive runtime values while a breakpoint is paused.
 
@@ -92,7 +93,7 @@ PythonRPARecorder.exe --project "<project.json path>" --schedule-id "<id>" --sch
 
 When running from source, the equivalent command uses the current Python interpreter and `app.py`. Paths are passed as separate arguments and quoted in the Task Scheduler XML rather than stored as a shell command.
 
-Scheduled runs use the same validation, evidence, history, runtime-input, retry, and desktop preparation behavior as manual Run. Windows shows the desktop before execution, the safely positioned floating **Stop Run** control remains available, and any open recorder window is restored after success, failure, timeout, or stop. Other minimized applications remain minimized. Results are written directly to the existing run-history storage, so they appear when Schedule Flows is opened after the recorder has been closed.
+Scheduled runs use the same validation, evidence, history, runtime-input, retry, and desktop preparation behavior as manual Run. Windows deterministically minimizes normal top-level windows before execution (it does not use the toggling Win+D shortcut), the safely positioned floating **Stop Run** control remains available, and a recorder window that was visible before preparation is restored after success, failure, timeout, or stop. Other minimized applications remain minimized. Results are written directly to the existing run-history storage, so they appear when Schedule Flows is opened after the recorder has been closed. Desktop preparation and recorder restoration counts are written to the run evidence log for troubleshooting.
 
 Schedules and run history are stored permanently in `flows/schedules.json` and persist across app restarts. Additional schedules are stored alongside the compatible primary flow schedule. History includes start/end time, duration, total step attempts, final status, failed/stopped step, and error. It keeps the latest 100 records per schedule by default; adjust the retention control in the Details panel from 10 to 1,000 records. Existing schedule files are migrated automatically from their previous latest-run fields.
 
