@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from rpa.generator import generate_python
+from rpa.evidence import RunEvidenceSession
 from rpa.image_matcher import find_image, save_crop_from_image, screenshot_image, virtual_screen_origin
 from rpa.models import ActionType, ProjectSettings, RecorderState, RpaAction, RpaProject
 from rpa.project_manager import ProjectManager
@@ -62,12 +63,13 @@ from rpa.validator import (
     ValidationIssue,
     validate_project_detailed,
 )
-from rpa.utils import create_file_logger, foreground_elevation_mismatch
+from rpa.utils import foreground_elevation_mismatch
 from ui.action_editor import ActionEditor
 from ui.action_table import ActionTable
 from ui.dialogs import ManualActionDialog, SettingsDialog, VariablesDialog, load_default_project_settings, show_error
 from ui.recorder_toolbar import FloatingExecutionToolbar, FloatingRecorderToolbar
 from ui.schedule_dialog import ScheduleFlowsDialog
+from ui.run_details_dialog import RunDetailsDialog
 from ui.target_capture import TargetCaptureOverlay
 
 
@@ -107,9 +109,10 @@ class ReplayWorker(QObject):
         respect_enabled: bool = True,
         runtime_variables: dict | None = None,
         excluded_regions: list[tuple[int, int, int, int]] | None = None,
+        evidence_dir: Path | None = None,
     ) -> None:
         super().__init__()
-        self.runner = ReplayRunner(project, project_dir, self.log.emit, excluded_regions)
+        self.runner = ReplayRunner(project, project_dir, self.log.emit, excluded_regions, evidence_dir)
         self.start_index = start_index
         self.end_index = end_index
         self.include_start_delay = include_start_delay
@@ -169,6 +172,10 @@ class MainWindow(QMainWindow):
         self.replay_thread: QThread | None = None
         self.replay_worker: ReplayWorker | None = None
         self.run_log_path: Path | None = None
+        self.active_evidence: RunEvidenceSession | None = None
+        self.last_evidence_folder: Path | None = None
+        self._last_validation_issues: list[ValidationIssue] = []
+        self._active_history_flow: str | None = None
         self.recording_started_at: float | None = None
         self.recording_start_action_count = 0
         self.recording_was_dirty = False
@@ -315,6 +322,7 @@ class MainWindow(QMainWindow):
         self.copy_logs_btn = QPushButton("Copy")
         self.save_logs_btn = QPushButton("Save Log")
         self.open_log_btn = QPushButton("Open File")
+        self.run_details_btn = QPushButton("Run Details")
         self.toggle_logs_btn = QPushButton("Collapse Logs")
         self.log_search = QLineEdit()
         self.log_search.setPlaceholderText("Search logs")
@@ -326,7 +334,7 @@ class MainWindow(QMainWindow):
         logs_header_layout.addWidget(QLabel("Logs / Status"))
         logs_header_layout.addStretch(1)
         logs_header_layout.addWidget(self.log_search)
-        for btn in (self.clear_logs_btn, self.copy_logs_btn, self.save_logs_btn, self.open_log_btn, self.toggle_logs_btn):
+        for btn in (self.clear_logs_btn, self.copy_logs_btn, self.save_logs_btn, self.open_log_btn, self.run_details_btn, self.toggle_logs_btn):
             logs_header_layout.addWidget(btn)
         self.logs_wrap = QWidget()
         logs_layout = QVBoxLayout(self.logs_wrap)
@@ -499,6 +507,7 @@ class MainWindow(QMainWindow):
         self.copy_logs_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.logs.toPlainText()))
         self.save_logs_btn.clicked.connect(self.save_logs)
         self.open_log_btn.clicked.connect(self.open_run_log)
+        self.run_details_btn.clicked.connect(self.open_run_details)
         self.toggle_logs_btn.clicked.connect(self.toggle_logs)
         self.log_search.returnPressed.connect(self.find_log)
         self.logs.verticalScrollBar().valueChanged.connect(self._on_log_scroll)
@@ -601,6 +610,7 @@ class MainWindow(QMainWindow):
             try:
                 self.project = self.manager.load(flow_dir / "project.json")
                 self.project_dir = flow_dir
+                self._load_latest_evidence()
                 self.dirty = False
                 self._reset_history()
                 self._remember_project_path()
@@ -611,6 +621,7 @@ class MainWindow(QMainWindow):
                 return False
         self.project = self.manager.new_project(flow_name, settings=load_default_project_settings())
         self.project_dir = flow_dir
+        self._load_latest_evidence()
         self.manager.save(self.project, self.project_dir)
         self.dirty = False
         self._reset_history()
@@ -640,6 +651,7 @@ class MainWindow(QMainWindow):
             return
         self.manager.save_as(self.project, self.project_dir, Path(folder))
         self.project_dir = Path(folder)
+        self._load_latest_evidence()
         self.dirty = False
         self._remember_project_path()
         self.log("project saved as")
@@ -868,6 +880,7 @@ class MainWindow(QMainWindow):
         self, start_index: int, end_index: int, force_enabled: bool = False,
     ) -> bool:
         issues = self._validation_issues(start_index, end_index, force_enabled)
+        self._last_validation_issues = issues
         self._show_validation_results(issues)
         error_count = sum(issue.level == LEVEL_ERROR for issue in issues)
         warning_count = sum(issue.level == LEVEL_WARNING for issue in issues)
@@ -955,7 +968,14 @@ class MainWindow(QMainWindow):
         if flow_name in self._scheduled_runs:
             # The same flow's previous run has not finished yet - never overlap a flow with itself.
             schedule = self.schedule_store.get(flow_name)
-            mark_skipped(schedule, STATUS_SKIPPED_RUNNING)
+            evidence = self._create_standalone_evidence(flow_dir, flow_name, "Scheduled" if scheduled else "Manual")
+            reason = "A previous run of this flow is still running."
+            if evidence:
+                evidence.logger.info("run skipped: %s", reason)
+                evidence.finalize("Skipped", error=reason)
+            mark_skipped(schedule, STATUS_SKIPPED_RUNNING, source=evidence.source if evidence else None,
+                         evidence_path=evidence.relative_folder if evidence else None,
+                         run_id=evidence.run_id if evidence else None)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
             self.log(f"[{flow_name}] schedule skipped: already running")
@@ -979,7 +999,14 @@ class MainWindow(QMainWindow):
             and (self.replay_thread is not None or self.recorder is not None)
         ):
             schedule = self.schedule_store.get(flow_name)
-            mark_skipped(schedule, STATUS_SKIPPED_BUSY)
+            evidence = self._create_standalone_evidence(flow_dir, flow_name, "Scheduled" if scheduled else "Manual")
+            reason = "The flow is open in the editor and is currently busy."
+            if evidence:
+                evidence.logger.info("run skipped: %s", reason)
+                evidence.finalize("Skipped", error=reason)
+            mark_skipped(schedule, STATUS_SKIPPED_BUSY, source=evidence.source if evidence else None,
+                         evidence_path=evidence.relative_folder if evidence else None,
+                         run_id=evidence.run_id if evidence else None)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
             self.log(f"[{flow_name}] schedule skipped: flow is open and busy")
@@ -989,20 +1016,55 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.log(f"[{flow_name}] schedule failed to load: {exc}")
             schedule = self.schedule_store.get(flow_name)
+            evidence = self._create_standalone_evidence(flow_dir, flow_name, "Scheduled" if scheduled else "Manual")
+            error = f"Could not load flow: {exc}"
+            if evidence:
+                evidence.logger.error(error)
+                evidence.finalize("Failed", error=error)
+            mark_started(schedule, source=evidence.source if evidence else None,
+                         evidence_path=evidence.relative_folder if evidence else None,
+                         run_id=evidence.run_id if evidence else None)
             mark_finished(schedule, STATUS_FAILED, error=f"Could not load flow: {exc}", attempts=0)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
             return
+        source = "Scheduled" if scheduled else "Manual"
+        project_meta = getattr(project, "project", None)
+        project_settings = getattr(project, "settings", ProjectSettings())
+        try:
+            evidence = RunEvidenceSession(
+                flow_dir, getattr(project_meta, "name", "") or flow_name, source,
+                getattr(project_settings, "evidence_retention_runs", 100),
+            )
+        except OSError as exc:
+            self.log(f"[{flow_name}] could not create run evidence: {exc}")
+            schedule = self.schedule_store.get(flow_name)
+            mark_started(schedule, source=source)
+            mark_finished(schedule, STATUS_FAILED, error=f"Could not create run evidence: {exc}", attempts=0)
+            self.schedule_store.set(schedule)
+            self.schedule_store.save()
+            return
+        self.active_evidence = evidence
+        self.last_evidence_folder = evidence.folder
+        self.file_logger = evidence.logger
+        self.run_log_path = evidence.log_path
+        schedule = self.schedule_store.get(flow_name)
+        mark_started(
+            schedule, source=source, evidence_path=evidence.relative_folder, run_id=evidence.run_id,
+        )
+        self.schedule_store.set(schedule)
+        self.schedule_store.save()
         validation_issues = validate_project_detailed(project, flow_dir)
+        evidence.set_validation(validation_issues)
         errors = [issue for issue in validation_issues if issue.level == LEVEL_ERROR]
         warnings = [issue for issue in validation_issues if issue.level == LEVEL_WARNING]
         if errors:
             reason = errors[0].message()
             self.log(f"[{flow_name}] schedule blocked by validation: {reason}")
-            schedule = self.schedule_store.get(flow_name)
             mark_finished(schedule, STATUS_FAILED, error=reason, failed_step=errors[0].step_number, attempts=0)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
+            self._finalize_evidence(STATUS_FAILED, failed_step=errors[0].step_number, error=reason)
             return
         for warning in warnings:
             # Scheduled flows are unattended: warnings are retained in the log,
@@ -1010,8 +1072,11 @@ class MainWindow(QMainWindow):
             self.log(f"[{flow_name}] validation warning: {warning.message()}")
 
         thread = QThread()
-        worker = ReplayWorker(project, flow_dir, 0, len(project.actions) - 1, True, True, None, [])
+        worker = ReplayWorker(
+            project, flow_dir, 0, len(project.actions) - 1, True, True, None, [], evidence.folder,
+        )
         worker.flow_name = flow_name
+        worker.evidence_session = evidence
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.log.connect(self._scheduled_run_log)
@@ -1025,7 +1090,7 @@ class MainWindow(QMainWindow):
         prefix = "scheduled" if scheduled else "manual"
         self.log(f"[{flow_name}] {prefix} run starting")
         try:
-            self._prepare_run_environment(getattr(project, "settings", ProjectSettings()), f"Running {flow_name}")
+            self._prepare_run_environment(project_settings, f"Running {flow_name}")
         except Exception as exc:
             self.log(f"[{flow_name}] desktop preparation failed: {exc}")
             self._scheduled_run_finished(
@@ -1038,10 +1103,6 @@ class MainWindow(QMainWindow):
         entry = self._scheduled_runs.get(flow_name)
         if entry is None or entry[0] is not thread or thread.isRunning():
             return
-        schedule = self.schedule_store.get(flow_name)
-        mark_started(schedule)
-        self.schedule_store.set(schedule)
-        self.schedule_store.save()
         thread.start()
 
     def _scheduled_run_log(self, message: str) -> None:
@@ -1098,6 +1159,7 @@ class MainWindow(QMainWindow):
         attempts: int | None = None,
     ) -> None:
         entry = self._scheduled_runs.pop(flow_name, None)
+        worker = entry[1] if entry else None
         if entry:
             thread, _worker = entry
             thread.quit()
@@ -1107,6 +1169,17 @@ class MainWindow(QMainWindow):
         self.schedule_store.set(schedule)
         self.schedule_store.save()
         self.log(f"[{flow_name}] scheduled run {status}")
+        runner = getattr(worker, "runner", None)
+        evidence = getattr(worker, "evidence_session", None)
+        if evidence is not None:
+            self.active_evidence = evidence
+        self._finalize_evidence(
+            status,
+            step_results=getattr(runner, "step_results", None),
+            attempts=attempts or 0,
+            failed_step=failed_step,
+            error=error,
+        )
         self._restore_run_environment()
         self._start_next_queued_flow()
 
@@ -1131,9 +1204,7 @@ class MainWindow(QMainWindow):
         if index < 0:
             QMessageBox.information(self, "Test Step", "Select a step to test first.")
             return
-        if not self._validate_before_execution(index, index, force_enabled=True):
-            return
-        self._start_replay(index, index, "test", False, False, validate=False)
+        self._start_replay(index, index, "test", False, False, force_validation_enabled=True)
 
     def _start_replay(
         self,
@@ -1144,15 +1215,31 @@ class MainWindow(QMainWindow):
         respect_enabled: bool,
         validate: bool = True,
         runtime_variables: dict | None = None,
+        force_validation_enabled: bool = False,
     ) -> None:
         if self.replay_thread is not None or self._scheduled_runs or not self.project.actions:
             return
         if not self.ensure_project_dir():
             return
+        source = {
+            "run": "Manual", "test": "Test Step", "from": "Run From Here", "until": "Run Until Here",
+        }.get(mode, "Manual")
+        try:
+            self._begin_evidence(self.project_dir, self.project, source)
+        except OSError as exc:
+            show_error(self, "Could not create run report", f"Execution did not start because its evidence folder could not be created.\n\n{exc}")
+            return
         if validate:
-            if not self._validate_before_execution(start_index, end_index):
+            if not self._validate_before_execution(start_index, end_index, force_validation_enabled):
+                self.active_evidence.set_validation(self._last_validation_issues)
+                has_errors = any(issue.level == LEVEL_ERROR for issue in self._last_validation_issues)
+                status = STATUS_FAILED if has_errors else "Skipped"
+                error = self._last_validation_issues[0].message() if has_errors else "Run cancelled after validation warnings"
+                failed_step = self._last_validation_issues[0].step_number if has_errors else None
+                self._finish_active_history(status, error, failed_step, 0)
+                self._finalize_evidence(status, failed_step=failed_step, error=error)
                 return
-        self.file_logger, self.run_log_path = create_file_logger(self.project_dir)
+        self.active_evidence.set_validation(self._last_validation_issues)
         self.run_start_index = start_index
         self.run_end_index = end_index
         self.run_mode = mode
@@ -1164,6 +1251,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._restore_details_after_run()
             self._restore_run_environment()
+            self._finish_active_history(STATUS_FAILED, str(exc), None, 0)
+            self._finalize_evidence(STATUS_FAILED, error=f"Desktop preparation failed: {exc}")
             show_error(self, "Could not prepare desktop", str(exc))
             return
         self.replay_thread = QThread()
@@ -1176,6 +1265,7 @@ class MainWindow(QMainWindow):
             respect_enabled,
             runtime_variables,
             self._image_match_exclusions(),
+            self.active_evidence.folder,
         )
         self.replay_worker.moveToThread(self.replay_thread)
         self.replay_thread.started.connect(self.replay_worker.run)
@@ -1332,13 +1422,17 @@ class MainWindow(QMainWindow):
         end = self.run_end_index
         completed = sum(1 for action in self.project.actions[start:end + 1] if action.status == "completed")
         skipped = sum(1 for action in self.project.actions[start:end + 1] if action.status == "skipped")
+        runner = self.replay_worker.runner if self.replay_worker else None
+        self.log("step test completed" if mode == "test" else "automation completed")
+        self._finish_active_history(STATUS_SUCCESS, None, None, getattr(runner, "total_attempts", 0))
+        self._finalize_evidence(
+            STATUS_SUCCESS, getattr(runner, "step_results", None), getattr(runner, "total_attempts", 0),
+        )
         self.run_finished()
         if mode == "test":
-            self.log(f"step {start + 1} test completed")
             QMessageBox.information(self, "Step Test", f"Step {start + 1} completed successfully in {elapsed:.2f} seconds.")
             self._start_next_queued_flow()
             return
-        self.log("automation completed")
         QMessageBox.information(
             self,
             "Automation Completed",
@@ -1349,8 +1443,14 @@ class MainWindow(QMainWindow):
     def run_stopped(self) -> None:
         elapsed = time.monotonic() - self.run_started_at if self.run_started_at else 0.0
         last_step = self.running_action_index + 1 if self.running_action_index is not None else self.run_start_index + 1
-        self.run_finished()
         self.log("automation stopped by user")
+        runner = self.replay_worker.runner if self.replay_worker else None
+        attempts = getattr(runner, "total_attempts", 0)
+        self._finish_active_history(STATUS_STOPPED, "Stopped by user", last_step, attempts)
+        self._finalize_evidence(
+            STATUS_STOPPED, getattr(runner, "step_results", None), attempts, last_step, "Stopped by user",
+        )
+        self.run_finished()
         QMessageBox.information(self, "Automation Stopped", f"Execution stopped at step {last_step}.\nDuration: {elapsed:.2f} seconds")
         self._start_next_queued_flow()
 
@@ -1360,6 +1460,13 @@ class MainWindow(QMainWindow):
             self.replay_worker and self.replay_worker.runner.had_continued_failures
         )
         self.last_runtime_variables = dict(self.replay_worker.runner.runtime_variables) if self.replay_worker else {}
+        runner = self.replay_worker.runner if self.replay_worker else None
+        failed_step = index + 1 if index >= 0 else None
+        attempts = getattr(runner, "total_attempts", 0)
+        self._finish_active_history(STATUS_FAILED, message, failed_step, attempts)
+        self._finalize_evidence(
+            STATUS_FAILED, getattr(runner, "step_results", None), attempts, failed_step, message,
+        )
         self.run_finished()
         if index < 0 or index >= len(self.project.actions):
             show_error(self, "Automation stopped", message)
@@ -1916,6 +2023,7 @@ class MainWindow(QMainWindow):
         try:
             self.project = self.manager.load(path)
             self.project_dir = path.parent
+            self._load_latest_evidence()
             self.dirty = False
             self._reset_history()
             self._remember_project_path()
@@ -1928,6 +2036,21 @@ class MainWindow(QMainWindow):
         if self.project_dir:
             self.settings.setValue("last_project_path", str(self.project_dir / "project.json"))
 
+    def _load_latest_evidence(self) -> None:
+        self.last_evidence_folder = None
+        self.run_log_path = None
+        if not self.project_dir:
+            return
+        runs_root = Path(self.project_dir) / "runs"
+        try:
+            folders = sorted((path for path in runs_root.iterdir() if path.is_dir()), reverse=True)
+        except OSError:
+            return
+        if folders:
+            self.last_evidence_folder = folders[0]
+            log_path = folders[0] / "execution.log"
+            self.run_log_path = log_path if log_path.is_file() else None
+
     def _open_last_project(self) -> None:
         value = self.settings.value("last_project_path", "", type=str)
         if not value:
@@ -1939,6 +2062,7 @@ class MainWindow(QMainWindow):
         try:
             self.project = self.manager.load(path)
             self.project_dir = path.parent
+            self._load_latest_evidence()
             self.dirty = False
             self._reset_history()
             self.log(f"reopened last project: {path}")
@@ -2053,6 +2177,89 @@ class MainWindow(QMainWindow):
             self.log(f"Run log: {self.run_log_path}")
         else:
             self.log("No run log has been created yet")
+
+    def open_run_details(self) -> None:
+        folder = self.active_evidence.folder if self.active_evidence else self.last_evidence_folder
+        if folder is None:
+            QMessageBox.information(self, "Run Details", "No detailed run report has been created yet.")
+            return
+        RunDetailsDialog(folder, self).exec()
+
+    def _begin_evidence(self, project_dir: Path, project: RpaProject, source: str) -> RunEvidenceSession:
+        evidence = RunEvidenceSession(
+            project_dir,
+            project.project.name or Path(project_dir).name,
+            source,
+            project.settings.evidence_retention_runs,
+        )
+        self.active_evidence = evidence
+        self.last_evidence_folder = evidence.folder
+        self.file_logger = evidence.logger
+        self.run_log_path = evidence.log_path
+        self._last_validation_issues = []
+        self._active_history_flow = None
+        try:
+            root = flows_root().resolve()
+            directory = Path(project_dir).resolve()
+            if directory.parent == root:
+                self._active_history_flow = directory.name
+                schedule = self.schedule_store.get(directory.name)
+                mark_started(
+                    schedule, source=source, evidence_path=evidence.relative_folder, run_id=evidence.run_id,
+                )
+                self.schedule_store.set(schedule)
+                self.schedule_store.save()
+        except OSError as exc:
+            self.log(f"Could not update run history: {exc}")
+        return evidence
+
+    def _create_standalone_evidence(
+        self, project_dir: Path, flow_name: str, source: str,
+    ) -> RunEvidenceSession | None:
+        """Create evidence for a run attempt that never owns the main execution UI."""
+        try:
+            return RunEvidenceSession(project_dir, flow_name, source, 100)
+        except OSError as exc:
+            self.log(f"Could not create run evidence: {exc}")
+            return None
+
+    def _finish_active_history(
+        self, status: str, error: str | None, failed_step: int | None, attempts: int,
+    ) -> None:
+        flow_name = self._active_history_flow
+        self._active_history_flow = None
+        if not flow_name:
+            return
+        schedule = self.schedule_store.get(flow_name)
+        mark_finished(
+            schedule, status, error=error, failed_step=failed_step, attempts=attempts,
+        )
+        self.schedule_store.set(schedule)
+        self.schedule_store.save()
+
+    def _finalize_evidence(
+        self,
+        status: str,
+        step_results: list[dict] | None = None,
+        attempts: int = 0,
+        failed_step: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        evidence = self.active_evidence
+        if evidence is None:
+            return
+        try:
+            evidence.finalize(status, step_results, attempts, failed_step, error)
+        except Exception as exc:
+            # The UI and persisted scheduler result must survive a report write
+            # failure (for example, a deleted or read-only runs folder).
+            self.logs.append(f'<span style="color:#ca8a04">[Warning] Could not finalize run evidence: {escape(str(exc))}</span>')
+            evidence.close()
+        finally:
+            self.last_evidence_folder = evidence.folder
+            self.active_evidence = None
+            if self.file_logger is evidence.logger:
+                self.file_logger = None
 
     def update_status(self, prefix: str = "Ready") -> None:
         recording = self.recorder is not None and self.recorder.state == RecorderState.RECORDING

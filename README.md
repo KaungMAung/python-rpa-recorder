@@ -64,7 +64,7 @@ Columns:
 - **Last status** - `Success`, `Failed`, `Running`, or a `Skipped (...)` reason.
 - **Next run** - a countdown such as `in 12 min` (or `Paused`/`Disabled`; hover for the exact timestamp).
 
-Select a row to open its Details panel. The panel shows the latest run, duration, result, error, next run, and schedule interval. It also contains persistent run history with start/end times, duration, result, failed step, and error. Filter history by `Success`, `Failed`, `Skipped`, or `Running`. Change the interval or enabled/paused state there without adding controls to every table row. The row's labeled **Actions** menu provides:
+Select a row to open its Details panel. The panel shows the latest run, duration, result, error, next run, and schedule interval. It also contains persistent run history with source, start/end times, duration, attempts, result, failed step, and error. Filter history by `Success`, `Failed`, `Skipped`, or `Running`. Select a history row and use **Run Details** (or double-click it) to inspect its execution report. Change the interval or enabled/paused state there without adding controls to every table row. The row's labeled **Actions** menu provides:
 
 - **Run Now** - runs the flow immediately without affecting its schedule or next run time.
 - **Pause / Resume** - temporarily stops automatic runs while keeping the interval configuration intact. No confirmation needed.
@@ -99,7 +99,7 @@ Every step has compatible defaults of zero retries and **Stop Flow** on failure.
 - **Continue** marks the step failed and executes the next step.
 - **Jump to Step** marks the step failed and moves to a validated step number inside the current run range.
 
-Enable **Capture final failure** to save a full-screen PNG under `logs/failures`. Retry attempts and reasons appear in the Logs/Status view and floating runner. Image steps continue polling until their search timeout, retain the best confidence found, retry when configured, and only use coordinate fallback on the final attempt. Stop Run interrupts start delays, waits, retry delays, and image polling promptly. Step timeout applies to interruptible waits and image polling; Python code can cooperate through its existing `check_stop()` callback. A flow that continues or jumps after a failed step finishes its remaining work but retains a final `Failed` result and the first failure in schedule history.
+App runs automatically save a full-screen screenshot on final step failure inside that run's evidence folder. The existing **Capture final failure** option remains compatible with direct/legacy runner use outside an evidence session. Retry attempts and reasons appear in the Logs/Status view and floating runner. Image steps continue polling until their search timeout, retain the best confidence found, retry when configured, and only use coordinate fallback on the final attempt. Stop Run interrupts start delays, waits, retry delays, and image polling promptly. Step timeout applies to interruptible waits and image polling; Python code can cooperate through its existing `check_stop()` callback. A flow that continues or jumps after a failed step finishes its remaining work but retains a final `Failed` result and the first failure in schedule history.
 
 ## Validate Flow
 
@@ -109,7 +109,15 @@ Validation checks required fields, variables, screenshots and file/application p
 
 ## Log Viewer
 
-The larger, resizable Logs/Status tab remembers its splitter size and uses a more readable default font. Entries are color-coded by severity, include the currently running step, and follow the newest entry unless you scroll up. Use Search, Clear, Copy, Save Log, or Open File from its header. Switch to the neighboring Validation tab to review flow-readiness results without losing logs.
+The larger, resizable Logs/Status tab remembers its splitter size and uses a more readable default font. Entries are color-coded by severity, include the currently running step, and follow the newest entry unless you scroll up. Use Search, Clear, Copy, Save Log, Open File, or **Run Details** from its header. Switch to the neighboring Validation tab to review flow-readiness results without losing logs.
+
+## Execution Evidence and Run Reports
+
+Each manual, scheduled, range, or step-test run creates a timestamped folder under the flow's `runs/` directory. The folder contains `execution.log`, a machine-readable `summary.json`, an automatic failure screenshot when a step fails, and optional before/after screenshots for steps where those Advanced Settings are enabled. Reports include the flow and run source, validation results, timestamps, duration, final status, failed step/error, per-step results and durations, and retry attempts.
+
+Open a report from **Run Details** in the main Logs/Status header or from Schedule History. The report provides direct buttons for its folder, log, and screenshots. Older history entries remain compatible and are labeled as legacy runs when they do not have an evidence reference. If evidence was manually deleted or moved, Run Details explains what is unavailable instead of failing.
+
+Use **Settings → Run evidence retention** to choose how many timestamped run folders each flow keeps (100 by default). Cleanup only removes older run folders for that flow; scheduler-history retention remains independently configurable in Schedule Flows.
 
 ## Generate Python
 
@@ -131,6 +139,11 @@ MyRecording/
   screenshots/
   generated/
   logs/
+  runs/
+    20260718_165500_000_manual_ab12cd34/
+      execution.log
+      summary.json
+      screenshots/
 ```
 
 `project.json` contains settings, variables, and ordered actions.

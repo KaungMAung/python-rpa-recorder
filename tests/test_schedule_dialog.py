@@ -290,11 +290,37 @@ def test_history_panel_lists_and_filters_persisted_results(tmp_path: Path) -> No
     assert dialog.table.item(0, 5).text() == "Failed"
     dialog.history_filter.setCurrentText("Failed")
     assert dialog.history_table.rowCount() == 1
-    assert dialog.history_table.item(0, 3).text() == "2"
-    assert dialog.history_table.item(0, 5).text() == "Step 2"
-    assert dialog.history_table.item(0, 6).text() == "boom"
+    assert dialog.history_table.item(0, 4).text() == "2"
+    assert dialog.history_table.item(0, 6).text() == "Step 2"
+    assert dialog.history_table.item(0, 7).text() == "boom"
     dialog.history_filter.setCurrentText("Skipped")
     assert dialog.history_table.rowCount() == 1
+    dialog.close()
+
+
+def test_history_run_details_resolves_persisted_evidence_path(tmp_path: Path, monkeypatch) -> None:
+    from rpa.scheduler import RunHistoryEntry
+    from ui.run_details_dialog import RunDetailsDialog
+
+    _make_flow(tmp_path, "flow_a")
+    evidence = tmp_path / "flow_a" / "runs" / "run_1"
+    evidence.mkdir(parents=True)
+    (evidence / "summary.json").write_text('{"step_results": [], "validation_results": []}', encoding="utf-8")
+    dialog, store, _settings = make_dialog(tmp_path)
+    schedule = store.get("flow_a")
+    schedule.history = [RunHistoryEntry(
+        "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:01+00:00", 1, "Success",
+        attempts=1, source="Scheduled", evidence_path="runs/run_1", run_id="abc",
+    )]
+    store.set(schedule)
+    store.save()
+    opened = []
+    monkeypatch.setattr(RunDetailsDialog, "exec", lambda self: opened.append(self.evidence_folder))
+    dialog.reload()
+    dialog.history_table.setCurrentCell(0, 0)
+    assert dialog.run_details_btn.isEnabled()
+    dialog._open_selected_run_details()
+    assert opened == [evidence]
     dialog.close()
 
 

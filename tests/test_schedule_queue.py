@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -124,7 +125,15 @@ def test_full_scheduled_run_completes_without_thread_self_wait(tmp_path, monkeyp
 
     assert "flow_a" not in window._scheduled_runs
     from rpa.scheduler import STATUS_SUCCESS
-    assert window.schedule_store.get("flow_a").last_status == STATUS_SUCCESS
+    schedule = window.schedule_store.get("flow_a")
+    assert schedule.last_status == STATUS_SUCCESS
+    entry = schedule.history[-1]
+    assert entry.source == "Scheduled"
+    assert entry.evidence_path
+    summary_path = tmp_path / "flow_a" / entry.evidence_path / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["status"] == "Success"
+    assert summary["source"] == "Scheduled"
     window.close()
 
 
@@ -202,6 +211,12 @@ def test_scheduled_execution_is_blocked_by_validation_errors(tmp_path, monkeypat
     assert schedule.history[-1].failed_step == 1
     assert schedule.history[-1].attempts == 0
     assert "undefined variable" in (schedule.history[-1].error or "")
+    assert schedule.history[-1].evidence_path
+    validation_summary = json.loads(
+        (flow_dir / schedule.history[-1].evidence_path / "summary.json").read_text(encoding="utf-8")
+    )
+    assert validation_summary["status"] == "Failed"
+    assert validation_summary["validation_results"][0]["level"] == "Error"
     assert prepared == []
     window.close()
 

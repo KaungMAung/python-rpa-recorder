@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from rpa.scheduler import STATUS_FAILED, STATUS_RUNNING, FlowSchedule, ScheduleStore, schedule_next_run
+from ui.run_details_dialog import RunDetailsDialog
 
 INTERVAL_OPTIONS = [
     ("Every 5 minutes", 5),
@@ -92,6 +94,7 @@ class ScheduleFlowsDialog(QDialog):
         self.settings = settings
         self._selected_flow_name: str | None = None
         self._detail_schedule: FlowSchedule | None = None
+        self._visible_history_entries = []
         self.setWindowTitle("Schedule Flows")
         self.setMinimumSize(820, 500)
         self.resize(1280, 700)
@@ -276,8 +279,8 @@ class ScheduleFlowsDialog(QDialog):
         history_heading.addWidget(self.history_filter)
         layout.addLayout(history_heading)
 
-        self.history_table = QTableWidget(0, 7)
-        self.history_table.setHorizontalHeaderLabels(["Started", "Ended", "Duration", "Attempts", "Result", "Failed step", "Error"])
+        self.history_table = QTableWidget(0, 8)
+        self.history_table.setHorizontalHeaderLabels(["Started", "Source", "Ended", "Duration", "Attempts", "Result", "Failed step", "Error"])
         self.history_table.verticalHeader().setVisible(False)
         self.history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.history_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -291,8 +294,10 @@ class ScheduleFlowsDialog(QDialog):
         history_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         history_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         history_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        history_header.setSectionResizeMode(6, QHeaderView.Stretch)
+        history_header.setSectionResizeMode(7, QHeaderView.Stretch)
         self.history_table.setMinimumHeight(150)
+        self.history_table.itemSelectionChanged.connect(self._history_selection_changed)
+        self.history_table.itemDoubleClicked.connect(lambda _item: self._open_selected_run_details())
         layout.addWidget(self.history_table, 1)
 
         retention_row = QHBoxLayout()
@@ -307,6 +312,11 @@ class ScheduleFlowsDialog(QDialog):
         self.history_limit_spin.valueChanged.connect(self._history_limit_changed)
         retention_row.addWidget(retention_label)
         retention_row.addWidget(self.history_limit_spin, 1)
+        self.run_details_btn = QPushButton("Run Details")
+        self.run_details_btn.setEnabled(False)
+        self.run_details_btn.setToolTip("Open the selected run's detailed execution report")
+        self.run_details_btn.clicked.connect(self._open_selected_run_details)
+        retention_row.addWidget(self.run_details_btn)
         layout.addLayout(retention_row)
 
         self.detail_run_btn = QPushButton("Run Now")
@@ -616,6 +626,7 @@ class ScheduleFlowsDialog(QDialog):
         wanted = self.history_filter.currentText()
         if wanted != "All runs":
             entries = [entry for entry in entries if self._history_status_matches(entry.status, wanted)]
+        self._visible_history_entries = entries
         self.history_table.setRowCount(len(entries))
         for row, entry in enumerate(entries):
             started = self._readonly_item(self._format_time(entry.started_at))
@@ -623,13 +634,37 @@ class ScheduleFlowsDialog(QDialog):
             ended = self._readonly_item(self._format_time(entry.finished_at))
             ended.setToolTip(self._exact_time(entry.finished_at))
             duration = self._readonly_item(self._format_duration(entry.duration_seconds))
+            source = self._readonly_item(entry.source or "Legacy run")
             attempts = self._readonly_item(str(entry.attempts) if entry.attempts is not None else "-")
             result = self._badge_item(self._badge_name(entry.status), entry.status)
             failed_step = self._readonly_item(f"Step {entry.failed_step}" if entry.failed_step is not None else "-")
             error = self._readonly_item(entry.error or "-")
             error.setToolTip(entry.error or "No error")
-            for column, item in enumerate((started, ended, duration, attempts, result, failed_step, error)):
+            for column, item in enumerate((started, source, ended, duration, attempts, result, failed_step, error)):
                 self.history_table.setItem(row, column, item)
+        self.run_details_btn.setEnabled(False)
+
+    def _history_selection_changed(self) -> None:
+        row = self.history_table.currentRow()
+        has_evidence = 0 <= row < len(self._visible_history_entries) and bool(
+            self._visible_history_entries[row].evidence_path
+        )
+        self.run_details_btn.setEnabled(has_evidence)
+
+    def _open_selected_run_details(self) -> None:
+        row = self.history_table.currentRow()
+        if not 0 <= row < len(self._visible_history_entries) or self._detail_schedule is None:
+            return
+        entry = self._visible_history_entries[row]
+        if not entry.evidence_path:
+            QMessageBox.information(
+                self, "Run Details", "Detailed evidence was not recorded for this older run.",
+            )
+            return
+        path = Path(entry.evidence_path)
+        if not path.is_absolute():
+            path = self.store.flows_root / self._detail_schedule.flow_name / path
+        RunDetailsDialog(path, self).exec()
 
     def _history_status_matches(self, status: str, wanted: str) -> bool:
         return status == wanted or (wanted == "Skipped" and status.startswith("Skipped"))
