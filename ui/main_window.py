@@ -9,12 +9,14 @@ import time
 import sys
 
 from PySide6.QtCore import QObject, QPoint, QRect, QSettings, QThread, QTimer, Qt, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeyEvent, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFileDialog,
     QDialog,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -25,6 +27,9 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QSpinBox,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QDoubleSpinBox,
     QTextEdit,
     QToolBar,
@@ -50,7 +55,13 @@ from rpa.scheduler import (
     mark_skipped,
     mark_started,
 )
-from rpa.validator import validate_project
+from rpa.validator import (
+    LEVEL_ERROR,
+    LEVEL_INFO,
+    LEVEL_WARNING,
+    ValidationIssue,
+    validate_project_detailed,
+)
 from rpa.utils import create_file_logger, foreground_elevation_mismatch
 from ui.action_editor import ActionEditor
 from ui.action_table import ActionTable
@@ -207,7 +218,7 @@ class MainWindow(QMainWindow):
         groups = [
             ("Recording", [("Record", "● Record"), ("Pause", "Pause"), ("Resume", "Resume"), ("Stop", "■ Stop")]),
             ("Execution", [("Run", "▶ Run"), ("Stop Run", "Stop Run"), ("Schedule Flows", "⏱"), ("Generate Python", "Generate")]),
-            ("Editing", [("Add Manual Action", "+ Add Step"), ("Insert Before", "Insert Before"), ("Insert After", "Insert After"), ("Duplicate", "⧉ Duplicate"), ("Delete Action", "Delete"), ("Move Up", "↑"), ("Move Down", "↓"), ("Deselect All", "Deselect"), ("Variables", "Variables"), ("Settings", "Settings")]),
+            ("Review", [("Validate Flow", "Validate"), ("Add Manual Action", "+ Add Step"), ("Insert Before", "Insert Before"), ("Insert After", "Insert After"), ("Duplicate", "⧉ Duplicate"), ("Delete Action", "Delete"), ("Move Up", "↑"), ("Move Down", "↓"), ("Deselect All", "Deselect"), ("Variables", "Variables"), ("Settings", "Settings")]),
         ]
         groups[2] = (groups[2][0], [item for item in groups[2][1] if item[0] not in ("Variables", "Settings")])
         groups[2][1].insert(7, ("Enable/Disable", "Enable/Disable"))
@@ -216,7 +227,7 @@ class MainWindow(QMainWindow):
         # and the table context menu, where they are easier to discover without
         # turning the primary workspace into a wall of buttons.
         groups[2] = (groups[2][0], [item for item in groups[2][1] if item[0] in (
-            "Add Manual Action", "Duplicate", "Delete Action", "Enable/Disable",
+            "Validate Flow", "Add Manual Action", "Duplicate", "Delete Action", "Enable/Disable",
         )])
         compact_labels = {
             "Add Manual Action": "+ Add",
@@ -228,7 +239,7 @@ class MainWindow(QMainWindow):
         }
         for group_index, (group_title, group) in enumerate(groups):
             target_toolbar = self.toolbar
-            if group_title == "Editing":
+            if group_title == "Review":
                 self.addToolBarBreak()
                 self.edit_toolbar = QToolBar()
                 self.edit_toolbar.setMovable(False)
@@ -290,7 +301,7 @@ class MainWindow(QMainWindow):
         self.editor_scroll.setMinimumWidth(320)
         self.logs = QTextEdit()
         self.logs.setReadOnly(True)
-        self.logs.setFont(QFont("Consolas", 9))
+        self.logs.setFont(QFont("Consolas", 10))
         self.clear_logs_btn = QPushButton("Clear")
         self.copy_logs_btn = QPushButton("Copy")
         self.save_logs_btn = QPushButton("Save Log")
@@ -312,6 +323,34 @@ class MainWindow(QMainWindow):
         logs_layout = QVBoxLayout(self.logs_wrap)
         logs_layout.addWidget(logs_header)
         logs_layout.addWidget(self.logs)
+        self.validation_wrap = QWidget()
+        validation_layout = QVBoxLayout(self.validation_wrap)
+        validation_layout.setContentsMargins(6, 6, 6, 6)
+        validation_header = QHBoxLayout()
+        validation_title = QLabel("Flow Validation")
+        validation_title.setStyleSheet("font-weight: 700;")
+        self.validation_summary = QLabel("Validate the flow to check whether it is ready to run.")
+        self.validation_summary.setStyleSheet("color: #64748b;")
+        validation_header.addWidget(validation_title)
+        validation_header.addWidget(self.validation_summary, 1)
+        validation_layout.addLayout(validation_header)
+        self.validation_table = QTableWidget(0, 4)
+        self.validation_table.setHorizontalHeaderLabels(["Level", "Step", "Step name", "Reason"])
+        self.validation_table.verticalHeader().setVisible(False)
+        self.validation_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.validation_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.validation_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.validation_table.setAlternatingRowColors(True)
+        self.validation_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.validation_table.setColumnWidth(0, 90)
+        self.validation_table.setColumnWidth(1, 65)
+        self.validation_table.setColumnWidth(2, 190)
+        self.validation_table.setToolTip("Double-click a result to select its step")
+        validation_layout.addWidget(self.validation_table)
+        self.bottom_tabs = QTabWidget()
+        self.bottom_tabs.addTab(self.logs_wrap, "Logs / Status")
+        self.bottom_tabs.addTab(self.validation_wrap, "Validation")
+        self.bottom_tabs.setMinimumHeight(220)
         self.workspace_splitter = QSplitter(Qt.Horizontal)
         self.workspace_splitter.addWidget(table_wrap)
         self.workspace_splitter.addWidget(self.editor_scroll)
@@ -319,9 +358,9 @@ class MainWindow(QMainWindow):
         self.workspace_splitter.setStretchFactor(1, 2)
         self.vertical_splitter = QSplitter(Qt.Vertical)
         self.vertical_splitter.addWidget(self.workspace_splitter)
-        self.vertical_splitter.addWidget(self.logs_wrap)
-        self.vertical_splitter.setStretchFactor(0, 5)
-        self.vertical_splitter.setStretchFactor(1, 1)
+        self.vertical_splitter.addWidget(self.bottom_tabs)
+        self.vertical_splitter.setStretchFactor(0, 3)
+        self.vertical_splitter.setStretchFactor(1, 2)
         main = QWidget()
         layout = QVBoxLayout(main)
         layout.setContentsMargins(10, 8, 10, 8)
@@ -351,13 +390,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.vertical_splitter)
         self.setCentralWidget(main)
         self.statusBar().showMessage("Ready")
-        self.vertical_splitter.setSizes([500, 280])
+        self.vertical_splitter.setSizes([430, 330])
 
     def _build_menu_bar(self) -> None:
         menus = [
             ("File", ["New", "Open", "Save", "Save As"]),
             ("Record Actions", ["Record", "Pause", "Resume", "Stop"]),
-            ("Execution", ["Run", "Test This Step", "Run From Here", "Run Until Here", "Stop Run", "Schedule Flows", "Generate Python"]),
+            ("Execution", ["Run", "Validate Flow", "Test This Step", "Run From Here", "Run Until Here", "Stop Run", "Schedule Flows", "Generate Python"]),
             ("Step Editing", ["Undo", "Redo", "Add Manual Action", "Insert Before", "Insert After", "Duplicate", "Delete Action", "Move Up", "Move Down", "Enable/Disable", "Deselect All"]),
             ("Project", ["Variables", "Settings"]),
         ]
@@ -404,6 +443,8 @@ class MainWindow(QMainWindow):
         self.menu_actions["Stop"].triggered.connect(self.stop_recording)
         self.buttons["Run"].clicked.connect(self.run_project)
         self.menu_actions["Run"].triggered.connect(self.run_project)
+        self.buttons["Validate Flow"].clicked.connect(self.validate_flow)
+        self.menu_actions["Validate Flow"].triggered.connect(self.validate_flow)
         self.menu_actions["Test This Step"].triggered.connect(self.test_selected_step)
         self.menu_actions["Run From Here"].triggered.connect(self.run_from_here)
         self.menu_actions["Run Until Here"].triggered.connect(self.run_until_here)
@@ -452,6 +493,7 @@ class MainWindow(QMainWindow):
         self.toggle_logs_btn.clicked.connect(self.toggle_logs)
         self.log_search.returnPressed.connect(self.find_log)
         self.logs.verticalScrollBar().valueChanged.connect(self._on_log_scroll)
+        self.validation_table.itemDoubleClicked.connect(self._validation_result_activated)
         self.action_recorded.connect(self._action_recorded)
         self.log_recorded.connect(self.log)
         self.recorder_failed.connect(self._recorder_failed)
@@ -474,7 +516,14 @@ class MainWindow(QMainWindow):
         self.buttons["Pause"].setEnabled(recording)
         self.buttons["Resume"].setEnabled(paused)
         self.buttons["Stop"].setEnabled(recording or paused or preparing)
+        # Only show the recording-state command that can be used now. This
+        # keeps the primary toolbar compact enough for execution controls.
+        self.buttons["Pause"].setVisible(recording)
+        self.buttons["Resume"].setVisible(paused)
+        self.buttons["Stop"].setVisible(recording or paused or preparing)
         self.buttons["Run"].setEnabled(bool(self.project.actions) and not recording and not paused and not preparing and not running)
+        self.buttons["Validate Flow"].setEnabled(bool(self.project.actions) and not recording and not paused and not preparing and not running)
+        self.menu_actions["Validate Flow"].setEnabled(self.buttons["Validate Flow"].isEnabled())
         self.buttons["Record"].setEnabled(not running and not recording and not paused and not preparing)
         self.buttons["Stop Run"].setEnabled(running)
         for name in ("Pause", "Resume", "Stop", "Run", "Record", "Stop Run"):
@@ -784,6 +833,95 @@ class MainWindow(QMainWindow):
     def run_project(self) -> None:
         self._start_replay(0, len(self.project.actions) - 1, "run", True, True)
 
+    def validate_flow(self) -> None:
+        if not self.project.actions:
+            QMessageBox.information(self, "Validate Flow", "Add at least one step before validating the flow.")
+            return
+        issues = self._validation_issues(0, len(self.project.actions) - 1)
+        self._show_validation_results(issues)
+        errors = sum(issue.level == LEVEL_ERROR for issue in issues)
+        warnings = sum(issue.level == LEVEL_WARNING for issue in issues)
+        if errors:
+            self.update_status(f"Validation found {errors} error(s)")
+        elif warnings:
+            self.update_status(f"Validation passed with {warnings} warning(s)")
+        else:
+            self.update_status("Validation passed")
+
+    def _validation_issues(
+        self, start_index: int, end_index: int, force_enabled: bool = False,
+    ) -> list[ValidationIssue]:
+        return validate_project_detailed(
+            self.project, self.project_dir, start_index, end_index, force_enabled,
+        )
+
+    def _validate_before_execution(
+        self, start_index: int, end_index: int, force_enabled: bool = False,
+    ) -> bool:
+        issues = self._validation_issues(start_index, end_index, force_enabled)
+        self._show_validation_results(issues)
+        error_count = sum(issue.level == LEVEL_ERROR for issue in issues)
+        warning_count = sum(issue.level == LEVEL_WARNING for issue in issues)
+        if error_count:
+            QMessageBox.critical(
+                self,
+                "Flow cannot run",
+                f"Validation found {error_count} error(s). Fix the errors shown in the Validation panel and try again.",
+            )
+            return False
+        if warning_count:
+            reply = QMessageBox.question(
+                self,
+                "Run with warnings?",
+                f"Validation found {warning_count} warning(s). Review them in the Validation panel.\n\nContinue running?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            return reply == QMessageBox.Yes
+        return True
+
+    def _show_validation_results(self, issues: list[ValidationIssue]) -> None:
+        self.validation_table.setRowCount(len(issues))
+        colors = {
+            LEVEL_ERROR: QColor("#b91c1c"),
+            LEVEL_WARNING: QColor("#a16207"),
+            LEVEL_INFO: QColor("#2563eb"),
+        }
+        counts = {LEVEL_ERROR: 0, LEVEL_WARNING: 0, LEVEL_INFO: 0}
+        for row, issue in enumerate(issues):
+            counts[issue.level] = counts.get(issue.level, 0) + 1
+            values = (issue.level, str(issue.step_number), issue.step_name, issue.reason)
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setData(Qt.UserRole, issue.step_number - 1)
+                if column == 0:
+                    item.setForeground(colors.get(issue.level, QColor("#475569")))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                if column == 1:
+                    item.setTextAlignment(Qt.AlignCenter)
+                item.setToolTip(issue.reason)
+                self.validation_table.setItem(row, column, item)
+        if issues:
+            self.validation_summary.setText(
+                f"{counts[LEVEL_ERROR]} Error · {counts[LEVEL_WARNING]} Warning · {counts[LEVEL_INFO]} Info"
+            )
+        else:
+            self.validation_summary.setText("No issues found — this flow is ready to run.")
+        self.bottom_tabs.setCurrentWidget(self.validation_wrap)
+
+    def _validation_result_activated(self, item: QTableWidgetItem) -> None:
+        step_index = item.data(Qt.UserRole)
+        if not isinstance(step_index, int) or not 0 <= step_index < len(self.project.actions):
+            return
+        self.filter_box.clear()
+        self.table.selectRow(step_index)
+        step_item = self.table.item(step_index, 0)
+        if step_item is not None:
+            self.table.scrollToItem(step_item, QAbstractItemView.PositionAtCenter)
+        self.table.setFocus(Qt.OtherFocusReason)
+
     def schedule_flows_dialog(self) -> None:
         dialog = ScheduleFlowsDialog(self.schedule_store, self.settings, self)
         dialog.run_now_requested.connect(lambda name: self._run_flow_now(name))
@@ -841,14 +979,21 @@ class MainWindow(QMainWindow):
             self.schedule_store.set(schedule)
             self.schedule_store.save()
             return
-        errors = validate_project(project, flow_dir)
+        validation_issues = validate_project_detailed(project, flow_dir)
+        errors = [issue for issue in validation_issues if issue.level == LEVEL_ERROR]
+        warnings = [issue for issue in validation_issues if issue.level == LEVEL_WARNING]
         if errors:
-            self.log(f"[{flow_name}] schedule skipped: {errors[0]}")
+            reason = errors[0].message()
+            self.log(f"[{flow_name}] schedule blocked by validation: {reason}")
             schedule = self.schedule_store.get(flow_name)
-            mark_finished(schedule, STATUS_FAILED, error=errors[0])
+            mark_finished(schedule, STATUS_FAILED, error=reason, failed_step=errors[0].step_number)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
             return
+        for warning in warnings:
+            # Scheduled flows are unattended: warnings are retained in the log,
+            # while only errors block their execution.
+            self.log(f"[{flow_name}] validation warning: {warning.message()}")
 
         schedule = self.schedule_store.get(flow_name)
         mark_started(schedule)
@@ -924,9 +1069,7 @@ class MainWindow(QMainWindow):
         if index < 0:
             QMessageBox.information(self, "Test Step", "Select a step to test first.")
             return
-        errors = self._validation_errors(index, index, force_enabled=True)
-        if errors:
-            show_error(self, "Step is not ready", "\n".join(errors))
+        if not self._validate_before_execution(index, index, force_enabled=True):
             return
         self._start_replay(index, index, "test", False, False, validate=False)
 
@@ -945,9 +1088,7 @@ class MainWindow(QMainWindow):
         if not self.ensure_project_dir():
             return
         if validate:
-            errors = self._validation_errors(start_index, end_index)
-            if errors:
-                show_error(self, "Automation is not ready", "\n".join(errors))
+            if not self._validate_before_execution(start_index, end_index):
                 return
         self.file_logger, self.run_log_path = create_file_logger(self.project_dir)
         self.run_start_index = start_index
@@ -995,34 +1136,11 @@ class MainWindow(QMainWindow):
         self.table.apply_filter(self.filter_box.text())
 
     def _validation_errors(self, start_index: int, end_index: int, force_enabled: bool = False) -> list[str]:
-        errors: list[str] = []
-        seen: set[str] = set()
-        for index, action in enumerate(self.project.actions):
-            if not action.id:
-                errors.append(f"Step {index + 1} {action.friendly_name()}: id is required")
-            elif action.id in seen:
-                errors.append(f"Step {index + 1} {action.friendly_name()}: id must be unique")
-            seen.add(action.id)
-        actions = deepcopy(self.project.actions[start_index:end_index + 1])
-        if force_enabled:
-            for action in actions:
-                action.enabled = True
-        selected_project = RpaProject(
-            project=self.project.project,
-            settings=self.project.settings,
-            variables=dict(self.project.variables),
-            actions=actions,
-        )
-        for error in validate_project(selected_project, self.project_dir):
-            if ": id " in error:
-                continue
-            parts = error.split(" ", 2)
-            if len(parts) >= 3 and parts[0] == "Step" and parts[1].isdigit():
-                local_index = int(parts[1]) - 1
-                errors.append(f"Step {start_index + local_index + 1} {parts[2]}")
-            elif error not in errors:
-                errors.append(error)
-        return errors
+        return [
+            issue.message()
+            for issue in self._validation_issues(start_index, end_index, force_enabled)
+            if issue.level == LEVEL_ERROR
+        ]
 
     def stop_run(self) -> None:
         if self.replay_worker:
@@ -1354,9 +1472,10 @@ class MainWindow(QMainWindow):
     def generate_python(self) -> None:
         if not self.ensure_project_dir():
             return
-        errors = validate_project(self.project, self.project_dir)
-        if errors:
-            show_error(self, "Validation failed", "\n".join(errors))
+        issues = self._validation_issues(0, len(self.project.actions) - 1)
+        self._show_validation_results(issues)
+        if any(issue.level == LEVEL_ERROR for issue in issues):
+            show_error(self, "Validation failed", "Fix the errors shown in the Validation panel before generating Python.")
             return
         path = generate_python(self.project, self.project_dir)
         self.log(f"Python file generated: {path}")
@@ -1808,10 +1927,12 @@ class MainWindow(QMainWindow):
         return clicked is continue_btn
 
     def toggle_logs(self) -> None:
-        visible = self.logs.isVisible()
-        self.logs.setVisible(not visible)
-        self.toggle_logs_btn.setText("Expand Logs" if visible else "Collapse Logs")
-        self.settings.setValue("logs_expanded", not visible)
+        expanded = not self.logs.isHidden()
+        self.logs.setVisible(not expanded)
+        self.toggle_logs_btn.setText("Expand Logs" if expanded else "Collapse Logs")
+        self.settings.setValue("logs_expanded", not expanded)
+        if not expanded:
+            self.bottom_tabs.setCurrentWidget(self.logs_wrap)
 
     def open_run_log(self) -> None:
         if self.run_log_path and self.run_log_path.exists():

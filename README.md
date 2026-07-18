@@ -79,7 +79,7 @@ Only one flow runs at a time: if a different flow is already running, new runs a
 
 Select a step to edit its friendly name and common settings on the right. Technical target settings such as match accuracy, timeout, image path, original coordinates, and click offsets are kept under `Advanced Settings`. Target previews retain their original aspect ratio and point out missing screenshots. Deselecting a step does not hide the step list.
 
-The logs panel starts collapsed and can be expanded from its header. Window geometry, splitter positions, table widths, the logs state, and the Advanced section state are stored with `QSettings`.
+The lower Logs/Status and Validation area has a practical minimum height and remains resizable. Window geometry, splitter positions, table widths, the logs state, and the Advanced section state are stored with `QSettings`.
 
 ## Adding Steps
 
@@ -89,9 +89,15 @@ For clicks, choose coordinate-only execution or capture/select an image target. 
 
 During Run, Run From Here, Run Until Here, and Test Step, the recorder hides by default, Windows shows the desktop (minimizing other windows), and a floating **Stop Run** control remains available. The recorder is restored when execution ends; other windows remain minimized. Turn this off in Settings with **Hide recorder while running**.
 
+## Validate Flow
+
+Use **Validate** in the Review toolbar or **Validate Flow** in the Execution menu before running. Run, Test Step, Run From Here, Run Until Here, Python generation, and scheduled execution also validate automatically.
+
+Validation checks required fields, variables, screenshots and file/application paths, coordinate data, image confidence/timeouts, Python syntax, action types, IDs, and other runtime values. Results appear in the Validation tab as `Error`, `Warning`, or `Info`, with the step number, step name, and reason. Double-click a result to clear the step filter, select the affected step, and scroll it into view. Errors block execution. Interactive warnings require confirmation; unattended scheduled runs record warnings in the log and continue, while validation errors are stored as failed schedule history.
+
 ## Log Viewer
 
-The larger, resizable Log Viewer remembers its splitter size. Entries are color-coded by severity, include the currently running step, and follow the newest entry unless you scroll up. Use Search, Clear, Copy, Save Log, or Open File from its header.
+The larger, resizable Logs/Status tab remembers its splitter size and uses a more readable default font. Entries are color-coded by severity, include the currently running step, and follow the newest entry unless you scroll up. Use Search, Clear, Copy, Save Log, or Open File from its header. Switch to the neighboring Validation tab to review flow-readiness results without losing logs.
 
 ## Generate Python
 

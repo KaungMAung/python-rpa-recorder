@@ -110,7 +110,7 @@ def test_full_scheduled_run_completes_without_thread_self_wait(tmp_path, monkeyp
 
     monkeypatch.setattr(main_window_module, "ReplayWorker", FakeWorker)
     monkeypatch.setattr(main_window_module, "ProjectManager", FakeProjectManager)
-    monkeypatch.setattr(main_window_module, "validate_project", lambda project, project_dir: [])
+    monkeypatch.setattr(main_window_module, "validate_project_detailed", lambda project, project_dir: [])
 
     window._run_flow_now("flow_a", scheduled=True)
 
@@ -167,7 +167,7 @@ def test_failed_scheduled_run_persists_one_based_failed_step(tmp_path, monkeypat
 
     monkeypatch.setattr(main_window_module, "ReplayWorker", FailingWorker)
     monkeypatch.setattr(main_window_module, "ProjectManager", FakeProjectManager)
-    monkeypatch.setattr(main_window_module, "validate_project", lambda project, project_dir: [])
+    monkeypatch.setattr(main_window_module, "validate_project_detailed", lambda project, project_dir: [])
     window._run_flow_now("flow_a", scheduled=True)
     for _ in range(200):
         app().processEvents()
@@ -178,4 +178,23 @@ def test_failed_scheduled_run_persists_one_based_failed_step(tmp_path, monkeypat
     history = window.schedule_store.get("flow_a").history
     assert history[-1].failed_step == 3
     assert history[-1].error == "image not found"
+    window.close()
+
+
+def test_scheduled_execution_is_blocked_by_validation_errors(tmp_path, monkeypatch) -> None:
+    from rpa.models import ActionType, RpaAction, RpaProject
+    from rpa.project_manager import ProjectManager
+    from rpa.scheduler import STATUS_FAILED
+
+    window = make_window(tmp_path, monkeypatch)
+    flow_dir = tmp_path / "invalid_flow"
+    project = RpaProject(actions=[RpaAction(ActionType.TYPE_TEXT.value, {"text": "{{missing}}"})])
+    ProjectManager().save(project, flow_dir)
+
+    window._run_flow_now("invalid_flow", scheduled=True)
+    assert "invalid_flow" not in window._scheduled_runs
+    schedule = window.schedule_store.get("invalid_flow")
+    assert schedule.last_status == STATUS_FAILED
+    assert schedule.history[-1].failed_step == 1
+    assert "undefined variable" in (schedule.history[-1].error or "")
     window.close()

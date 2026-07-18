@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QPoint, QSettings, QTimer, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QPlainTextEdit
+from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QMessageBox, QPlainTextEdit
 
 from rpa.models import ActionType, ProjectSettings, RpaAction, RpaProject
 from rpa.project_manager import ProjectManager
@@ -178,6 +178,47 @@ def test_log_viewer_adds_level_and_step_context() -> None:
     text = window.logs.toPlainText()
     assert "[Warning] warning: target is not visible" in text
     assert "[Step 1] Running" in text
+
+
+def test_validation_panel_lists_results_and_navigates_to_step() -> None:
+    window = window_with_actions()
+    window.project.actions[1].data = {"text": "{{undefined_name}}"}
+    QTest.mouseClick(window.buttons["Validate Flow"], Qt.LeftButton)
+    assert window.bottom_tabs.currentWidget() is window.validation_wrap
+    assert window.validation_table.rowCount() == 1
+    assert window.validation_table.item(0, 0).text() == "Error"
+    assert window.validation_table.item(0, 1).text() == "2"
+    window.filter_box.setText("first")
+    window._validation_result_activated(window.validation_table.item(0, 3))
+    assert window.filter_box.text() == ""
+    assert window.table.selected_index() == 1
+
+
+def test_validation_errors_block_execution(tmp_path, monkeypatch) -> None:
+    window = window_with_actions()
+    window.project_dir = tmp_path
+    window.project.actions[0].data = {"text": "{{missing}}"}
+    messages: list[str] = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda _p, _t, message: messages.append(message)))
+    window.run_project()
+    assert window.replay_thread is None
+    assert messages and "error" in messages[0].lower()
+
+
+def test_validation_warnings_require_confirmation(tmp_path, monkeypatch) -> None:
+    window = window_with_actions()
+    window.project_dir = tmp_path
+    window.project.actions = [RpaAction(ActionType.SCROLL.value, {"amount": 0})]
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *args, **kwargs: QMessageBox.No))
+    assert window._validate_before_execution(0, 0) is False
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *args, **kwargs: QMessageBox.Yes))
+    assert window._validate_before_execution(0, 0) is True
+
+
+def test_logs_and_validation_area_has_practical_minimum_height() -> None:
+    window = window_with_actions()
+    assert window.bottom_tabs.minimumHeight() >= 220
+    assert window.logs.font().pointSize() >= 10
 
 
 def test_inserted_step_clears_filter_and_is_visible() -> None:
