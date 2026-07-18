@@ -8,6 +8,7 @@ from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -28,7 +29,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from rpa.scheduler import STATUS_FAILED, STATUS_RUNNING, FlowSchedule, ScheduleStore, schedule_next_run
+from rpa.scheduler import (
+    STATUS_FAILED, STATUS_RUNNING, FlowSchedule, ScheduleStore,
+    TASK_DISABLED, TASK_MISSING, TASK_REGISTERED, TASK_REGISTRATION_FAILED, TASK_RUNNING,
+    schedule_next_run,
+)
+from rpa.windows_tasks import WindowsTaskRegistrar
 from rpa.project_manager import ProjectManager
 from ui.run_details_dialog import RunDetailsDialog
 from ui.runtime_inputs_dialog import RuntimeInputsDialog
@@ -52,7 +58,8 @@ COLUMN_LAST_RUN = 3
 COLUMN_DURATION = 4
 COLUMN_LAST_STATUS = 5
 COLUMN_NEXT_RUN = 6
-COLUMN_ACTIONS = 7
+COLUMN_TASK = 7
+COLUMN_ACTIONS = 8
 
 SORTABLE_COLUMNS = {COLUMN_FLOW, COLUMN_LAST_RUN, COLUMN_LAST_STATUS, COLUMN_NEXT_RUN}
 
@@ -64,6 +71,7 @@ COLUMN_TOOLTIPS = {
     COLUMN_DURATION: "How long the last run took to finish.",
     COLUMN_LAST_STATUS: "Result of the last run.",
     COLUMN_NEXT_RUN: "When the flow is next scheduled to run automatically.",
+    COLUMN_TASK: "Windows Task Scheduler registration state.",
     COLUMN_ACTIONS: "Run, pause, enable, disable, or inspect this schedule.",
 }
 
@@ -82,6 +90,11 @@ BADGE_COLORS = {
     "Success": ("#dcfce7", "#166534"),
     "Failed": ("#fee2e2", "#b91c1c"),
     "Skipped": ("#fef3c7", "#92400e"),
+    TASK_REGISTERED: ("#dcfce7", "#166534"),
+    TASK_DISABLED: ("#e2e8f0", "#475569"),
+    TASK_RUNNING: ("#dbeafe", "#1d4ed8"),
+    TASK_MISSING: ("#fef3c7", "#92400e"),
+    TASK_REGISTRATION_FAILED: ("#fee2e2", "#b91c1c"),
 }
 
 
@@ -89,13 +102,19 @@ class ScheduleFlowsDialog(QDialog):
     """List and manage every flow's automatic-run schedule."""
 
     run_now_requested = Signal(str)
-    HEADERS = ["Flow", "State", "Run every", "Last run", "Duration", "Last status", "Next run", "Actions"]
+    task_log = Signal(str)
+    HEADERS = ["Flow", "State", "Run every", "Last run", "Duration", "Last status", "Next run", "Windows task", "Actions"]
 
-    def __init__(self, store: ScheduleStore, settings: QSettings | None = None, parent=None) -> None:
+    def __init__(
+        self, store: ScheduleStore, settings: QSettings | None = None, parent=None,
+        task_registrar: WindowsTaskRegistrar | None = None,
+    ) -> None:
         super().__init__(parent)
         self.store = store
         self.settings = settings
+        self.task_registrar = task_registrar
         self._selected_flow_name: str | None = None
+        self._selected_schedule_id: str | None = None
         self._detail_schedule: FlowSchedule | None = None
         self._visible_history_entries = []
         self.setWindowTitle("Schedule Flows")
@@ -144,7 +163,11 @@ class ScheduleFlowsDialog(QDialog):
         self.refresh_btn.setToolTip("Reload schedules from disk now (F5)")
         self.refresh_btn.setShortcut("F5")
         self.refresh_btn.clicked.connect(self.reload)
+        self.add_schedule_btn = QPushButton("Add Schedule")
+        self.add_schedule_btn.setToolTip("Add another independent schedule for the selected flow")
+        self.add_schedule_btn.clicked.connect(self._add_schedule)
         layout.addWidget(self.auto_refresh_label)
+        layout.addWidget(self.add_schedule_btn)
         layout.addWidget(self.refresh_btn)
         return layout
 
@@ -244,6 +267,7 @@ class ScheduleFlowsDialog(QDialog):
         grid.setVerticalSpacing(9)
         self.detail_values: dict[str, QLabel] = {}
         fields = [
+            ("Schedule ID", "schedule_id"), ("Windows task", "task_status"),
             ("Last run", "last_run"), ("Duration", "duration"), ("Result", "result"),
             ("Next run", "next_run"), ("Error", "error"),
         ]
@@ -269,6 +293,21 @@ class ScheduleFlowsDialog(QDialog):
         self.detail_interval.currentIndexChanged.connect(self._detail_interval_changed)
         layout.addWidget(interval_label)
         layout.addWidget(self.detail_interval)
+        self.highest_privileges_check = QCheckBox("Run with highest privileges")
+        self.highest_privileges_check.setToolTip(
+            "Registers only this task with elevated privileges. Windows may request UAC approval."
+        )
+        self.highest_privileges_check.toggled.connect(self._task_options_changed)
+        layout.addWidget(self.highest_privileges_check)
+        timeout_row = QHBoxLayout()
+        timeout_row.addWidget(QLabel("Execution timeout"))
+        self.execution_timeout_spin = QSpinBox()
+        self.execution_timeout_spin.setRange(0, 10080)
+        self.execution_timeout_spin.setSpecialValueText("No timeout")
+        self.execution_timeout_spin.setSuffix(" min")
+        self.execution_timeout_spin.valueChanged.connect(self._task_options_changed)
+        timeout_row.addWidget(self.execution_timeout_spin, 1)
+        layout.addLayout(timeout_row)
         runtime_row = QHBoxLayout()
         self.runtime_inputs_label = QLabel("Runtime inputs: not configured")
         self.runtime_inputs_label.setStyleSheet("color: #64748b; border: none;")
@@ -341,9 +380,17 @@ class ScheduleFlowsDialog(QDialog):
         self.detail_enabled_btn = QPushButton("Enable Schedule")
         self.detail_enabled_btn.setEnabled(False)
         self.detail_enabled_btn.clicked.connect(self._enable_selected)
+        self.test_run_btn = QPushButton("Test Run (Windows Task Command)")
+        self.test_run_btn.setEnabled(False)
+        self.test_run_btn.clicked.connect(self._test_selected)
+        self.delete_schedule_btn = QPushButton("Delete Schedule")
+        self.delete_schedule_btn.setEnabled(False)
+        self.delete_schedule_btn.clicked.connect(self._delete_selected)
         layout.addWidget(self.detail_run_btn)
+        layout.addWidget(self.test_run_btn)
         layout.addWidget(self.detail_pause_btn)
         layout.addWidget(self.detail_enabled_btn)
+        layout.addWidget(self.delete_schedule_btn)
         return panel
 
     def _build_footer(self) -> QHBoxLayout:
@@ -429,11 +476,23 @@ class ScheduleFlowsDialog(QDialog):
     # -- building --------------------------------------------------------
 
     def reload(self) -> None:
-        current = self._flow_name_for_row(self.table.currentRow()) if self.table.rowCount() else None
-        selected_name = current or self._selected_flow_name
+        current = self._schedule_id_for_row(self.table.currentRow()) if self.table.rowCount() else None
+        selected_id = current or self._selected_schedule_id
         self.store.load()
         self.store.remove_missing_flows()
-        schedules = [self.store.get(name) for name in self.store.list_flow_names()]
+        schedules = self.store.list_schedules()
+        if self.task_registrar is not None:
+            changed = False
+            for schedule in schedules:
+                before = (schedule.task_status, schedule.task_error)
+                if self.store.needs_task_registration_migration(schedule.schedule_id):
+                    self._sync_task(schedule)
+                else:
+                    self._query_task_status(schedule)
+                changed = changed or before != (schedule.task_status, schedule.task_error)
+                self.store.set(schedule)
+            if changed:
+                self.store.save()
         self._update_summary(schedules)
         schedules = [schedule for schedule in schedules if self._matches_filters(schedule)]
         schedules.sort(key=self._sort_key, reverse=(self._sort_order == Qt.DescendingOrder))
@@ -442,7 +501,7 @@ class ScheduleFlowsDialog(QDialog):
         restore_row = -1
         for row, schedule in enumerate(schedules):
             self._build_row(row, schedule)
-            if schedule.flow_name == selected_name:
+            if schedule.schedule_id == selected_id:
                 restore_row = row
         is_empty = not schedules
         self.table.setVisible(not is_empty)
@@ -454,9 +513,11 @@ class ScheduleFlowsDialog(QDialog):
             # Refresh the side panel explicitly so timer reloads never leave stale data.
             selected_schedule = schedules[selected_row]
             self._selected_flow_name = selected_schedule.flow_name
+            self._selected_schedule_id = selected_schedule.schedule_id
             self._show_schedule_details(selected_schedule)
         else:
             self._selected_flow_name = None
+            self._selected_schedule_id = None
             self._show_schedule_details(None)
         self.auto_refresh_label.setText("Auto-refresh on · updated just now")
 
@@ -471,8 +532,9 @@ class ScheduleFlowsDialog(QDialog):
 
     def _build_row(self, row: int, schedule: FlowSchedule) -> None:
         name_item = self._readonly_item(schedule.flow_name)
-        name_item.setData(Qt.UserRole, schedule.flow_name)
-        name_item.setToolTip(schedule.flow_name)
+        name_item.setData(Qt.UserRole, schedule.schedule_id)
+        name_item.setData(Qt.UserRole + 1, schedule.flow_name)
+        name_item.setToolTip(f"{schedule.flow_name}\nSchedule ID: {schedule.schedule_id}")
         name_item.setFont(QFont(name_item.font().family(), name_item.font().pointSize(), QFont.DemiBold))
         self.table.setItem(row, COLUMN_FLOW, name_item)
 
@@ -502,6 +564,9 @@ class ScheduleFlowsDialog(QDialog):
         next_item = self._readonly_item(next_run_text)
         next_item.setToolTip(self._exact_time(schedule.next_run_at))
         self.table.setItem(row, COLUMN_NEXT_RUN, next_item)
+        task_item = self._badge_item(schedule.task_status, schedule.task_status)
+        task_item.setToolTip(schedule.task_error or schedule.task_status)
+        self.table.setItem(row, COLUMN_TASK, task_item)
         self.table.setCellWidget(row, COLUMN_ACTIONS, self._build_actions_cell(schedule))
 
     def _build_actions_cell(self, schedule: FlowSchedule) -> QWidget:
@@ -511,12 +576,14 @@ class ScheduleFlowsDialog(QDialog):
         button = QPushButton("Actions ▾")
         button.setToolTip("Run or change this schedule")
         menu = QMenu(button)
-        menu.addAction("Run Now", lambda name=schedule.flow_name: self.run_now_requested.emit(name))
-        pause_action = menu.addAction("Resume" if schedule.paused else "Pause", lambda name=schedule.flow_name: self._toggle_pause(name))
+        menu.addAction("Run Now", lambda identifier=schedule.schedule_id: self._run_schedule_now(identifier))
+        menu.addAction("Test Run", lambda identifier=schedule.schedule_id: self._test_schedule(identifier))
+        pause_action = menu.addAction("Resume" if schedule.paused else "Pause", lambda identifier=schedule.schedule_id: self._toggle_pause(identifier))
         pause_action.setEnabled(schedule.enabled)
-        menu.addAction("Enable" if not schedule.enabled else "Disable", lambda name=schedule.flow_name: self._toggle_enabled(name))
+        menu.addAction("Enable" if not schedule.enabled else "Disable", lambda identifier=schedule.schedule_id: self._toggle_enabled(identifier))
         menu.addSeparator()
-        menu.addAction("Details", lambda name=schedule.flow_name: self._show_details(name))
+        menu.addAction("Details", lambda identifier=schedule.schedule_id: self._show_details(identifier))
+        menu.addAction("Delete Schedule", lambda identifier=schedule.schedule_id: self._delete_schedule(identifier))
         button.setMenu(menu)
         layout.addWidget(button)
         return wrap
@@ -595,12 +662,18 @@ class ScheduleFlowsDialog(QDialog):
 
     def _flow_name_for_row(self, row: int) -> str | None:
         item = self.table.item(row, COLUMN_FLOW) if row >= 0 else None
-        return str(item.data(Qt.UserRole) or item.text()) if item is not None else None
+        return str(item.data(Qt.UserRole + 1) or item.text()) if item is not None else None
+
+    def _schedule_id_for_row(self, row: int) -> str | None:
+        item = self.table.item(row, COLUMN_FLOW) if row >= 0 else None
+        return str(item.data(Qt.UserRole)) if item is not None and item.data(Qt.UserRole) else None
 
     def _on_current_cell_changed(self, row: int, _column: int, _previous_row: int, _previous_column: int) -> None:
         name = self._flow_name_for_row(row)
+        schedule_id = self._schedule_id_for_row(row)
         self._selected_flow_name = name
-        self._show_schedule_details(self.store.get(name) if name else None)
+        self._selected_schedule_id = schedule_id
+        self._show_schedule_details(self.store.get_by_id(schedule_id) if schedule_id else None)
 
     def _show_schedule_details(self, schedule: FlowSchedule | None) -> None:
         self._detail_schedule = schedule
@@ -608,6 +681,8 @@ class ScheduleFlowsDialog(QDialog):
         self.detail_interval.blockSignals(True)
         self.detail_interval.setEnabled(enabled)
         self.detail_run_btn.setEnabled(enabled)
+        self.test_run_btn.setEnabled(enabled and self.task_registrar is not None)
+        self.delete_schedule_btn.setEnabled(enabled)
         self.detail_enabled_btn.setEnabled(enabled)
         self.runtime_inputs_btn.setEnabled(enabled)
         if schedule is None:
@@ -617,9 +692,14 @@ class ScheduleFlowsDialog(QDialog):
                 value.setText("—")
             self.detail_pause_btn.setEnabled(False)
             self.runtime_inputs_label.setText("Runtime inputs: not configured")
+            self.highest_privileges_check.setChecked(False)
+            self.execution_timeout_spin.setValue(0)
         else:
             state = self._state_text(schedule)
             self.detail_name.setText(schedule.flow_name)
+            self.detail_values["schedule_id"].setText(schedule.schedule_id)
+            self.detail_values["task_status"].setText(schedule.task_status)
+            self.detail_values["task_status"].setToolTip(schedule.task_error or schedule.task_status)
             self._style_label_badge(self.detail_state, state)
             self.detail_values["last_run"].setText(self._detail_time(schedule.last_run_at))
             self.detail_values["duration"].setText(self._format_duration(schedule.last_duration_seconds))
@@ -636,6 +716,12 @@ class ScheduleFlowsDialog(QDialog):
             self.runtime_inputs_label.setText(
                 f"Runtime inputs: {count} saved" if count else "Runtime inputs: using flow defaults"
             )
+            self.highest_privileges_check.blockSignals(True)
+            self.execution_timeout_spin.blockSignals(True)
+            self.highest_privileges_check.setChecked(schedule.run_with_highest_privileges)
+            self.execution_timeout_spin.setValue(schedule.execution_timeout_minutes or 0)
+            self.highest_privileges_check.blockSignals(False)
+            self.execution_timeout_spin.blockSignals(False)
         self.detail_interval.blockSignals(False)
         self._refresh_history()
 
@@ -694,7 +780,7 @@ class ScheduleFlowsDialog(QDialog):
         if self.settings is not None:
             self.settings.setValue("scheduler/history_limit", limit)
         if self._detail_schedule is not None:
-            self._detail_schedule = self.store.get(self._detail_schedule.flow_name)
+            self._detail_schedule = self.store.get_by_id(self._detail_schedule.schedule_id)
         self._refresh_history()
 
     def _style_label_badge(self, label: QLabel, badge: str) -> None:
@@ -709,7 +795,18 @@ class ScheduleFlowsDialog(QDialog):
 
     def _detail_interval_changed(self, index: int) -> None:
         if self._detail_schedule is not None and index >= 0:
-            self._set_interval(self._detail_schedule.flow_name, int(self.detail_interval.itemData(index)))
+            self._set_interval(self._detail_schedule.schedule_id, int(self.detail_interval.itemData(index)))
+
+    def _task_options_changed(self, _value=None) -> None:
+        schedule = self._detail_schedule
+        if schedule is None:
+            return
+        schedule.run_with_highest_privileges = self.highest_privileges_check.isChecked()
+        timeout = self.execution_timeout_spin.value()
+        schedule.execution_timeout_minutes = timeout if timeout > 0 else None
+        self.store.set(schedule)
+        self.store.save()
+        self._sync_task(schedule)
 
     def _configure_runtime_inputs(self) -> None:
         schedule = self._detail_schedule
@@ -735,33 +832,150 @@ class ScheduleFlowsDialog(QDialog):
             schedule.runtime_inputs = dict(dialog.input_values)
             self.store.set(schedule)
             self.store.save()
-            self._show_schedule_details(self.store.get(schedule.flow_name))
+            self._sync_task(schedule)
+            self._show_schedule_details(self.store.get_by_id(schedule.schedule_id))
 
     def _run_selected(self) -> None:
         if self._detail_schedule is not None:
-            self.run_now_requested.emit(self._detail_schedule.flow_name)
+            self._run_schedule_now(self._detail_schedule.schedule_id)
 
     def _pause_selected(self) -> None:
         if self._detail_schedule is not None:
-            self._toggle_pause(self._detail_schedule.flow_name)
+            self._toggle_pause(self._detail_schedule.schedule_id)
 
     def _enable_selected(self) -> None:
         if self._detail_schedule is not None:
-            self._toggle_enabled(self._detail_schedule.flow_name)
+            self._toggle_enabled(self._detail_schedule.schedule_id)
+
+    def _test_selected(self) -> None:
+        if self._detail_schedule is not None:
+            self._test_schedule(self._detail_schedule.schedule_id)
+
+    def _delete_selected(self) -> None:
+        if self._detail_schedule is not None:
+            self._delete_schedule(self._detail_schedule.schedule_id)
 
     # -- actions ---------------------------------------------------------
 
-    def _set_interval(self, flow_name: str, minutes: int) -> None:
-        schedule = self.store.get(flow_name)
+    def _resolve_schedule(self, identifier: str) -> FlowSchedule | None:
+        by_id = self.store.get_by_id(identifier)
+        if by_id is not None:
+            return by_id
+        return self.store.get(identifier) if identifier in self.store.list_flow_names() else None
+
+    def _project_json(self, schedule: FlowSchedule) -> Path:
+        return (self.store.flows_root / schedule.flow_name / "project.json").resolve()
+
+    def _sync_task(self, schedule: FlowSchedule) -> bool:
+        if self.task_registrar is None:
+            return True
+        result = self.task_registrar.sync(schedule, self._project_json(schedule))
+        self.store.mark_task_registration_attempted(schedule.schedule_id)
+        schedule.task_status = result.status
+        schedule.task_error = result.error
+        self.store.set(schedule)
+        self.store.save()
+        if result.ok:
+            self.task_log.emit(
+                f"[Scheduler] {result.status}: {result.task_name}"
+            )
+        else:
+            self.task_log.emit(
+                f"[Scheduler] Registration failed for {result.task_name}: {result.error}"
+            )
+        return result.ok
+
+    def _query_task_status(self, schedule: FlowSchedule) -> None:
+        if self.task_registrar is None:
+            return
+        result = self.task_registrar.query(schedule)
+        schedule.task_status = result.status
+        schedule.task_error = result.error
+
+    def _add_schedule(self) -> None:
+        flow_name = self._selected_flow_name
+        if not flow_name:
+            names = self.store.list_flow_names()
+            flow_name = names[0] if names else None
+        if not flow_name:
+            QMessageBox.information(self, "Add Schedule", "Create and save a flow before adding a schedule.")
+            return
+        schedule = self.store.create_schedule(flow_name)
+        self.store.set(schedule)
+        self.store.save()
+        self._sync_task(schedule)
+        self._selected_schedule_id = schedule.schedule_id
+        self.reload()
+
+    def _delete_schedule(self, identifier: str) -> None:
+        schedule = self._resolve_schedule(identifier)
+        if schedule is None:
+            return
+        reply = QMessageBox.question(
+            self, "Delete Schedule",
+            f"Delete schedule {schedule.schedule_id} for '{schedule.flow_name}' and remove its Windows task?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        if self.task_registrar is not None:
+            result = self.task_registrar.delete(schedule)
+            if not result.ok:
+                schedule.task_status = result.status
+                schedule.task_error = result.error
+                self.store.set(schedule)
+                self.store.save()
+                self.task_log.emit(f"[Scheduler] Task deletion failed for {result.task_name}: {result.error}")
+                QMessageBox.warning(self, "Task Deletion Failed", result.error or "The Windows task could not be removed.")
+                return
+            self.task_log.emit(f"[Scheduler] Removed Windows task: {result.task_name}")
+        self.store.remove_schedule(schedule.schedule_id)
+        self.store.save()
+        self._selected_schedule_id = None
+        self.reload()
+
+    def _test_schedule(self, identifier: str) -> None:
+        schedule = self._resolve_schedule(identifier)
+        if schedule is None or self.task_registrar is None:
+            QMessageBox.information(self, "Test Run", "Windows task execution is unavailable in this session.")
+            return
+        result = self.task_registrar.test_run(schedule, self._project_json(schedule))
+        if result.ok:
+            command = " ".join(result.command or [])
+            self.task_log.emit(f"[Scheduler] Test Run launched: {command}")
+            QMessageBox.information(
+                self, "Test Run Started",
+                "The standalone scheduled runner was started with the same command used by Windows Task Scheduler.",
+            )
+        else:
+            self.task_log.emit(f"[Scheduler] Test Run failed: {result.error}")
+            QMessageBox.warning(self, "Test Run Failed", result.error or "The runner could not be launched.")
+
+    def _run_schedule_now(self, identifier: str) -> None:
+        schedule = self._resolve_schedule(identifier)
+        if schedule is None:
+            return
+        if self.task_registrar is not None:
+            self._test_schedule(schedule.schedule_id)
+        else:
+            self.run_now_requested.emit(schedule.flow_name)
+
+    def _set_interval(self, identifier: str, minutes: int) -> None:
+        schedule = self._resolve_schedule(identifier)
+        if schedule is None:
+            return
         schedule.interval_minutes = minutes
         if schedule.enabled and not schedule.paused:
             schedule_next_run(schedule)
         self.store.set(schedule)
         self.store.save()
+        self._sync_task(schedule)
         self.reload()
 
-    def _toggle_pause(self, flow_name: str) -> None:
-        schedule = self.store.get(flow_name)
+    def _toggle_pause(self, identifier: str) -> None:
+        schedule = self._resolve_schedule(identifier)
+        if schedule is None:
+            return
         if not schedule.enabled:
             return
         schedule.paused = not schedule.paused
@@ -769,10 +983,14 @@ class ScheduleFlowsDialog(QDialog):
             schedule_next_run(schedule)
         self.store.set(schedule)
         self.store.save()
+        self._sync_task(schedule)
         self.reload()
 
-    def _toggle_enabled(self, flow_name: str) -> None:
-        schedule = self.store.get(flow_name)
+    def _toggle_enabled(self, identifier: str) -> None:
+        schedule = self._resolve_schedule(identifier)
+        if schedule is None:
+            return
+        flow_name = schedule.flow_name
         if schedule.enabled:
             reply = QMessageBox.question(
                 self, "Disable Schedule",
@@ -789,16 +1007,21 @@ class ScheduleFlowsDialog(QDialog):
             schedule_next_run(schedule)
         self.store.set(schedule)
         self.store.save()
+        self._sync_task(schedule)
         self.reload()
 
-    def _show_details(self, flow_name: str) -> None:
+    def _show_details(self, identifier: str) -> None:
+        schedule = self._resolve_schedule(identifier)
+        if schedule is None:
+            return
         for row in range(self.table.rowCount()):
-            if self._flow_name_for_row(row) == flow_name:
+            if self._schedule_id_for_row(row) == schedule.schedule_id:
                 self.table.setCurrentCell(row, COLUMN_FLOW)
                 self.table.setFocus()
                 return
-        self._selected_flow_name = flow_name
-        self._show_schedule_details(self.store.get(flow_name))
+        self._selected_flow_name = schedule.flow_name
+        self._selected_schedule_id = schedule.schedule_id
+        self._show_schedule_details(schedule)
 
     def _show_help(self) -> None:
         QMessageBox.information(self, "Schedule Flows Help", HELP_TEXT)

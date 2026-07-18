@@ -15,7 +15,9 @@ The main workflow is `Record -> Review -> Test -> Run`. The step list remains vi
 - `rpa/image_matcher.py` captures screenshots and locates images with OpenCV.
 - `rpa/windowing.py` discovers, matches, activates, and controls native Windows application windows.
 - `rpa/generator.py` creates `generated/generated_rpa.py`.
-- `rpa/scheduler.py` stores and evaluates per-flow automatic run schedules (`flows/schedules.json`).
+- `rpa/scheduler.py` stores schedules and persistent run history (`flows/schedules.json`).
+- `rpa/windows_tasks.py` registers one Windows Task Scheduler task per saved schedule and builds the standalone runner command.
+- `rpa/scheduled_runner.py` runs a scheduled flow without requiring the main recorder window to remain open.
 - `ui/schedule_dialog.py` is the Schedule Flows page used to enable, adjust, and monitor those schedules.
 - `ui/debug_variables_dialog.py` presents editable non-sensitive runtime values while a breakpoint is paused.
 
@@ -54,6 +56,8 @@ Right-click a step to test only that step, run from it, run until it, enable or 
 
 ## Scheduling Flows
 
+On Windows, every saved schedule is registered as its own Windows Task Scheduler task, so the recorder does not need to remain open. A flow may have several schedules; use **Add Schedule** to create another interval for the selected flow. Existing one-schedule-per-flow data remains compatible and receives a stable schedule ID automatically.
+
 Open `Schedule Flows` (Execution toolbar group or menu, `⏱`) to see every saved flow and manage its automatic schedule. The header summarizes enabled, paused, disabled, and currently running flows. Search by flow name or filter by schedule/run status; a clear empty state explains when nothing matches.
 
 Columns:
@@ -65,19 +69,32 @@ Columns:
 - **Duration** - how long the last run took.
 - **Last status** - `Success`, `Failed`, `Running`, or a `Skipped (...)` reason.
 - **Next run** - a countdown such as `in 12 min` (or `Paused`/`Disabled`; hover for the exact timestamp).
+- **Windows task** - `Registered`, `Disabled`, `Running`, `Task missing`, or `Registration failed`.
 
 Select a row to open its Details panel. The panel shows the latest run, duration, result, error, next run, and schedule interval. It also contains persistent run history with source, start/end times, duration, attempts, result, failed step, and error. Filter history by `Success`, `Failed`, `Skipped`, or `Running`. Select a history row and use **Run Details** (or double-click it) to inspect its execution report. Use **Configure Inputs…** to save the Runtime Input values used by unattended scheduled runs. Change the interval or enabled/paused state there without adding controls to every table row. The row's labeled **Actions** menu provides:
 
-- **Run Now** - runs the flow immediately without affecting its schedule or next run time.
+- **Run Now** - starts the standalone runner immediately without affecting its schedule or next run time.
+- **Test Run** - launches the exact command stored in the Windows task, including the project path and schedule ID.
 - **Pause / Resume** - temporarily stops automatic runs while keeping the interval configuration intact. No confirmation needed.
 - **Enable / Disable** - fully turns the schedule on or off. Disabling asks for confirmation first.
 - **Details** - selects the row and opens full run information in the side panel (failure details also remain available on the Last status tooltip).
+- **Delete Schedule** - removes that schedule and its corresponding Windows task. Other schedules for the same flow are unaffected.
 
 The header shows the auto-refresh state and refreshes every 5 seconds so `Running` status and countdowns stay current; use **Refresh** or `F5` for an immediate update. Click `Flow`, `Last run`, `Next run`, or `Last status` headers to sort (click again to reverse); column widths and the chosen sort order are remembered between openings. Row selection and all controls support keyboard navigation.
 
-Only one flow runs at a time: if a manual or different scheduled flow is already running, new scheduled runs wait in the queue; if the *same* flow is requested while its previous scheduled run is active, that attempt is skipped and marked `Skipped (Already Running)`. Scheduled runs use the same desktop lifecycle as manual Run: the recorder hides, Windows shows the desktop, the safely positioned floating **Stop Run** control remains available, and execution starts after desktop preparation. The recorder is restored after success, failure, timeout, or stop. Other minimized applications remain minimized.
+Each Windows task runs only while the Windows user is logged on, starts as soon as practical after a missed start, and uses the Task Scheduler **IgnoreNew** policy so a second instance of the same schedule cannot overlap its active run. In Details, optionally set an execution timeout or enable **Run with highest privileges**. The recorder never stores a Windows password. If registration needs elevation, only the small task-registration helper requests UAC approval; the main application is not relaunched as administrator.
 
-Schedules and run history are stored permanently in `flows/schedules.json` and persist across app restarts. History includes start/end time, duration, total step attempts, final status, failed/stopped step, and error. It keeps the latest 100 records per flow by default; adjust the retention control in the Details panel from 10 to 1,000 records. Existing schedule files are migrated automatically from their previous latest-run fields.
+The registered action uses the existing standalone runner with this command shape:
+
+```text
+PythonRPARecorder.exe --project "<project.json path>" --schedule-id "<id>" --scheduled-run
+```
+
+When running from source, the equivalent command uses the current Python interpreter and `app.py`. Paths are passed as separate arguments and quoted in the Task Scheduler XML rather than stored as a shell command.
+
+Scheduled runs use the same validation, evidence, history, runtime-input, retry, and desktop preparation behavior as manual Run. Windows shows the desktop before execution, the safely positioned floating **Stop Run** control remains available, and any open recorder window is restored after success, failure, timeout, or stop. Other minimized applications remain minimized. Results are written directly to the existing run-history storage, so they appear when Schedule Flows is opened after the recorder has been closed.
+
+Schedules and run history are stored permanently in `flows/schedules.json` and persist across app restarts. Additional schedules are stored alongside the compatible primary flow schedule. History includes start/end time, duration, total step attempts, final status, failed/stopped step, and error. It keeps the latest 100 records per schedule by default; adjust the retention control in the Details panel from 10 to 1,000 records. Existing schedule files are migrated automatically from their previous latest-run fields.
 
 ## Step Details
 
@@ -305,6 +322,16 @@ Run these checks on the same Windows account and display configuration that will
 4. Test Stop Run while a Click step is searching for an image that is not visible.
 5. With PyAutoGUI failsafe enabled, run and move the pointer into a screen corner. Confirm the run stops with the friendly safety message.
 
+### Windows Task Scheduler
+
+1. Save a small flow, open **Schedule Flows**, select it, and enable its schedule at the 5-minute interval.
+2. Confirm the Windows task status becomes **Registered**. In Task Scheduler, verify the task is named `RPA Recorder\<flow name> - <schedule id>`, uses **Run only when user is logged on**, **Start the task as soon as possible after a scheduled start is missed**, and **Do not start a new instance**.
+3. Click **Add Schedule**, choose a different interval, and enable it. Confirm a second task with a different schedule ID exists for the same flow.
+4. Close Python RPA Recorder and click **Test Run** before closing, or choose **Run** in Windows Task Scheduler. Confirm the standalone floating Stop Run window appears, the desktop is prepared, and the flow executes without the main app staying open.
+5. Reopen the recorder and Schedule Flows. Confirm the run appears in that schedule's history and Run Details opens its evidence.
+6. Pause, resume, disable, edit, and delete one schedule. Confirm only its matching Windows task changes and the other schedule remains intact.
+7. If registration requests administrator access, confirm UAC applies only to the short task-registration helper and the main recorder remains at its original privilege level.
+
 ### Breakpoints and Step-Through Debugging
 
 1. Add three simple steps that write distinct text, select Steps 1 and 3 with Ctrl-click, and press F9. Confirm both rows show red breakpoint dots; save, close, and reopen the flow to confirm the markers persist.
@@ -345,5 +372,8 @@ Run these checks on the same Windows account and display configuration that will
 - If click replay misses, lower confidence or enable coordinate fallback.
 - If PyAutoGUI aborts, move the mouse away from the screen corner or disable failsafe in settings.
 - If generated scripts fail to locate images, confirm screenshots still exist in the project `screenshots/` folder.
+- If a schedule shows **Task missing**, select it and save or toggle its enabled state to register it again. Also confirm the flow's `project.json` still exists at the saved location.
+- If a schedule shows **Registration failed**, hover the status or check Logs/Status for the Task Scheduler error. A cancelled UAC prompt, Windows policy, invalid project path, or insufficient task-folder permission is reported without storing credentials.
+- If a Test Run fails to launch, verify that the installed executable still exists. Source runs require the same Python environment and `app.py` path used when the task was registered; edit or re-save the schedule after moving the application.
 - If **Run Until Breakpoint** reports that none exists, select an enabled executable row and press F9; structural If/Else/End/Repeat markers cannot hold breakpoints.
 - If a debugger variable is read-only, it is either a sensitive Runtime Input or a protected run-provided value such as `RUN_DATE` or `CLIPBOARD_TEXT`.

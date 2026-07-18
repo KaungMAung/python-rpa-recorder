@@ -73,6 +73,7 @@ from rpa.variables import (
 )
 from rpa.utils import foreground_elevation_mismatch
 from rpa.windowing import NativeWindowBackend
+from rpa.windows_tasks import WindowsTaskRegistrar
 from ui.action_editor import ActionEditor
 from ui.action_table import ActionTable
 from ui.dialogs import ManualActionDialog, SettingsDialog, VariablesDialog, load_default_project_settings, show_error
@@ -263,7 +264,10 @@ class MainWindow(QMainWindow):
         self.schedule_timer = QTimer(self)
         self.schedule_timer.setInterval(15000)
         self.schedule_timer.timeout.connect(self._check_schedules)
-        self.schedule_timer.start()
+        if sys.platform != "win32":
+            # Windows schedules are owned by Task Scheduler and must not also
+            # be polled by the GUI process.
+            self.schedule_timer.start()
         self.setAcceptDrops(True)
         self._build_ui()
         self._connect_signals()
@@ -1029,8 +1033,12 @@ class MainWindow(QMainWindow):
         self.table.setFocus(Qt.OtherFocusReason)
 
     def schedule_flows_dialog(self) -> None:
-        dialog = ScheduleFlowsDialog(self.schedule_store, self.settings, self)
+        dialog = ScheduleFlowsDialog(
+            self.schedule_store, self.settings, self,
+            task_registrar=WindowsTaskRegistrar(),
+        )
         dialog.run_now_requested.connect(lambda name: self._run_flow_now(name))
+        dialog.task_log.connect(self.log)
         dialog.exec()
 
     def _check_schedules(self) -> None:

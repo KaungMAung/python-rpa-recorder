@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 STATUS_SUCCESS = "Success"
 STATUS_FAILED = "Failed"
@@ -22,6 +23,16 @@ STATUS_STOPPED = "Stopped"
 STATUS_SKIPPED_RUNNING = "Skipped (Already Running)"
 STATUS_SKIPPED_BUSY = "Skipped (Flow Open In Editor)"
 DEFAULT_HISTORY_LIMIT = 100
+TASK_REGISTERED = "Registered"
+TASK_DISABLED = "Disabled"
+TASK_RUNNING = "Running"
+TASK_MISSING = "Task missing"
+TASK_REGISTRATION_FAILED = "Registration failed"
+
+
+def legacy_schedule_id(flow_name: str) -> str:
+    """Stable ID for the single schedule used by pre-multi-schedule projects."""
+    return uuid5(NAMESPACE_URL, f"python-rpa-recorder:{flow_name}").hex[:12]
 
 
 @dataclass
@@ -75,6 +86,7 @@ def utc_now() -> datetime:
 @dataclass
 class FlowSchedule:
     flow_name: str
+    schedule_id: str = ""
     enabled: bool = False
     paused: bool = False
     interval_minutes: int = 60
@@ -86,6 +98,10 @@ class FlowSchedule:
     next_run_at: str | None = None
     runtime_inputs: dict[str, Any] = field(default_factory=dict)
     history: list[RunHistoryEntry] = field(default_factory=list)
+    task_status: str = TASK_MISSING
+    task_error: str | None = None
+    execution_timeout_minutes: int | None = None
+    run_with_highest_privileges: bool = False
 
     @classmethod
     def from_dict(cls, flow_name: str, data: dict[str, Any]) -> "FlowSchedule":
@@ -107,6 +123,7 @@ class FlowSchedule:
             ))
         return cls(
             flow_name=flow_name,
+            schedule_id=str(data.get("schedule_id") or legacy_schedule_id(flow_name)),
             enabled=bool(data.get("enabled", False)),
             paused=bool(data.get("paused", False)),
             interval_minutes=int(data.get("interval_minutes") or 60),
@@ -118,6 +135,10 @@ class FlowSchedule:
             next_run_at=data.get("next_run_at"),
             runtime_inputs=dict(data.get("runtime_inputs") or {}),
             history=history,
+            task_status=str(data.get("task_status") or TASK_MISSING),
+            task_error=data.get("task_error"),
+            execution_timeout_minutes=_optional_positive_int(data.get("execution_timeout_minutes")),
+            run_with_highest_privileges=bool(data.get("run_with_highest_privileges", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -242,6 +263,11 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _optional_positive_int(value: Any) -> int | None:
+    parsed = _optional_int(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
 def _trim_history(schedule: FlowSchedule, limit: int) -> None:
     limit = max(1, int(limit))
     if len(schedule.history) > limit:
@@ -256,10 +282,14 @@ class ScheduleStore:
         self.path = self.flows_root / "schedules.json"
         self.history_limit = min(1000, max(1, int(history_limit)))
         self._schedules: dict[str, FlowSchedule] = {}
+        self._additional_schedules: dict[str, FlowSchedule] = {}
+        self._task_registration_migrations: set[str] = set()
         self.load()
 
     def load(self) -> None:
         self._schedules = {}
+        self._additional_schedules = {}
+        self._task_registration_migrations = set()
         if not self.path.exists():
             return
         try:
@@ -268,19 +298,39 @@ class ScheduleStore:
             raw = {}
         for flow_name, data in raw.items():
             if isinstance(data, dict):
-                self._schedules[flow_name] = FlowSchedule.from_dict(flow_name, data)
+                primary = FlowSchedule.from_dict(flow_name, data)
+                self._schedules[flow_name] = primary
+                if "task_status" not in data:
+                    self._task_registration_migrations.add(primary.schedule_id)
+                for extra_data in data.get("additional_schedules", []):
+                    if not isinstance(extra_data, dict):
+                        continue
+                    extra = FlowSchedule.from_dict(flow_name, extra_data)
+                    if extra.schedule_id and extra.schedule_id != primary.schedule_id:
+                        self._additional_schedules[extra.schedule_id] = extra
+                        if "task_status" not in extra_data:
+                            self._task_registration_migrations.add(extra.schedule_id)
 
     def save(self) -> None:
         self.flows_root.mkdir(parents=True, exist_ok=True)
-        for schedule in self._schedules.values():
+        for schedule in [*self._schedules.values(), *self._additional_schedules.values()]:
             _trim_history(schedule, self.history_limit)
-        payload = {name: schedule.to_dict() for name, schedule in self._schedules.items()}
-        self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        payload = {}
+        for name, schedule in self._schedules.items():
+            data = schedule.to_dict()
+            data["additional_schedules"] = [
+                extra.to_dict() for extra in self._additional_schedules.values()
+                if extra.flow_name == name
+            ]
+            payload[name] = data
+        temporary = self.path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temporary.replace(self.path)
 
     def set_history_limit(self, limit: int) -> None:
         """Change retention and immediately trim persisted in-memory histories."""
         self.history_limit = min(1000, max(1, int(limit)))
-        for schedule in self._schedules.values():
+        for schedule in [*self._schedules.values(), *self._additional_schedules.values()]:
             _trim_history(schedule, self.history_limit)
 
     def list_flow_names(self) -> list[str]:
@@ -293,17 +343,72 @@ class ScheduleStore:
         )
 
     def get(self, flow_name: str) -> FlowSchedule:
-        return self._schedules.setdefault(flow_name, FlowSchedule(flow_name=flow_name))
+        if flow_name in self._additional_schedules:
+            return self._additional_schedules[flow_name]
+        return self._schedules.setdefault(
+            flow_name, FlowSchedule(flow_name=flow_name, schedule_id=legacy_schedule_id(flow_name)),
+        )
+
+    def get_by_id(self, schedule_id: str) -> FlowSchedule | None:
+        if schedule_id in self._additional_schedules:
+            return self._additional_schedules[schedule_id]
+        return next(
+            (schedule for schedule in self._schedules.values() if schedule.schedule_id == schedule_id), None,
+        )
+
+    def needs_task_registration_migration(self, schedule_id: str) -> bool:
+        """True only for schedules saved before Windows task status existed."""
+        return schedule_id in self._task_registration_migrations
+
+    def mark_task_registration_attempted(self, schedule_id: str) -> None:
+        self._task_registration_migrations.discard(schedule_id)
+
+    def list_schedules(self) -> list[FlowSchedule]:
+        for flow_name in self.list_flow_names():
+            self.get(flow_name)
+        existing = set(self.list_flow_names())
+        schedules = [schedule for name, schedule in self._schedules.items() if name in existing]
+        schedules.extend(
+            schedule for schedule in self._additional_schedules.values()
+            if schedule.flow_name in existing
+        )
+        return schedules
+
+    def create_schedule(self, flow_name: str) -> FlowSchedule:
+        self.get(flow_name)
+        schedule = FlowSchedule(flow_name=flow_name, schedule_id=uuid4().hex[:12])
+        self._additional_schedules[schedule.schedule_id] = schedule
+        return schedule
+
+    def remove_schedule(self, schedule_id: str) -> FlowSchedule | None:
+        extra = self._additional_schedules.pop(schedule_id, None)
+        if extra is not None:
+            return extra
+        for flow_name, schedule in list(self._schedules.items()):
+            if schedule.schedule_id == schedule_id:
+                removed = schedule
+                self._schedules[flow_name] = FlowSchedule(
+                    flow_name=flow_name, schedule_id=legacy_schedule_id(flow_name),
+                )
+                return removed
+        return None
 
     def set(self, schedule: FlowSchedule) -> None:
-        self._schedules[schedule.flow_name] = schedule
+        primary = self._schedules.get(schedule.flow_name)
+        if primary is None or primary.schedule_id == schedule.schedule_id:
+            self._schedules[schedule.flow_name] = schedule
+        else:
+            self._additional_schedules[schedule.schedule_id] = schedule
 
     def remove_missing_flows(self) -> None:
         existing = set(self.list_flow_names())
         for name in list(self._schedules):
             if name not in existing:
                 del self._schedules[name]
+        for schedule_id, schedule in list(self._additional_schedules.items()):
+            if schedule.flow_name not in existing:
+                del self._additional_schedules[schedule_id]
 
     def due_flows(self, now: datetime | None = None) -> list[FlowSchedule]:
         now = now or utc_now()
-        return [schedule for schedule in self._schedules.values() if is_due(schedule, now)]
+        return [schedule for schedule in self.list_schedules() if is_due(schedule, now)]
