@@ -64,7 +64,7 @@ Columns:
 - **Last status** - `Success`, `Failed`, `Running`, or a `Skipped (...)` reason.
 - **Next run** - a countdown such as `in 12 min` (or `Paused`/`Disabled`; hover for the exact timestamp).
 
-Select a row to open its Details panel. The panel shows the latest run, duration, result, error, next run, and schedule interval. It also contains persistent run history with source, start/end times, duration, attempts, result, failed step, and error. Filter history by `Success`, `Failed`, `Skipped`, or `Running`. Select a history row and use **Run Details** (or double-click it) to inspect its execution report. Change the interval or enabled/paused state there without adding controls to every table row. The row's labeled **Actions** menu provides:
+Select a row to open its Details panel. The panel shows the latest run, duration, result, error, next run, and schedule interval. It also contains persistent run history with source, start/end times, duration, attempts, result, failed step, and error. Filter history by `Success`, `Failed`, `Skipped`, or `Running`. Select a history row and use **Run Details** (or double-click it) to inspect its execution report. Use **Configure Inputs…** to save the Runtime Input values used by unattended scheduled runs. Change the interval or enabled/paused state there without adding controls to every table row. The row's labeled **Actions** menu provides:
 
 - **Run Now** - runs the flow immediately without affecting its schedule or next run time.
 - **Pause / Resume** - temporarily stops automatic runs while keeping the interval configuration intact. No confirmation needed.
@@ -113,7 +113,7 @@ The larger, resizable Logs/Status tab remembers its splitter size and uses a mor
 
 ## Execution Evidence and Run Reports
 
-Each manual, scheduled, range, or step-test run creates a timestamped folder under the flow's `runs/` directory. The folder contains `execution.log`, a machine-readable `summary.json`, an automatic failure screenshot when a step fails, and optional before/after screenshots for steps where those Advanced Settings are enabled. Reports include the flow and run source, validation results, timestamps, duration, final status, failed step/error, per-step results and durations, and retry attempts.
+Each manual, scheduled, range, or step-test run creates a timestamped folder under the flow's `runs/` directory. The folder contains `execution.log`, a machine-readable `summary.json`, an automatic failure screenshot when a step fails, and optional before/after screenshots for steps where those Advanced Settings are enabled. Reports include the flow and run source, validation results, masked runtime inputs, timestamps, duration, final status, failed step/error, per-step results and durations, and retry attempts.
 
 Open a report from **Run Details** in the main Logs/Status header or from Schedule History. The report provides direct buttons for its folder, log, and screenshots. Older history entries remain compatible and are labeled as legacy runs when they do not have an evidence reference. If evidence was manually deleted or moved, Run Details explains what is unavailable instead of failing.
 
@@ -146,11 +146,22 @@ MyRecording/
       screenshots/
 ```
 
-`project.json` contains settings, variables, and ordered actions.
+`project.json` contains settings, Project Variables, Runtime Input definitions, Output Variable names, and ordered actions. Older projects containing only the original `variables` object continue to load unchanged.
 
-## Variables
+## Variables and Runtime Inputs
 
-Use the `Variables` dialog to define project-level values. Placeholders such as `{{PROJECT_NAME}}` and `{{INPUT_FILE}}` are resolved in typed text, file paths, and Python action data.
+Open **Project → Variables** to manage four clear views:
+
+- **Project Variables** are saved with the flow and available to every run. This is the original `variables` behavior and remains fully compatible.
+- **Runtime Inputs** are defined with a type, default, required/optional state, description, and sensitive flag. Manual Run, Test Step, Run From Here, and Run Until Here request them before the recorder hides. Supported controls include text, number, date, dropdown, password, file, and folder.
+- **Output Variables** document values produced by earlier steps. Type Text and Open File can store their resolved value; Run Python and Python Code can store `result`. Python code may also continue assigning `variables['NAME']` directly.
+- **Current Values** shows the latest or active runner state for debugging, including built-ins and outputs. Sensitive values are always displayed as `[REDACTED]`.
+
+Placeholders resolve consistently throughout action data, including technical fields such as coordinates, timeouts, paths, image settings, text, and keys. Common examples are `{{INPUT_FILE}}`, `{{REPORT_DATE}}`, `{{CLIPBOARD_TEXT}}`, `{{LAST_CLICK_X}}`, `{{LAST_CLICK_Y}}`, and `{{RUN_DATE}}`. `RUN_DATE` uses ISO `YYYY-MM-DD`; clipboard text is captured when the run begins; the last-click coordinates update after click, image-click fallback, and drag actions.
+
+Required, typed, choice, and file/folder inputs are validated before execution. Scheduled runs never show an input dialog: configure their saved values in **Schedule Flows → Configure Inputs…**. Missing scheduled values block the run and are recorded as a validation failure. Sensitive runtime values are masked in the Log Viewer, evidence logs, summaries, errors, and persistent history. Scheduled values are stored locally in `flows/schedules.json`, so protect that file using normal Windows account and folder permissions.
+
+Generated Python contains the same input definitions and placeholder handling. It prompts in the console (using hidden password entry), or accepts unattended values from environment variables named `RPA_INPUT_<VARIABLE_NAME>`.
 
 ## Build EXE
 

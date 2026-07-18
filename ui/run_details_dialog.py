@@ -44,8 +44,10 @@ class RunDetailsDialog(QDialog):
         tabs = QTabWidget()
         self.steps_table = self._table(["Step", "Name", "Status", "Duration", "Attempts", "Error"])
         self.validation_table = self._table(["Level", "Step", "Step name", "Reason"])
+        self.inputs_table = self._table(["Runtime input", "Value"])
         tabs.addTab(self.steps_table, "Step Results")
         tabs.addTab(self.validation_table, "Validation")
+        tabs.addTab(self.inputs_table, "Runtime Inputs")
         layout.addWidget(tabs, 1)
 
         close_btn = QPushButton("Close")
@@ -107,6 +109,11 @@ class RunDetailsDialog(QDialog):
             values = (issue.get("level", "—"), issue.get("step_number", "—"), issue.get("step_name", "—"), issue.get("reason", "—"))
             for column, value in enumerate(values):
                 self.validation_table.setItem(row, column, QTableWidgetItem(str(value)))
+        inputs = self.summary.get("runtime_inputs") or {}
+        self.inputs_table.setRowCount(len(inputs))
+        for row, (name, value) in enumerate(sorted(inputs.items())):
+            self.inputs_table.setItem(row, 0, QTableWidgetItem(str(name)))
+            self.inputs_table.setItem(row, 1, QTableWidgetItem(str(value)))
 
     def _open_path(self, path: Path) -> None:
         if not path.exists():

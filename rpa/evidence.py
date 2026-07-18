@@ -40,6 +40,7 @@ class RunEvidenceSession:
         self.log_path = self.folder / "execution.log"
         self.summary_path = self.folder / "summary.json"
         self.validation_results: list[dict[str, Any]] = []
+        self.runtime_inputs: dict[str, Any] = {}
         self.logger = logging.getLogger(f"python-rpa-recorder.evidence.{self.run_id}")
         self.logger.setLevel(logging.INFO)
         self.logger.propagate = False
@@ -66,6 +67,11 @@ class RunEvidenceSession:
             }
             for issue in issues
         ]
+
+    def set_runtime_inputs(self, values: dict[str, Any], sensitive_names: set[str]) -> None:
+        self.runtime_inputs = {
+            name: "[REDACTED]" if name in sensitive_names else value for name, value in values.items()
+        }
 
     def finalize(
         self,
@@ -107,6 +113,7 @@ class RunEvidenceSession:
             "failed_step": failed_step,
             "error": error,
             "validation_results": self.validation_results,
+            "runtime_inputs": self.runtime_inputs,
             "step_results": normalized_steps,
             "screenshots": screenshots,
             "log": self.log_path.name,

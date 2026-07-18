@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -28,7 +29,9 @@ from PySide6.QtWidgets import (
 )
 
 from rpa.scheduler import STATUS_FAILED, STATUS_RUNNING, FlowSchedule, ScheduleStore, schedule_next_run
+from rpa.project_manager import ProjectManager
 from ui.run_details_dialog import RunDetailsDialog
+from ui.runtime_inputs_dialog import RuntimeInputsDialog
 
 INTERVAL_OPTIONS = [
     ("Every 5 minutes", 5),
@@ -266,6 +269,16 @@ class ScheduleFlowsDialog(QDialog):
         self.detail_interval.currentIndexChanged.connect(self._detail_interval_changed)
         layout.addWidget(interval_label)
         layout.addWidget(self.detail_interval)
+        runtime_row = QHBoxLayout()
+        self.runtime_inputs_label = QLabel("Runtime inputs: not configured")
+        self.runtime_inputs_label.setStyleSheet("color: #64748b; border: none;")
+        self.runtime_inputs_btn = QPushButton("Configure Inputs…")
+        self.runtime_inputs_btn.setEnabled(False)
+        self.runtime_inputs_btn.setToolTip("Save values used by unattended scheduled runs")
+        self.runtime_inputs_btn.clicked.connect(self._configure_runtime_inputs)
+        runtime_row.addWidget(self.runtime_inputs_label, 1)
+        runtime_row.addWidget(self.runtime_inputs_btn)
+        layout.addLayout(runtime_row)
 
         history_heading = QHBoxLayout()
         history_title = QLabel("Run history")
@@ -596,12 +609,14 @@ class ScheduleFlowsDialog(QDialog):
         self.detail_interval.setEnabled(enabled)
         self.detail_run_btn.setEnabled(enabled)
         self.detail_enabled_btn.setEnabled(enabled)
+        self.runtime_inputs_btn.setEnabled(enabled)
         if schedule is None:
             self.detail_name.setText("Flow details")
             self.detail_state.setText("Select a flow")
             for value in self.detail_values.values():
                 value.setText("—")
             self.detail_pause_btn.setEnabled(False)
+            self.runtime_inputs_label.setText("Runtime inputs: not configured")
         else:
             state = self._state_text(schedule)
             self.detail_name.setText(schedule.flow_name)
@@ -617,6 +632,10 @@ class ScheduleFlowsDialog(QDialog):
             self.detail_pause_btn.setEnabled(schedule.enabled)
             self.detail_pause_btn.setText("Resume Schedule" if schedule.paused else "Pause Schedule")
             self.detail_enabled_btn.setText("Disable Schedule" if schedule.enabled else "Enable Schedule")
+            count = len(schedule.runtime_inputs)
+            self.runtime_inputs_label.setText(
+                f"Runtime inputs: {count} saved" if count else "Runtime inputs: using flow defaults"
+            )
         self.detail_interval.blockSignals(False)
         self._refresh_history()
 
@@ -691,6 +710,32 @@ class ScheduleFlowsDialog(QDialog):
     def _detail_interval_changed(self, index: int) -> None:
         if self._detail_schedule is not None and index >= 0:
             self._set_interval(self._detail_schedule.flow_name, int(self.detail_interval.itemData(index)))
+
+    def _configure_runtime_inputs(self) -> None:
+        schedule = self._detail_schedule
+        if schedule is None:
+            return
+        try:
+            project = ProjectManager().load(self.store.flows_root / schedule.flow_name / "project.json")
+        except Exception as exc:
+            QMessageBox.warning(self, "Runtime Inputs", f"Could not load this flow:\n\n{exc}")
+            return
+        if not project.runtime_inputs:
+            QMessageBox.information(
+                self, "Runtime Inputs",
+                "This flow has no Runtime Inputs. Add them from the main Variables window first.",
+            )
+            return
+        dialog = RuntimeInputsDialog(project, schedule.runtime_inputs, parent=self)
+        dialog.setWindowTitle("Scheduled Runtime Inputs")
+        ok_button = dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok)
+        if ok_button:
+            ok_button.setText("Save Inputs")
+        if dialog.exec() == QDialog.Accepted:
+            schedule.runtime_inputs = dict(dialog.input_values)
+            self.store.set(schedule)
+            self.store.save()
+            self._show_schedule_details(self.store.get(schedule.flow_name))
 
     def _run_selected(self) -> None:
         if self._detail_schedule is not None:

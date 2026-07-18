@@ -84,6 +84,7 @@ class FlowSchedule:
     last_status: str | None = None
     last_error: str | None = None
     next_run_at: str | None = None
+    runtime_inputs: dict[str, Any] = field(default_factory=dict)
     history: list[RunHistoryEntry] = field(default_factory=list)
 
     @classmethod
@@ -115,6 +116,7 @@ class FlowSchedule:
             last_status=data.get("last_status"),
             last_error=data.get("last_error"),
             next_run_at=data.get("next_run_at"),
+            runtime_inputs=dict(data.get("runtime_inputs") or {}),
             history=history,
         )
 

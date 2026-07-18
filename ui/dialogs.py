@@ -18,11 +18,15 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QCheckBox,
     QPlainTextEdit,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from rpa.models import ActionType, ProjectSettings, RpaAction
+from rpa.models import ActionType, ProjectSettings, RpaAction, RpaProject, RuntimeInputDefinition
+from rpa.variables import INPUT_TYPES, VARIABLE_NAME_PATTERN, validate_variable_configuration
 
 
 def load_default_project_settings() -> ProjectSettings:
@@ -289,11 +293,80 @@ class ManualActionDialog(QDialog):
         return RpaAction(kind, defaults[kind])
 
 
+class RuntimeInputEditorDialog(QDialog):
+    def __init__(self, name: str = "", definition: RuntimeInputDefinition | None = None, parent=None) -> None:
+        super().__init__(parent)
+        definition = definition or RuntimeInputDefinition()
+        self.setWindowTitle("Runtime Input")
+        self.name_edit = QLineEdit(name)
+        self.type_combo = QComboBox()
+        for kind in INPUT_TYPES:
+            self.type_combo.addItem(kind.replace("_", " ").title(), kind)
+        self.type_combo.setCurrentIndex(max(0, self.type_combo.findData(definition.type)))
+        self.default_edit = QLineEdit(str(definition.default or ""))
+        if definition.sensitive or definition.type == "password":
+            self.default_edit.setEchoMode(QLineEdit.Password)
+        self.required_check = QCheckBox("Required")
+        self.required_check.setChecked(definition.required)
+        self.sensitive_check = QCheckBox("Sensitive (mask in logs and reports)")
+        self.sensitive_check.setChecked(definition.sensitive)
+        self.type_combo.currentIndexChanged.connect(lambda _index: self._update_default_mask())
+        self.sensitive_check.toggled.connect(lambda _checked: self._update_default_mask())
+        self.options_edit = QLineEdit(", ".join(definition.options))
+        self.options_edit.setPlaceholderText("For dropdowns: option one, option two")
+        self.description_edit = QLineEdit(definition.description)
+        form = QFormLayout(self)
+        form.addRow("Variable name", self.name_edit)
+        form.addRow("Input type", self.type_combo)
+        form.addRow("Default value", self.default_edit)
+        form.addRow("Choices", self.options_edit)
+        form.addRow("Description", self.description_edit)
+        form.addRow("", self.required_check)
+        form.addRow("", self.sensitive_check)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+        form.addWidget(buttons)
+
+    def _update_default_mask(self) -> None:
+        masked = self.sensitive_check.isChecked() or self.type_combo.currentData() == "password"
+        self.default_edit.setEchoMode(QLineEdit.Password if masked else QLineEdit.Normal)
+
+    def _accept_if_valid(self) -> None:
+        if not VARIABLE_NAME_PATTERN.fullmatch(self.name_edit.text().strip()):
+            QMessageBox.warning(self, "Invalid Name", "Use letters, numbers, and underscores, starting with a letter or underscore.")
+            return
+        if self.type_combo.currentData() == "dropdown" and not self.options():
+            QMessageBox.warning(self, "Dropdown Choices", "Add at least one dropdown choice.")
+            return
+        self.accept()
+
+    def options(self) -> list[str]:
+        return [item.strip() for item in self.options_edit.text().split(",") if item.strip()]
+
+    def result_value(self) -> tuple[str, RuntimeInputDefinition]:
+        return self.name_edit.text().strip(), RuntimeInputDefinition(
+            type=str(self.type_combo.currentData()), default=self.default_edit.text(),
+            required=self.required_check.isChecked(), sensitive=self.sensitive_check.isChecked(),
+            options=self.options(), description=self.description_edit.text().strip(),
+        )
+
+
 class VariablesDialog(QDialog):
-    def __init__(self, variables: dict[str, str], parent=None) -> None:
+    def __init__(
+        self, project_or_variables: RpaProject | dict[str, str], current_values: dict | None = None, parent=None,
+    ) -> None:
+        if isinstance(current_values, QWidget) and parent is None:
+            parent = current_values
+            current_values = None
         super().__init__(parent)
         self.setWindowTitle("Variables")
-        self.variables = dict(variables)
+        self.resize(760, 500)
+        self.project = project_or_variables if isinstance(project_or_variables, RpaProject) else None
+        self.variables = dict(self.project.variables if self.project else project_or_variables)
+        self.runtime_inputs = dict(self.project.runtime_inputs if self.project else {})
+        self.output_variables = list(self.project.output_variables if self.project else [])
+        self.current_values = dict(current_values or {})
         self.list = QListWidget()
         self._refresh()
         add = QPushButton("Add")
@@ -309,10 +382,63 @@ class VariablesDialog(QDialog):
         row.addWidget(add)
         row.addWidget(edit)
         row.addWidget(delete)
+        project_tab = QWidget()
+        project_layout = QVBoxLayout(project_tab)
+        project_layout.addWidget(QLabel("Saved with the flow and available to every run."))
+        project_layout.addWidget(self.list)
+        project_layout.addLayout(row)
+
+        runtime_tab = QWidget()
+        runtime_layout = QVBoxLayout(runtime_tab)
+        runtime_layout.addWidget(QLabel("Requested before manual runs; schedules can provide their own values."))
+        self.runtime_table = QTableWidget(0, 5)
+        self.runtime_table.setHorizontalHeaderLabels(["Name", "Type", "Default", "Required", "Sensitive"])
+        runtime_layout.addWidget(self.runtime_table)
+        runtime_buttons = QHBoxLayout()
+        add_runtime = QPushButton("Add Input")
+        edit_runtime = QPushButton("Edit")
+        remove_runtime = QPushButton("Remove")
+        add_runtime.clicked.connect(self._add_runtime)
+        edit_runtime.clicked.connect(self._edit_runtime)
+        remove_runtime.clicked.connect(self._remove_runtime)
+        for button in (add_runtime, edit_runtime, remove_runtime):
+            runtime_buttons.addWidget(button)
+        runtime_buttons.addStretch(1)
+        runtime_layout.addLayout(runtime_buttons)
+
+        output_tab = QWidget()
+        output_layout = QVBoxLayout(output_tab)
+        output_layout.addWidget(QLabel("Values produced by earlier steps. Add names here for documentation and debugging."))
+        self.output_list = QListWidget()
+        output_layout.addWidget(self.output_list)
+        output_buttons = QHBoxLayout()
+        add_output = QPushButton("Add Output")
+        remove_output = QPushButton("Remove")
+        add_output.clicked.connect(self._add_output)
+        remove_output.clicked.connect(self._remove_output)
+        output_buttons.addWidget(add_output)
+        output_buttons.addWidget(remove_output)
+        output_buttons.addStretch(1)
+        output_layout.addLayout(output_buttons)
+
+        current_tab = QWidget()
+        current_layout = QVBoxLayout(current_tab)
+        current_layout.addWidget(QLabel("Current values from the latest or active debug run. Sensitive values stay masked."))
+        self.current_table = QTableWidget(0, 3)
+        self.current_table.setHorizontalHeaderLabels(["Variable", "Category", "Value"])
+        current_layout.addWidget(self.current_table)
+
+        tabs = QTabWidget()
+        tabs.addTab(project_tab, "Project Variables")
+        tabs.addTab(runtime_tab, "Runtime Inputs")
+        tabs.addTab(output_tab, "Output Variables")
+        tabs.addTab(current_tab, "Current Values")
         layout = QVBoxLayout(self)
-        layout.addWidget(self.list)
-        layout.addLayout(row)
+        layout.addWidget(tabs)
         layout.addWidget(buttons)
+        self._refresh_categories()
+        buttons.accepted.disconnect()
+        buttons.accepted.connect(self._save_and_accept)
 
     def _refresh(self) -> None:
         self.list.clear()
@@ -348,6 +474,92 @@ class VariablesDialog(QDialog):
         if key:
             self.variables.pop(key, None)
             self._refresh()
+
+    def _refresh_categories(self) -> None:
+        self.runtime_table.setRowCount(len(self.runtime_inputs))
+        for row, (name, definition) in enumerate(sorted(self.runtime_inputs.items())):
+            values = (name, definition.type, str(definition.default or ""), "Yes" if definition.required else "No", "Yes" if definition.sensitive else "No")
+            for column, value in enumerate(values):
+                display = "[REDACTED]" if column == 2 and definition.sensitive and value else value
+                self.runtime_table.setItem(row, column, QTableWidgetItem(display))
+        self.output_list.clear()
+        self.output_list.addItems(sorted(self.output_variables))
+        sensitive = {name for name, definition in self.runtime_inputs.items() if definition.sensitive or definition.type == "password"}
+        rows = []
+        for name, value in sorted(self.current_values.items()):
+            if name in self.variables:
+                category = "Project"
+            elif name in self.runtime_inputs:
+                category = "Runtime Input"
+            else:
+                category = "Output / Built-in"
+            rows.append((name, category, "[REDACTED]" if name in sensitive else str(value)))
+        self.current_table.setRowCount(len(rows))
+        for row, values in enumerate(rows):
+            for column, value in enumerate(values):
+                self.current_table.setItem(row, column, QTableWidgetItem(value))
+
+    def _selected_runtime_name(self) -> str | None:
+        item = self.runtime_table.item(self.runtime_table.currentRow(), 0)
+        return item.text() if item else None
+
+    def _add_runtime(self) -> None:
+        dialog = RuntimeInputEditorDialog(parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            name, definition = dialog.result_value()
+            if name in self.variables or name in self.runtime_inputs:
+                QMessageBox.warning(self, "Duplicate Variable", f"{name} already exists.")
+                return
+            self.runtime_inputs[name] = definition
+            self._refresh_categories()
+
+    def _edit_runtime(self) -> None:
+        name = self._selected_runtime_name()
+        if not name:
+            return
+        dialog = RuntimeInputEditorDialog(name, self.runtime_inputs[name], self)
+        if dialog.exec() == QDialog.Accepted:
+            new_name, definition = dialog.result_value()
+            if new_name != name and (new_name in self.variables or new_name in self.runtime_inputs):
+                QMessageBox.warning(self, "Duplicate Variable", f"{new_name} already exists.")
+                return
+            self.runtime_inputs.pop(name)
+            self.runtime_inputs[new_name] = definition
+            self._refresh_categories()
+
+    def _remove_runtime(self) -> None:
+        name = self._selected_runtime_name()
+        if name:
+            self.runtime_inputs.pop(name, None)
+            self._refresh_categories()
+
+    def _add_output(self) -> None:
+        name, ok = QInputDialog.getText(self, "Output Variable", "Name")
+        name = name.strip()
+        if ok and VARIABLE_NAME_PATTERN.fullmatch(name) and name not in self.output_variables:
+            self.output_variables.append(name)
+            self._refresh_categories()
+        elif ok:
+            QMessageBox.warning(self, "Invalid Name", "Enter a unique variable name using letters, numbers, and underscores.")
+
+    def _remove_output(self) -> None:
+        item = self.output_list.currentItem()
+        if item:
+            self.output_variables.remove(item.text())
+            self._refresh_categories()
+
+    def _save_and_accept(self) -> None:
+        if self.project:
+            candidate = RpaProject(
+                project=self.project.project, settings=self.project.settings, variables=self.variables,
+                runtime_inputs=self.runtime_inputs, output_variables=self.output_variables,
+                actions=self.project.actions,
+            )
+            errors = validate_variable_configuration(candidate)
+            if errors:
+                QMessageBox.warning(self, "Check Variables", "\n".join(f"• {error}" for error in errors))
+                return
+        self.accept()
 
 
 class SettingsDialog(QDialog):

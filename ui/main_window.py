@@ -63,6 +63,10 @@ from rpa.validator import (
     ValidationIssue,
     validate_project_detailed,
 )
+from rpa.variables import (
+    mask_sensitive_text, prepare_runtime_variables, sensitive_variable_names,
+    validate_variable_configuration,
+)
 from rpa.utils import foreground_elevation_mismatch
 from ui.action_editor import ActionEditor
 from ui.action_table import ActionTable
@@ -70,6 +74,7 @@ from ui.dialogs import ManualActionDialog, SettingsDialog, VariablesDialog, load
 from ui.recorder_toolbar import FloatingExecutionToolbar, FloatingRecorderToolbar
 from ui.schedule_dialog import ScheduleFlowsDialog
 from ui.run_details_dialog import RunDetailsDialog
+from ui.runtime_inputs_dialog import RuntimeInputsDialog
 from ui.target_capture import TargetCaptureOverlay
 
 
@@ -176,6 +181,7 @@ class MainWindow(QMainWindow):
         self.last_evidence_folder: Path | None = None
         self._last_validation_issues: list[ValidationIssue] = []
         self._active_history_flow: str | None = None
+        self._active_secret_values: set[str] = set()
         self.recording_started_at: float | None = None
         self.recording_start_action_count = 0
         self.recording_was_dirty = False
@@ -871,15 +877,22 @@ class MainWindow(QMainWindow):
 
     def _validation_issues(
         self, start_index: int, end_index: int, force_enabled: bool = False,
+        runtime_variables: dict | None = None,
     ) -> list[ValidationIssue]:
-        return validate_project_detailed(
-            self.project, self.project_dir, start_index, end_index, force_enabled,
-        )
+        issues = [
+            ValidationIssue(LEVEL_ERROR, 0, "Runtime Inputs", error)
+            for error in validate_variable_configuration(self.project)
+        ]
+        issues.extend(validate_project_detailed(
+            self.project, self.project_dir, start_index, end_index, force_enabled, runtime_variables,
+        ))
+        return issues
 
     def _validate_before_execution(
         self, start_index: int, end_index: int, force_enabled: bool = False,
+        runtime_variables: dict | None = None,
     ) -> bool:
-        issues = self._validation_issues(start_index, end_index, force_enabled)
+        issues = self._validation_issues(start_index, end_index, force_enabled, runtime_variables)
         self._last_validation_issues = issues
         self._show_validation_results(issues)
         error_count = sum(issue.level == LEVEL_ERROR for issue in issues)
@@ -1054,7 +1067,53 @@ class MainWindow(QMainWindow):
         )
         self.schedule_store.set(schedule)
         self.schedule_store.save()
-        validation_issues = validate_project_detailed(project, flow_dir)
+        configuration_errors = validate_variable_configuration(project)
+        clipboard_text = QApplication.clipboard().text()
+        if scheduled:
+            supplied_inputs = dict(schedule.runtime_inputs)
+            runtime_variables, input_errors = prepare_runtime_variables(
+                project, supplied_inputs, clipboard_text,
+            )
+        elif getattr(project, "runtime_inputs", {}):
+            input_dialog = RuntimeInputsDialog(
+                project, schedule.runtime_inputs, clipboard_text,
+                QApplication.activeModalWidget() or self,
+            )
+            if input_dialog.exec() != QDialog.Accepted:
+                reason = "Run cancelled before runtime inputs were confirmed"
+                mark_finished(schedule, "Skipped", error=reason, attempts=0)
+                self.schedule_store.set(schedule)
+                self.schedule_store.save()
+                evidence.finalize("Skipped", error=reason)
+                self.active_evidence = None
+                self.file_logger = None
+                return
+            supplied_inputs = input_dialog.input_values
+            runtime_variables = input_dialog.runtime_variables
+            input_errors = []
+        else:
+            supplied_inputs = {}
+            runtime_variables, input_errors = prepare_runtime_variables(project, clipboard_text=clipboard_text)
+        sensitive_names = sensitive_variable_names(project)
+        self._active_secret_values = {
+            str(runtime_variables[name]) for name in sensitive_names
+            if name in runtime_variables and runtime_variables[name] not in (None, "")
+        }
+        evidence.set_runtime_inputs(supplied_inputs, sensitive_names)
+        if configuration_errors or input_errors:
+            reason = (configuration_errors + input_errors)[0]
+            self.log(f"[{flow_name}] run blocked by runtime inputs: {reason}")
+            mark_finished(schedule, STATUS_FAILED, error=reason, attempts=0)
+            self.schedule_store.set(schedule)
+            self.schedule_store.save()
+            self._finalize_evidence(STATUS_FAILED, error=reason)
+            return
+        if getattr(project, "runtime_inputs", {}):
+            validation_issues = validate_project_detailed(
+                project, flow_dir, runtime_variables=runtime_variables,
+            )
+        else:
+            validation_issues = validate_project_detailed(project, flow_dir)
         evidence.set_validation(validation_issues)
         errors = [issue for issue in validation_issues if issue.level == LEVEL_ERROR]
         warnings = [issue for issue in validation_issues if issue.level == LEVEL_WARNING]
@@ -1073,7 +1132,8 @@ class MainWindow(QMainWindow):
 
         thread = QThread()
         worker = ReplayWorker(
-            project, flow_dir, 0, len(project.actions) - 1, True, True, None, [], evidence.folder,
+            project, flow_dir, 0, len(project.actions) - 1, True, True,
+            runtime_variables, [], evidence.folder,
         )
         worker.flow_name = flow_name
         worker.evidence_session = evidence
@@ -1165,11 +1225,14 @@ class MainWindow(QMainWindow):
             thread.quit()
             thread.wait()
         schedule = self.schedule_store.get(flow_name)
-        mark_finished(schedule, status, error=error, failed_step=failed_step, attempts=attempts)
+        safe_error = mask_sensitive_text(error, self._active_secret_values) if error else None
+        mark_finished(schedule, status, error=safe_error, failed_step=failed_step, attempts=attempts)
         self.schedule_store.set(schedule)
         self.schedule_store.save()
         self.log(f"[{flow_name}] scheduled run {status}")
         runner = getattr(worker, "runner", None)
+        if runner is not None:
+            self.last_runtime_variables = dict(getattr(runner, "runtime_variables", {}))
         evidence = getattr(worker, "evidence_session", None)
         if evidence is not None:
             self.active_evidence = evidence
@@ -1178,7 +1241,7 @@ class MainWindow(QMainWindow):
             step_results=getattr(runner, "step_results", None),
             attempts=attempts or 0,
             failed_step=failed_step,
-            error=error,
+            error=safe_error,
         )
         self._restore_run_environment()
         self._start_next_queued_flow()
@@ -1221,21 +1284,61 @@ class MainWindow(QMainWindow):
             return
         if not self.ensure_project_dir():
             return
+        if runtime_variables is None:
+            configuration_errors = validate_variable_configuration(self.project)
+            if configuration_errors:
+                QMessageBox.warning(
+                    self, "Check Variables",
+                    "Execution did not start because the variable configuration is invalid:\n\n"
+                    + "\n".join(f"• {error}" for error in configuration_errors),
+                )
+                return
+            clipboard_text = QApplication.clipboard().text()
+            if self.project.runtime_inputs:
+                dialog = RuntimeInputsDialog(self.project, clipboard_text=clipboard_text, parent=self)
+                if dialog.exec() != QDialog.Accepted:
+                    self.update_status("Run cancelled")
+                    return
+                runtime_variables = dialog.runtime_variables
+                supplied_inputs = dialog.input_values
+            else:
+                runtime_variables, input_errors = prepare_runtime_variables(
+                    self.project, clipboard_text=clipboard_text,
+                )
+                if input_errors:
+                    QMessageBox.warning(self, "Check Run Inputs", "\n".join(input_errors))
+                    return
+                supplied_inputs = {}
+        else:
+            supplied_inputs = {
+                name: runtime_variables.get(name) for name in self.project.runtime_inputs
+                if name in runtime_variables
+            }
+        sensitive_names = sensitive_variable_names(self.project)
+        self._active_secret_values = {
+            str(runtime_variables[name]) for name in sensitive_names
+            if name in runtime_variables and runtime_variables[name] not in (None, "")
+        }
         source = {
             "run": "Manual", "test": "Test Step", "from": "Run From Here", "until": "Run Until Here",
         }.get(mode, "Manual")
         try:
             self._begin_evidence(self.project_dir, self.project, source)
         except OSError as exc:
+            self._active_secret_values.clear()
             show_error(self, "Could not create run report", f"Execution did not start because its evidence folder could not be created.\n\n{exc}")
             return
+        self.active_evidence.set_runtime_inputs(supplied_inputs, sensitive_names)
         if validate:
-            if not self._validate_before_execution(start_index, end_index, force_validation_enabled):
+            if not self._validate_before_execution(
+                start_index, end_index, force_validation_enabled, runtime_variables,
+            ):
                 self.active_evidence.set_validation(self._last_validation_issues)
                 has_errors = any(issue.level == LEVEL_ERROR for issue in self._last_validation_issues)
                 status = STATUS_FAILED if has_errors else "Skipped"
                 error = self._last_validation_issues[0].message() if has_errors else "Run cancelled after validation warnings"
-                failed_step = self._last_validation_issues[0].step_number if has_errors else None
+                issue_step = self._last_validation_issues[0].step_number if has_errors else 0
+                failed_step = issue_step if issue_step > 0 else None
                 self._finish_active_history(status, error, failed_step, 0)
                 self._finalize_evidence(status, failed_step=failed_step, error=error)
                 return
@@ -1423,6 +1526,7 @@ class MainWindow(QMainWindow):
         completed = sum(1 for action in self.project.actions[start:end + 1] if action.status == "completed")
         skipped = sum(1 for action in self.project.actions[start:end + 1] if action.status == "skipped")
         runner = self.replay_worker.runner if self.replay_worker else None
+        self.last_runtime_variables = dict(getattr(runner, "runtime_variables", {}))
         self.log("step test completed" if mode == "test" else "automation completed")
         self._finish_active_history(STATUS_SUCCESS, None, None, getattr(runner, "total_attempts", 0))
         self._finalize_evidence(
@@ -1445,6 +1549,7 @@ class MainWindow(QMainWindow):
         last_step = self.running_action_index + 1 if self.running_action_index is not None else self.run_start_index + 1
         self.log("automation stopped by user")
         runner = self.replay_worker.runner if self.replay_worker else None
+        self.last_runtime_variables = dict(getattr(runner, "runtime_variables", {}))
         attempts = getattr(runner, "total_attempts", 0)
         self._finish_active_history(STATUS_STOPPED, "Stopped by user", last_step, attempts)
         self._finalize_evidence(
@@ -1455,6 +1560,7 @@ class MainWindow(QMainWindow):
         self._start_next_queued_flow()
 
     def run_failed(self, index: int, message: str) -> None:
+        display_message = mask_sensitive_text(message, self._active_secret_values)
         self.log(f"step failed: {message}")
         failure_was_deferred = bool(
             self.replay_worker and self.replay_worker.runner.had_continued_failures
@@ -1469,11 +1575,11 @@ class MainWindow(QMainWindow):
         )
         self.run_finished()
         if index < 0 or index >= len(self.project.actions):
-            show_error(self, "Automation stopped", message)
+            show_error(self, "Automation stopped", display_message)
             self._start_next_queued_flow()
             return
         self.table.selectRow(index)
-        self._show_actionable_failure(index, message, allow_skip=not failure_was_deferred)
+        self._show_actionable_failure(index, display_message, allow_skip=not failure_was_deferred)
         self._start_next_queued_flow()
 
     def _show_actionable_failure(self, index: int, message: str, allow_skip: bool = True) -> None:
@@ -1705,7 +1811,14 @@ class MainWindow(QMainWindow):
             return
         before_count = len(self.project.actions)
         self.log(f"[Add Step] opening dialog; project has {before_count} steps")
-        dialog = ManualActionDialog(self.project.settings, self.project.variables, self)
+        available_variables = dict(self.project.variables)
+        for name in self.project.runtime_inputs:
+            available_variables[name] = "Runtime Input"
+        for name in self.project.output_variables:
+            available_variables[name] = "Output Variable"
+        for name in ("RUN_DATE", "CLIPBOARD_TEXT", "LAST_CLICK_X", "LAST_CLICK_Y"):
+            available_variables[name] = "Built-in"
+        dialog = ManualActionDialog(self.project.settings, available_variables, self)
         dialog.screen_pick_requested.connect(lambda role: self._begin_manual_target_capture(dialog, role))
         dialog.diagnostic.connect(self.log)
         result = dialog.exec()
@@ -1898,9 +2011,16 @@ class MainWindow(QMainWindow):
         self.clear_step_selection()
 
     def variables_dialog(self) -> None:
-        dialog = VariablesDialog(self.project.variables, self)
+        current = {}
+        if self.replay_worker:
+            current = dict(self.replay_worker.runner.runtime_variables)
+        elif self.last_runtime_variables:
+            current = dict(self.last_runtime_variables)
+        dialog = VariablesDialog(self.project, current, self)
         if dialog.exec() == QDialog.Accepted:
             self.project.variables = dialog.variables
+            self.project.runtime_inputs = dialog.runtime_inputs
+            self.project.output_variables = dialog.output_variables
             self.mark_dirty()
 
     def settings_dialog(self) -> None:
@@ -1962,6 +2082,7 @@ class MainWindow(QMainWindow):
             self._restoring_history = False
 
     def log(self, message: str) -> None:
+        message = mask_sensitive_text(message, self._active_secret_values)
         level, color = self._log_style(message)
         self.logs.append(f'<span style="color:{color}">[{level}] {escape(str(message))}</span>')
         if self._logs_follow_tail:
@@ -2231,8 +2352,9 @@ class MainWindow(QMainWindow):
         if not flow_name:
             return
         schedule = self.schedule_store.get(flow_name)
+        safe_error = mask_sensitive_text(error, self._active_secret_values) if error else None
         mark_finished(
-            schedule, status, error=error, failed_step=failed_step, attempts=attempts,
+            schedule, status, error=safe_error, failed_step=failed_step, attempts=attempts,
         )
         self.schedule_store.set(schedule)
         self.schedule_store.save()
@@ -2249,7 +2371,9 @@ class MainWindow(QMainWindow):
         if evidence is None:
             return
         try:
-            evidence.finalize(status, step_results, attempts, failed_step, error)
+            safe_error = mask_sensitive_text(error, self._active_secret_values) if error else None
+            safe_steps = self._mask_evidence_value(step_results) if step_results else step_results
+            evidence.finalize(status, safe_steps, attempts, failed_step, safe_error)
         except Exception as exc:
             # The UI and persisted scheduler result must survive a report write
             # failure (for example, a deleted or read-only runs folder).
@@ -2260,6 +2384,16 @@ class MainWindow(QMainWindow):
             self.active_evidence = None
             if self.file_logger is evidence.logger:
                 self.file_logger = None
+            self._active_secret_values.clear()
+
+    def _mask_evidence_value(self, value):
+        if isinstance(value, str):
+            return mask_sensitive_text(value, self._active_secret_values)
+        if isinstance(value, list):
+            return [self._mask_evidence_value(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self._mask_evidence_value(item) for key, item in value.items()}
+        return value
 
     def update_status(self, prefix: str = "Ready") -> None:
         recording = self.recorder is not None and self.recorder.state == RecorderState.RECORDING

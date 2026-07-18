@@ -182,6 +182,7 @@ class ActionEditor(QWidget):
             self.advanced_form.addRow("Typing interval", self._double(data.get("interval", 0.02), lambda v: self._set_data("interval", v), 0, 10))
             self.advanced_form.addRow("Clear field first", self._check(data.get("clear_first", False), lambda v: self._set_data("clear_first", v)))
             self.advanced_form.addRow("Protected value", self._check(data.get("masked", False), lambda v: self._set_data("masked", v)))
+            self.advanced_form.addRow("Store typed value as", self._line(data.get("output_variable", ""), lambda v: self._set_data("output_variable", v)))
         elif action.action == ActionType.PRESS_KEY.value:
             self.form.addRow("Key", self._line(data.get("key", ""), lambda v: self._set_data("key", v)))
             self.advanced_form.addRow("Number of presses", self._spin(data.get("count", 1), lambda v: self._set_data("count", v)))
@@ -189,16 +190,17 @@ class ActionEditor(QWidget):
         elif action.action == ActionType.HOTKEY.value:
             self.form.addRow("Shortcut", self._line("+".join(data.get("keys", [])), lambda v: self._set_data("keys", [p.strip() for p in v.split("+") if p.strip()])))
         elif action.action == ActionType.SCROLL.value:
-            self.form.addRow("Scroll amount", self._spin(data.get("amount", 0), lambda v: self._set_data("amount", v), -9999, 9999))
-            self.advanced_form.addRow("Original X", self._spin(data.get("x", 0), lambda v: self._set_data("x", v), 0, 99999))
-            self.advanced_form.addRow("Original Y", self._spin(data.get("y", 0), lambda v: self._set_data("y", v), 0, 99999))
+            self.form.addRow("Scroll amount", self._number_field(data.get("amount", 0), lambda v: self._set_data("amount", v), integer=True))
+            self.advanced_form.addRow("Original X", self._number_field(data.get("x", 0), lambda v: self._set_data("x", v), integer=True))
+            self.advanced_form.addRow("Original Y", self._number_field(data.get("y", 0), lambda v: self._set_data("y", v), integer=True))
             self.advanced_form.addRow("Move to original position first", self._check(data.get("move_to", True), lambda v: self._set_data("move_to", v)))
         elif action.action == ActionType.WAIT.value:
-            self.form.addRow("Wait time", self._double(data.get("seconds", 1), lambda v: self._set_data("seconds", v), 0, 9999))
+            self.form.addRow("Wait time", self._number_field(data.get("seconds", 1), lambda v: self._set_data("seconds", v)))
         elif action.action == ActionType.OPEN_FILE.value:
             self.form.addRow("File", self._file_picker(data.get("path", "")))
             self.advanced_form.addRow("Wait after opening", self._double(data.get("wait_after", 1), lambda v: self._set_data("wait_after", v), 0, 999))
             self.advanced_form.addRow("Expected window title", self._line(data.get("expected_window_title", ""), lambda v: self._set_data("expected_window_title", v)))
+            self.advanced_form.addRow("Store opened path as", self._line(data.get("output_variable", ""), lambda v: self._set_data("output_variable", v)))
         elif action.action in (ActionType.RUN_PYTHON.value, ActionType.PYTHON_CODE.value):
             warning = QLabel("Trusted code runs with your current user permissions.")
             warning.setWordWrap(True)
@@ -211,21 +213,20 @@ class ActionEditor(QWidget):
             self.form.addRow("Python code", code)
             if action.action == ActionType.PYTHON_CODE.value:
                 self.advanced_form.addRow("Continue after an error", self._check(data.get("continue_on_error", False), lambda v: self._set_data("continue_on_error", v)))
-            else:
-                self.advanced_form.addRow("Output variable", self._line(data.get("output_variable", ""), lambda v: self._set_data("output_variable", v)))
+            self.advanced_form.addRow("Output variable", self._line(data.get("output_variable", ""), lambda v: self._set_data("output_variable", v)))
         elif action.action == ActionType.CLICK_COORDINATE.value:
-            self.form.addRow("X", self._spin(data.get("x", 0), lambda v: self._set_data("x", v), -99999, 99999))
-            self.form.addRow("Y", self._spin(data.get("y", 0), lambda v: self._set_data("y", v), -99999, 99999))
+            self.form.addRow("X", self._number_field(data.get("x", 0), lambda v: self._set_data("x", v), integer=True))
+            self.form.addRow("Y", self._number_field(data.get("y", 0), lambda v: self._set_data("y", v), integer=True))
             self.advanced_form.addRow("Mouse button", self._line(data.get("button", "left"), lambda v: self._set_data("button", v)))
         elif action.action == ActionType.MOUSE_MOVE.value:
-            self.form.addRow("X", self._spin(data.get("x", 0), lambda v: self._set_data("x", v), -99999, 99999))
-            self.form.addRow("Y", self._spin(data.get("y", 0), lambda v: self._set_data("y", v), -99999, 99999))
+            self.form.addRow("X", self._number_field(data.get("x", 0), lambda v: self._set_data("x", v), integer=True))
+            self.form.addRow("Y", self._number_field(data.get("y", 0), lambda v: self._set_data("y", v), integer=True))
             self.advanced_form.addRow("Move duration", self._double(data.get("duration", 0.2), lambda v: self._set_data("duration", v), 0, 60))
         elif action.action == ActionType.DRAG.value:
-            self.form.addRow("Start X", self._spin(data.get("start_x", 0), lambda v: self._set_data("start_x", v), -99999, 99999))
-            self.form.addRow("Start Y", self._spin(data.get("start_y", 0), lambda v: self._set_data("start_y", v), -99999, 99999))
-            self.form.addRow("End X", self._spin(data.get("end_x", 0), lambda v: self._set_data("end_x", v), -99999, 99999))
-            self.form.addRow("End Y", self._spin(data.get("end_y", 0), lambda v: self._set_data("end_y", v), -99999, 99999))
+            self.form.addRow("Start X", self._number_field(data.get("start_x", 0), lambda v: self._set_data("start_x", v), integer=True))
+            self.form.addRow("Start Y", self._number_field(data.get("start_y", 0), lambda v: self._set_data("start_y", v), integer=True))
+            self.form.addRow("End X", self._number_field(data.get("end_x", 0), lambda v: self._set_data("end_x", v), integer=True))
+            self.form.addRow("End Y", self._number_field(data.get("end_y", 0), lambda v: self._set_data("end_y", v), integer=True))
             self.advanced_form.addRow("Drag duration", self._double(data.get("duration", 0.5), lambda v: self._set_data("duration", v), 0, 60))
         retry_heading = QLabel("Retry and failure handling")
         retry_heading.setStyleSheet("font-weight: 600; margin-top: 8px;")
@@ -271,14 +272,14 @@ class ActionEditor(QWidget):
 
     def _click_image_fields(self, data: dict) -> None:
         self.advanced_form.addRow("Target image file", self._line(data.get("image", ""), lambda v: self._set_data("image", v)))
-        self.advanced_form.addRow("Match accuracy", self._double(data.get("confidence", 0.86), lambda v: self._set_data("confidence", v), 0, 1))
-        self.advanced_form.addRow("Search timeout", self._double(data.get("timeout", 10), lambda v: self._set_data("timeout", v), 0, 999))
+        self.advanced_form.addRow("Match accuracy", self._number_field(data.get("confidence", 0.86), lambda v: self._set_data("confidence", v)))
+        self.advanced_form.addRow("Search timeout", self._number_field(data.get("timeout", 10), lambda v: self._set_data("timeout", v)))
         self.advanced_form.addRow("Mouse button", self._line(data.get("button", "left"), lambda v: self._set_data("button", v)))
-        self.advanced_form.addRow("Original X", self._spin(data.get("fallback_x", 0), lambda v: self._set_data("fallback_x", v), 0, 99999))
-        self.advanced_form.addRow("Original Y", self._spin(data.get("fallback_y", 0), lambda v: self._set_data("fallback_y", v), 0, 99999))
+        self.advanced_form.addRow("Original X", self._number_field(data.get("fallback_x", 0), lambda v: self._set_data("fallback_x", v), integer=True))
+        self.advanced_form.addRow("Original Y", self._number_field(data.get("fallback_y", 0), lambda v: self._set_data("fallback_y", v), integer=True))
         self.advanced_form.addRow("Use original position if target is not found", self._check(data.get("use_coordinate_fallback", True), lambda v: self._set_data("use_coordinate_fallback", v)))
-        self.advanced_form.addRow("Click point offset X", self._spin(data.get("click_offset_x", 0), lambda v: self._set_data("click_offset_x", v), 0, 99999))
-        self.advanced_form.addRow("Click point offset Y", self._spin(data.get("click_offset_y", 0), lambda v: self._set_data("click_offset_y", v), 0, 99999))
+        self.advanced_form.addRow("Click point offset X", self._number_field(data.get("click_offset_x", 0), lambda v: self._set_data("click_offset_x", v), integer=True))
+        self.advanced_form.addRow("Click point offset Y", self._number_field(data.get("click_offset_y", 0), lambda v: self._set_data("click_offset_y", v), integer=True))
         if self.project_dir and data.get("image"):
             image = self.project_dir / str(data["image"])
             if image.exists():
@@ -313,14 +314,33 @@ class ActionEditor(QWidget):
         widget.editingFinished.connect(lambda: callback(widget.text()))
         return widget
 
-    def _spin(self, value, callback, minimum=1, maximum=9999) -> QSpinBox:
+    def _number_field(self, value, callback, integer: bool = False) -> QLineEdit:
+        widget = QLineEdit(str(value))
+        widget.setPlaceholderText("Number or {{VARIABLE}}")
+        def commit() -> None:
+            text = widget.text().strip()
+            if "{{" in text:
+                callback(text)
+                return
+            try:
+                callback(int(float(text)) if integer else float(text))
+            except ValueError:
+                callback(text)
+        widget.editingFinished.connect(commit)
+        return widget
+
+    def _spin(self, value, callback, minimum=1, maximum=9999) -> QWidget:
+        if "{{" in str(value):
+            return self._number_field(value, callback, integer=True)
         widget = QSpinBox()
         widget.setRange(minimum, maximum)
         widget.setValue(int(value or 0))
         widget.valueChanged.connect(callback)
         return widget
 
-    def _double(self, value, callback, minimum=0, maximum=9999) -> QDoubleSpinBox:
+    def _double(self, value, callback, minimum=0, maximum=9999) -> QWidget:
+        if "{{" in str(value):
+            return self._number_field(value, callback)
         widget = QDoubleSpinBox()
         widget.setRange(minimum, maximum)
         widget.setDecimals(2)

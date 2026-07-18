@@ -221,6 +221,67 @@ def test_scheduled_execution_is_blocked_by_validation_errors(tmp_path, monkeypat
     window.close()
 
 
+def test_scheduled_run_requires_configured_runtime_inputs(tmp_path, monkeypatch) -> None:
+    from rpa.models import ActionType, RpaAction, RpaProject, RuntimeInputDefinition
+    from rpa.project_manager import ProjectManager
+    from rpa.scheduler import STATUS_FAILED
+
+    window = make_window(tmp_path, monkeypatch)
+    flow_dir = tmp_path / "runtime_flow"
+    project = RpaProject(
+        runtime_inputs={"REPORT_DATE": RuntimeInputDefinition("date", "", True)},
+        actions=[RpaAction(ActionType.TYPE_TEXT.value, {"text": "{{REPORT_DATE}}"})],
+    )
+    ProjectManager().save(project, flow_dir)
+    prepared = []
+    monkeypatch.setattr(window, "_prepare_run_environment", lambda settings, label: prepared.append(label))
+    window._run_flow_now("runtime_flow", scheduled=True)
+    schedule = window.schedule_store.get("runtime_flow")
+    assert schedule.last_status == STATUS_FAILED
+    assert "value is required" in (schedule.last_error or "")
+    assert prepared == []
+    window.close()
+
+
+def test_scheduled_secret_is_used_but_masked_in_history_and_evidence(tmp_path, monkeypatch) -> None:
+    from rpa.models import ActionType, RpaAction, RpaProject, RuntimeInputDefinition
+    from rpa.project_manager import ProjectManager
+    from rpa.scheduler import STATUS_FAILED
+
+    window = make_window(tmp_path, monkeypatch)
+    flow_dir = tmp_path / "secret_flow"
+    project = RpaProject(
+        runtime_inputs={"PASSWORD": RuntimeInputDefinition("password", "", True, True)},
+        actions=[RpaAction(ActionType.PYTHON_CODE.value, {
+            "code": "raise RuntimeError(variables['PASSWORD'])",
+        })],
+    )
+    project.settings.start_delay = 0
+    project.settings.hide_window_during_replay = False
+    ProjectManager().save(project, flow_dir)
+    schedule = window.schedule_store.get("secret_flow")
+    schedule.runtime_inputs = {"PASSWORD": "top-secret-value"}
+    window.schedule_store.set(schedule)
+    window.schedule_store.save()
+    window._run_flow_now("secret_flow", scheduled=True)
+    for _ in range(200):
+        app().processEvents()
+        if "secret_flow" not in window._scheduled_runs:
+            break
+        QThread.msleep(5)
+    schedule = window.schedule_store.get("secret_flow")
+    assert schedule.last_status == STATUS_FAILED
+    assert "top-secret-value" not in (schedule.last_error or "")
+    assert "[REDACTED]" in (schedule.last_error or "")
+    summary_path = flow_dir / schedule.history[-1].evidence_path / "summary.json"
+    summary_text = summary_path.read_text(encoding="utf-8")
+    log_text = (summary_path.parent / "execution.log").read_text(encoding="utf-8")
+    assert "top-secret-value" not in summary_text
+    assert "top-secret-value" not in log_text
+    assert '"PASSWORD": "[REDACTED]"' in summary_text
+    window.close()
+
+
 def test_real_scheduled_run_retries_and_records_success_attempts(tmp_path, monkeypatch) -> None:
     from types import SimpleNamespace
     import rpa.runner as runner_module

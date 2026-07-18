@@ -282,7 +282,8 @@ def test_toolbar_add_step_updates_and_persists_active_flow(tmp_path) -> None:
     assert len(loaded.actions) == 10
     assert loaded.actions[-1].action == ActionType.CLICK_COORDINATE.value
     generated = generate_python(loaded, tmp_path).read_text(encoding="utf-8")
-    assert "pyautogui.click(0, 0" in generated
+    assert "click_x, click_y = as_int(0), as_int(0)" in generated
+    assert "pyautogui.click(click_x, click_y" in generated
 
 
 def test_click_image_picker_keeps_parent_open_until_add_step(tmp_path, monkeypatch) -> None:
