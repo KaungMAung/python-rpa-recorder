@@ -85,7 +85,12 @@ class ReplayRunner:
             if action_callback:
                 action_callback(index, "running")
             self.log(f"action started: {index + 1} {action.action}")
-            self.sleep_checked(action.delay_before)
+            # Click Image steps rely on continuous polling with their own search
+            # timeout (see _click_image/wait_for_image) instead of a fixed
+            # pre-wait, so they click as soon as the target appears rather than
+            # always waiting out the recorded delay.
+            if action.action not in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value):
+                self.sleep_checked(action.delay_before)
             try:
                 self.run_action(action, self.runtime_variables, index + 1)
             except MissingPlaceholderError as exc:
@@ -186,9 +191,10 @@ class ReplayRunner:
 
     def _click_image(self, action: RpaAction, data: dict) -> None:
         image_path = self.project_dir / str(data.get("image", ""))
+        required_confidence = float(data.get("confidence", self.project.settings.default_confidence))
         match = wait_for_image(
             image_path,
-            float(data.get("confidence", self.project.settings.default_confidence)),
+            required_confidence,
             float(data.get("timeout", self.project.settings.default_timeout)),
             self.stop_requested,
             excluded_regions=self.excluded_regions,
@@ -196,12 +202,20 @@ class ReplayRunner:
         if self.stop_requested():
             raise StopReplay()
         if match.found:
+            self.log(
+                f"image match: confidence={match.confidence:.3f} (required {required_confidence:.3f}), "
+                f"location=({match.x}, {match.y}), search time={match.duration:.2f}s"
+            )
             x = match.x + int(data.get("click_offset_x", match.width / 2))
             y = match.y + int(data.get("click_offset_y", match.height / 2))
             clicks = 2 if action.action == ActionType.DOUBLE_CLICK_IMAGE.value else 1
             self.sleep_checked(float(data.get("pre_click_pause", self.project.settings.pre_click_pause)))
             get_pyautogui().click(x, y, clicks=clicks, button=str(data.get("button", "left")))
             return
+        self.log(
+            f"image match: no match found, best confidence={getattr(match, 'confidence', 0.0):.3f} "
+            f"(required {required_confidence:.3f}), search time={getattr(match, 'duration', 0.0):.2f}s"
+        )
         if data.get("use_coordinate_fallback", True):
             self.sleep_checked(float(data.get("pre_click_pause", self.project.settings.pre_click_pause)))
             get_pyautogui().click(int(data.get("fallback_x", 0)), int(data.get("fallback_y", 0)), button=str(data.get("button", "left")))

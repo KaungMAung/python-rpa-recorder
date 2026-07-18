@@ -14,6 +14,8 @@ The main workflow is `Record -> Review -> Test -> Run`. The step list remains vi
 - `rpa/runner.py` replays actions with `pyautogui` in a worker thread.
 - `rpa/image_matcher.py` captures screenshots and locates images with OpenCV.
 - `rpa/generator.py` creates `generated/generated_rpa.py`.
+- `rpa/scheduler.py` stores and evaluates per-flow automatic run schedules (`flows/schedules.json`).
+- `ui/schedule_dialog.py` is the Schedule Flows page used to enable, adjust, and monitor those schedules.
 
 ## Install
 
@@ -47,6 +49,31 @@ The recorder buffers printable typing into `type_text` actions, stores hotkeys a
 Click `Run`. Replay starts after the configured countdown. `Stop Run` requests a safe stop during waits and image polling. Click image actions search the screen first and use the original position when that option is enabled.
 
 Right-click a step to test only that step, run from it, run until it, enable or disable it, insert another step, duplicate it, delete it, or move it. Replay and step tests run outside the Qt UI thread.
+
+## Scheduling Flows
+
+Open `Schedule Flows` (Execution toolbar group or menu, `⏱`) to see every saved flow and manage its automatic schedule. Click the `?` button in the dialog for an in-app explanation of every column and button; every control also has a hover tooltip.
+
+Columns:
+
+- **Flow** - the automation's name.
+- **Enabled** - `Enabled`, `Paused`, or `Disabled`.
+- **Run every** - the interval (15 minutes up to 24 hours).
+- **Last run** - when the flow last started.
+- **Duration** - how long the last run took.
+- **Last status** - `Success`, `Failed`, `Running`, or a `Skipped (...)` reason.
+- **Next run** - when the flow will run next (or `Paused`/`Disabled`).
+
+Row actions:
+
+- **Run Now** - runs the flow immediately without affecting its schedule or next run time.
+- **Pause / Resume** - temporarily stops automatic runs while keeping the interval configuration intact. No confirmation needed.
+- **Enable / Disable** - fully turns the schedule on or off. Disabling asks for confirmation first.
+- **Details** - shows full last-run information, including the failure reason if the last run failed (also available as a tooltip on the Last status cell).
+
+The table refreshes automatically every 5 seconds so a `Running` status and countdowns stay current, and can be refreshed manually with `Refresh`. Click `Flow`, `Last run`, `Next run`, or `Last status` headers to sort (click again to reverse); column widths and the chosen sort order are remembered between openings.
+
+Only one flow runs at a time: if a different flow is already running, new runs are queued until it finishes; if the *same* flow is asked to run again while its own previous run hasn't finished, that attempt is skipped and marked `Skipped (Already Running)`. Schedules are stored permanently in `flows/schedules.json` and persist across app restarts.
 
 ## Step Details
 
@@ -127,7 +154,7 @@ The installer defaults to `%LOCALAPPDATA%\Programs\PythonRPARecorder`, does not 
 
 ## Current Limitations
 
-- No OCR, browser automation, database, scheduler, cloud service, AI, or Excel row looping.
+- No OCR, browser automation, database, cloud service, AI, or Excel row looping.
 - Custom Python actions are trusted code and run with the current user's permissions.
 - Windows security boundaries matter: a non-administrator recorder may not capture or control administrator applications reliably. Run the recorder with the same privilege level as the target app.
 - Automated tests use mocked input APIs and Qt's offscreen platform. Real global hooks, desktop input, multi-monitor scaling, and security software still require verification on the target Windows PC.

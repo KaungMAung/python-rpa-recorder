@@ -4,7 +4,7 @@ import json
 import shutil
 from pathlib import Path
 
-from .models import RpaProject, utc_now
+from .models import ProjectSettings, RpaProject, utc_now
 from .utils import ensure_project_dirs
 
 
@@ -12,8 +12,10 @@ class ProjectManager:
     def __init__(self) -> None:
         self.project_dir: Path | None = None
 
-    def new_project(self, name: str = "Untitled Recording") -> RpaProject:
+    def new_project(self, name: str = "Untitled Recording", settings: ProjectSettings | None = None) -> RpaProject:
         project = RpaProject()
+        if settings is not None:
+            project.settings = settings
         project.project.name = name
         return project
 

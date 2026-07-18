@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import QAbstractItemView, QMenu, QTableWidget, QTableWidgetItem
+from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QMenu, QTableWidget, QTableWidgetItem
 
 from rpa.models import ActionStatus, RpaAction
 
@@ -40,7 +40,15 @@ class ActionTable(QTableWidget):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._context_menu)
         self.verticalHeader().setVisible(False)
-        self.horizontalHeader().setStretchLastSection(True)
+        header = self.horizontalHeader()
+        # Every column stays user-resizable (Interactive), except "What it does"
+        # which stretches to absorb any extra/deficit width so the table adapts
+        # smoothly when the panel is resized instead of leaving dead space or
+        # requiring a horizontal scrollbar.
+        header.setStretchLastSection(False)
+        for col in range(len(self.HEADERS)):
+            header.setSectionResizeMode(col, QHeaderView.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
         self.setToolTip("Select a step to review it. Right-click for step commands.")
 
     def set_actions(self, actions: list[RpaAction]) -> None:
@@ -53,7 +61,6 @@ class ActionTable(QTableWidget):
             self.resizeColumnsToContents()
             self.setColumnWidth(0, 56)
             self.setColumnWidth(1, 140)
-            self.setColumnWidth(2, max(self.columnWidth(2), 360))
             self.setColumnWidth(3, 100)
             self.setColumnWidth(5, 110)
             self._columns_initialized = True

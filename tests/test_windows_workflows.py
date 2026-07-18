@@ -72,7 +72,7 @@ def test_target_capture_overlay_select_resize_and_confirm() -> None:
 
 def test_completed_recapture_updates_action_and_screenshot(tmp_path: Path, monkeypatch) -> None:
     app()
-    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "exec", lambda *args, **kwargs: QMessageBox.Ok)
     window = MainWindow()
     window.project_dir = tmp_path
     action = RpaAction(ActionType.CLICK_IMAGE.value, {

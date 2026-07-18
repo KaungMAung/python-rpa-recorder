@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from copy import deepcopy
+from datetime import datetime, timezone
 import time
 import sys
 
-from PySide6.QtCore import QObject, QPoint, QSettings, QThread, QTimer, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QPoint, QRect, QSettings, QThread, QTimer, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -35,12 +36,25 @@ from rpa.models import ActionType, RecorderState, RpaAction, RpaProject
 from rpa.project_manager import ProjectManager
 from rpa.recorder import RpaRecorder
 from rpa.runner import ReplayActionError, ReplayRunner, StopReplay
+from rpa.scheduler import (
+    STATUS_FAILED,
+    STATUS_SKIPPED_BUSY,
+    STATUS_SKIPPED_RUNNING,
+    STATUS_STOPPED,
+    STATUS_SUCCESS,
+    ScheduleStore,
+    is_due,
+    mark_finished,
+    mark_skipped,
+    mark_started,
+)
 from rpa.validator import validate_project
 from rpa.utils import create_file_logger, foreground_elevation_mismatch
 from ui.action_editor import ActionEditor
 from ui.action_table import ActionTable
-from ui.dialogs import ManualActionDialog, SettingsDialog, VariablesDialog, show_error
+from ui.dialogs import ManualActionDialog, SettingsDialog, VariablesDialog, load_default_project_settings, show_error
 from ui.recorder_toolbar import FloatingRecorderToolbar
+from ui.schedule_dialog import ScheduleFlowsDialog
 from ui.target_capture import TargetCaptureOverlay
 
 
@@ -123,7 +137,7 @@ class MainWindow(QMainWindow):
         self.resize(1160, 760)
         self.setMinimumWidth(1120)
         self.manager = ProjectManager()
-        self.project = self.manager.new_project()
+        self.project = self.manager.new_project(settings=load_default_project_settings())
         self.project_dir: Path | None = None
         self.dirty = False
         self.recorder: RpaRecorder | None = None
@@ -151,6 +165,13 @@ class MainWindow(QMainWindow):
         self.target_capture_origin = (0, 0)
         self.target_capture_was_maximized = False
         self.settings = QSettings("PythonRPARecorder", "PythonRPARecorder")
+        self.schedule_store = ScheduleStore(flows_root())
+        self._scheduled_runs: dict[str, tuple[QThread, ReplayWorker]] = {}
+        self._schedule_queue: list[str] = []
+        self.schedule_timer = QTimer(self)
+        self.schedule_timer.setInterval(15000)
+        self.schedule_timer.timeout.connect(self._check_schedules)
+        self.schedule_timer.start()
         self.setAcceptDrops(True)
         self._build_ui()
         self._connect_signals()
@@ -167,7 +188,7 @@ class MainWindow(QMainWindow):
         self.toolbar.setStyleSheet("QToolBar { background: #f0f3f7; spacing: 8px; padding: 6px; }")
         groups = [
             ("Recording", [("Record", "● Record"), ("Pause", "Pause"), ("Resume", "Resume"), ("Stop", "■ Stop")]),
-            ("Execution", [("Run", "▶ Run"), ("Stop Run", "Stop Run"), ("Generate Python", "Generate")]),
+            ("Execution", [("Run", "▶ Run"), ("Stop Run", "Stop Run"), ("Schedule Flows", "⏱"), ("Generate Python", "Generate")]),
             ("Editing", [("Add Manual Action", "+ Add Step"), ("Insert Before", "Insert Before"), ("Insert After", "Insert After"), ("Duplicate", "⧉ Duplicate"), ("Delete Action", "Delete"), ("Move Up", "↑"), ("Move Down", "↓"), ("Deselect All", "Deselect"), ("Variables", "Variables"), ("Settings", "Settings")]),
         ]
         groups[2] = (groups[2][0], [item for item in groups[2][1] if item[0] not in ("Variables", "Settings")])
@@ -305,7 +326,7 @@ class MainWindow(QMainWindow):
         menus = [
             ("File", ["New", "Open", "Save", "Save As"]),
             ("Record Actions", ["Record", "Pause", "Resume", "Stop"]),
-            ("Execution", ["Run", "Test This Step", "Run From Here", "Run Until Here", "Stop Run", "Generate Python"]),
+            ("Execution", ["Run", "Test This Step", "Run From Here", "Run Until Here", "Stop Run", "Schedule Flows", "Generate Python"]),
             ("Step Editing", ["Add Manual Action", "Insert Before", "Insert After", "Duplicate", "Delete Action", "Move Up", "Move Down", "Enable/Disable", "Deselect All"]),
             ("Project", ["Variables", "Settings"]),
         ]
@@ -353,6 +374,8 @@ class MainWindow(QMainWindow):
         self.menu_actions["Run Until Here"].triggered.connect(self.run_until_here)
         self.buttons["Stop Run"].clicked.connect(self.stop_run)
         self.menu_actions["Stop Run"].triggered.connect(self.stop_run)
+        self.buttons["Schedule Flows"].clicked.connect(self.schedule_flows_dialog)
+        self.menu_actions["Schedule Flows"].triggered.connect(self.schedule_flows_dialog)
         self.buttons["Generate Python"].clicked.connect(self.generate_python)
         self.menu_actions["Generate Python"].triggered.connect(self.generate_python)
         self.buttons["Add Manual Action"].clicked.connect(self.add_manual_action)
@@ -489,7 +512,7 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 show_error(self, "Open flow failed", str(exc))
                 return False
-        self.project = self.manager.new_project(flow_name)
+        self.project = self.manager.new_project(flow_name, settings=load_default_project_settings())
         self.project_dir = flow_dir
         self.manager.save(self.project, self.project_dir)
         self.dirty = False
@@ -541,6 +564,7 @@ class MainWindow(QMainWindow):
             self.floating.stop_requested.connect(self.stop_recording)
             self.floating.cancel_requested.connect(self.cancel_recording)
             self.floating.show()
+            self._position_floating_toolbar()
             self.hide()
             self.warned_recording_permission_pids.clear()
             self.recording_permission_timer.start()
@@ -675,6 +699,123 @@ class MainWindow(QMainWindow):
 
     def run_project(self) -> None:
         self._start_replay(0, len(self.project.actions) - 1, "run", True, True)
+
+    def schedule_flows_dialog(self) -> None:
+        dialog = ScheduleFlowsDialog(self.schedule_store, self.settings, self)
+        dialog.run_now_requested.connect(lambda name: self._run_flow_now(name))
+        dialog.exec()
+
+    def _check_schedules(self) -> None:
+        self.schedule_store.load()
+        self.schedule_store.remove_missing_flows()
+        now = datetime.now(timezone.utc)
+        for flow_name in self.schedule_store.list_flow_names():
+            schedule = self.schedule_store.get(flow_name)
+            if flow_name in self._scheduled_runs or flow_name in self._schedule_queue or not is_due(schedule, now):
+                continue
+            self._run_flow_now(flow_name, scheduled=True)
+
+    def _run_flow_now(self, flow_name: str, scheduled: bool = False) -> None:
+        flow_dir = flows_root() / flow_name
+        project_json = flow_dir / "project.json"
+        if not project_json.exists():
+            self.log(f"[{flow_name}] schedule skipped: flow not found")
+            return
+        if flow_name in self._scheduled_runs:
+            # The same flow's previous run has not finished yet - never overlap a flow with itself.
+            schedule = self.schedule_store.get(flow_name)
+            mark_skipped(schedule, STATUS_SKIPPED_RUNNING)
+            self.schedule_store.set(schedule)
+            self.schedule_store.save()
+            self.log(f"[{flow_name}] schedule skipped: already running")
+            return
+        if self._scheduled_runs:
+            # Only one flow runs at a time; queue this one until the active run finishes.
+            if flow_name not in self._schedule_queue:
+                self._schedule_queue.append(flow_name)
+                self.log(f"[{flow_name}] schedule queued: waiting for the current run to finish")
+            else:
+                self.log(f"[{flow_name}] schedule skipped: already queued")
+            return
+        if (
+            self.project_dir
+            and Path(self.project_dir).resolve() == flow_dir.resolve()
+            and (self.replay_thread is not None or self.recorder is not None)
+        ):
+            schedule = self.schedule_store.get(flow_name)
+            mark_skipped(schedule, STATUS_SKIPPED_BUSY)
+            self.schedule_store.set(schedule)
+            self.schedule_store.save()
+            self.log(f"[{flow_name}] schedule skipped: flow is open and busy")
+            return
+        try:
+            project = ProjectManager().load(project_json)
+        except Exception as exc:
+            self.log(f"[{flow_name}] schedule failed to load: {exc}")
+            return
+        errors = validate_project(project, flow_dir)
+        if errors:
+            self.log(f"[{flow_name}] schedule skipped: {errors[0]}")
+            schedule = self.schedule_store.get(flow_name)
+            mark_finished(schedule, STATUS_FAILED, error=errors[0])
+            self.schedule_store.set(schedule)
+            self.schedule_store.save()
+            return
+
+        schedule = self.schedule_store.get(flow_name)
+        mark_started(schedule)
+        self.schedule_store.set(schedule)
+        self.schedule_store.save()
+
+        thread = QThread()
+        worker = ReplayWorker(project, flow_dir, 0, len(project.actions) - 1, True, True, None, [])
+        worker.flow_name = flow_name
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.log.connect(self._scheduled_run_log)
+        worker.finished.connect(self._scheduled_run_success)
+        worker.stopped.connect(self._scheduled_run_stopped)
+        worker.failed.connect(self._scheduled_run_failed)
+        self._scheduled_runs[flow_name] = (thread, worker)
+        prefix = "scheduled" if scheduled else "manual"
+        self.log(f"[{flow_name}] {prefix} run starting")
+        thread.start()
+
+    def _scheduled_run_log(self, message: str) -> None:
+        worker = self.sender()
+        flow_name = getattr(worker, "flow_name", "")
+        self.log(f"[{flow_name}] {message}" if flow_name else message)
+
+    def _scheduled_run_success(self) -> None:
+        worker = self.sender()
+        self._scheduled_run_finished(getattr(worker, "flow_name", ""), STATUS_SUCCESS)
+
+    def _scheduled_run_stopped(self) -> None:
+        worker = self.sender()
+        self._scheduled_run_finished(getattr(worker, "flow_name", ""), STATUS_STOPPED)
+
+    def _scheduled_run_failed(self, index: int, message: str) -> None:
+        worker = self.sender()
+        self._scheduled_run_finished(getattr(worker, "flow_name", ""), STATUS_FAILED, error=message)
+
+    def _scheduled_run_finished(self, flow_name: str, status: str, error: str | None = None) -> None:
+        entry = self._scheduled_runs.pop(flow_name, None)
+        if entry:
+            thread, _worker = entry
+            thread.quit()
+            thread.wait()
+        schedule = self.schedule_store.get(flow_name)
+        mark_finished(schedule, status, error=error)
+        self.schedule_store.set(schedule)
+        self.schedule_store.save()
+        self.log(f"[{flow_name}] scheduled run {status}")
+        self._start_next_queued_flow()
+
+    def _start_next_queued_flow(self) -> None:
+        if self._scheduled_runs or not self._schedule_queue:
+            return
+        next_flow = self._schedule_queue.pop(0)
+        self._run_flow_now(next_flow, scheduled=True)
 
     def run_from_here(self) -> None:
         index = self.table.selected_index()
@@ -981,7 +1122,7 @@ class MainWindow(QMainWindow):
             self.editor.set_action(action, self.project_dir)
             self.log(f"target recaptured for {action.summary()} at ({x}, {y})")
             self._restore_main_after_target_capture()
-            QMessageBox.information(self, "Target Recaptured", "The new target image and original click position were saved.")
+            self._show_message_near(x, y, "Target Recaptured", "The new target image and original click position were saved.")
         except Exception as exc:
             self._restore_main_after_target_capture()
             show_error(self, "Recapture Target Failed", str(exc))
@@ -1003,6 +1144,40 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
         self.update_status()
+
+    def _position_floating_toolbar(self) -> None:
+        if not self.floating:
+            return
+        # Dock the recording toolbar at the bottom-center of the current screen,
+        # out of the way of whatever the user is recording, instead of leaving it
+        # wherever the window manager happens to place a new top-level window.
+        screen = self.screen() or QApplication.primaryScreen()
+        if not screen:
+            return
+        bounds = screen.availableGeometry()
+        self.floating.adjustSize()
+        left = bounds.left() + (bounds.width() - self.floating.width()) // 2
+        top = bounds.bottom() - self.floating.height() - 16
+        self.floating.move(left, top)
+
+    def _show_message_near(self, x: int, y: int, title: str, text: str) -> None:
+        box = QMessageBox(QMessageBox.Information, title, text, QMessageBox.Ok, self)
+        box.adjustSize()
+        # Clamp against the union of every screen's geometry rather than a single
+        # screen: QApplication.screenAt() can miss or pick the wrong monitor when
+        # multiple screens have different DPI scaling, which previously sent the
+        # dialog to the main window's screen instead of near the selected target.
+        bounds = QRect()
+        for screen in QApplication.screens():
+            bounds = bounds.united(screen.availableGeometry())
+        if bounds.isNull():
+            bounds = box.geometry()
+        # Center the dialog on the selected point instead of offsetting below-right,
+        # which used to push it toward the bottom edge of the screen.
+        left = min(max(x - box.width() // 2, bounds.left()), bounds.right() - box.width())
+        top = min(max(y - box.height() // 2, bounds.top()), bounds.bottom() - box.height())
+        box.move(left, top)
+        box.exec()
 
     def set_action_status(self, index: int, status: str) -> None:
         if 0 <= index < len(self.project.actions):
@@ -1171,6 +1346,13 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
             self.replay_worker.stop()
+        self.schedule_timer.stop()
+        self._schedule_queue.clear()
+        for flow_name, (thread, worker) in list(self._scheduled_runs.items()):
+            worker.stop()
+            thread.quit()
+            thread.wait()
+            self._scheduled_runs.pop(flow_name, None)
         event.accept()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -1291,7 +1473,7 @@ class MainWindow(QMainWindow):
                     self.table.setColumnWidth(index, int(width))
         advanced = self.settings.value("advanced_expanded", False, type=bool)
         self.editor.set_advanced_expanded(advanced)
-        logs_expanded = self.settings.value("logs_expanded", False, type=bool)
+        logs_expanded = self.settings.value("logs_expanded", True, type=bool)
         self.logs.setVisible(logs_expanded)
         self.toggle_logs_btn.setText("Collapse Logs" if logs_expanded else "Expand Logs")
 

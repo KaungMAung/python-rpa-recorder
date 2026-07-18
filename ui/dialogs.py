@@ -21,6 +21,24 @@ from PySide6.QtWidgets import (
 from rpa.models import ActionType, ProjectSettings, RpaAction
 
 
+def load_default_project_settings() -> ProjectSettings:
+    """Build a ProjectSettings using values last saved from the Settings dialog.
+
+    The Settings dialog persists every field to QSettings on accept, but new
+    projects previously always started from ProjectSettings()'s hardcoded
+    defaults, so changes never carried over to the next flow. This reads
+    back whatever was last saved (falling back to the dataclass default for
+    any field that hasn't been saved yet).
+    """
+    qsettings = QSettings("PythonRPARecorder", "PythonRPARecorder")
+    defaults = ProjectSettings()
+    values: dict = {}
+    for key, default_value in defaults.__dict__.items():
+        stored = qsettings.value(key, default_value, type=type(default_value))
+        values[key] = stored
+    return ProjectSettings.from_dict(values)
+
+
 class ManualActionDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)

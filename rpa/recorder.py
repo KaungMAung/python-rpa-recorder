@@ -96,8 +96,19 @@ class RpaRecorder:
         self._pressed: set[str] = set()
         self._last_action_time = time.monotonic()
         self._last_click: tuple[float, int, int, str] | None = None
-        self._screenshot_index = 0
+        self._screenshot_index = self._initial_screenshot_index()
         self._warned_permission_pids: set[int] = set()
+
+    def _initial_screenshot_index(self) -> int:
+        screenshots_dir = self.project_dir / "screenshots"
+        if not screenshots_dir.exists():
+            return 0
+        highest = 0
+        for path in screenshots_dir.glob("click_*.png"):
+            digits = path.stem.rsplit("_", 1)[-1]
+            if digits.isdigit():
+                highest = max(highest, int(digits))
+        return highest
 
     def start(self) -> None:
         with self._lock:

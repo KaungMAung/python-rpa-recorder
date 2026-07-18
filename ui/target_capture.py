@@ -148,17 +148,18 @@ class TargetCaptureOverlay(QWidget):
         if self._target is None or self._finished:
             return
         self._finished = True
-        self.confirmed.emit(
-            self._target.x(),
-            self._target.y(),
-            self.width_spin.value(),
-            self.height_spin.value(),
-        )
+        target_x, target_y = self._target.x(), self._target.y()
+        width, height = self.width_spin.value(), self.height_spin.value()
+        # Close this always-on-top overlay before notifying listeners, otherwise any
+        # dialog they show (e.g. a confirmation message box) renders underneath the
+        # still-visible overlay and the app appears completely frozen.
         self.close()
+        self.confirmed.emit(target_x, target_y, width, height)
 
     def _cancel(self) -> None:
         if self._finished:
             return
         self._finished = True
+        self.close()
         self.canceled.emit()
         self.close()

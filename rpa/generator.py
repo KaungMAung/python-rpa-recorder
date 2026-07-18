@@ -121,10 +121,15 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
             continue
         data = action.data
         delay = float(action.delay_before)
-        if delay:
+        is_click_image = action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value)
+        # Click Image steps poll continuously with their own search timeout
+        # (see click_image/wait_for_image above), so skip the fixed pre-wait
+        # and click as soon as the target is found instead of always waiting
+        # out the recorded delay.
+        if delay and not is_click_image:
             lines.append(f"    time.sleep({_delay_literal(delay)})")
         lines.append(f"    # Action {index}: {action.summary()} [{action.action}]")
-        if action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value):
+        if is_click_image:
             fallback = None
             if data.get("use_coordinate_fallback", True):
                 fallback = [int(data.get("fallback_x", 0)), int(data.get("fallback_y", 0))]

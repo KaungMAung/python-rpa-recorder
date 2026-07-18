@@ -1,0 +1,170 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication, QMessageBox
+
+from rpa.scheduler import STATUS_FAILED, STATUS_SUCCESS, ScheduleStore
+from ui.schedule_dialog import (
+    COLUMN_FLOW,
+    COLUMN_LAST_RUN,
+    ScheduleFlowsDialog,
+)
+
+
+def app() -> QApplication:
+    return QApplication.instance() or QApplication([])
+
+
+def _make_flow(tmp_path: Path, name: str) -> None:
+    flow_dir = tmp_path / name
+    flow_dir.mkdir(parents=True, exist_ok=True)
+    (flow_dir / "project.json").write_text("{}", encoding="utf-8")
+
+
+def make_dialog(tmp_path: Path, settings_name: str = "test") -> tuple[ScheduleFlowsDialog, ScheduleStore, QSettings]:
+    app()
+    store = ScheduleStore(tmp_path)
+    settings = QSettings("PythonRPARecorderTests", settings_name)
+    settings.clear()
+    dialog = ScheduleFlowsDialog(store, settings)
+    return dialog, store, settings
+
+
+def test_dialog_lists_every_flow_with_a_project_json(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "flow_a")
+    _make_flow(tmp_path, "flow_b")
+    dialog, _store, _settings = make_dialog(tmp_path)
+    assert dialog.table.rowCount() == 2
+    dialog.close()
+
+
+def test_enabling_a_disabled_schedule_requires_no_confirmation(tmp_path: Path, monkeypatch) -> None:
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, _settings = make_dialog(tmp_path)
+    calls = []
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: calls.append(1) or QMessageBox.Yes))
+    dialog._toggle_enabled("flow_a")
+    assert store.get("flow_a").enabled is True
+    assert calls == []
+    dialog.close()
+
+
+def test_disabling_an_enabled_schedule_asks_for_confirmation(tmp_path: Path, monkeypatch) -> None:
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, _settings = make_dialog(tmp_path)
+    store.get("flow_a").enabled = True
+    store.save()
+
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.No))
+    dialog._toggle_enabled("flow_a")
+    assert store.get("flow_a").enabled is True  # declined, stays enabled
+
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+    dialog._toggle_enabled("flow_a")
+    assert store.get("flow_a").enabled is False
+    dialog.close()
+
+
+def test_pause_keeps_enabled_and_interval_configuration(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, _settings = make_dialog(tmp_path)
+    schedule = store.get("flow_a")
+    schedule.enabled = True
+    schedule.interval_minutes = 120
+    store.set(schedule)
+    store.save()
+
+    dialog._toggle_pause("flow_a")
+    paused_schedule = store.get("flow_a")
+    assert paused_schedule.paused is True
+    assert paused_schedule.enabled is True
+    assert paused_schedule.interval_minutes == 120
+
+    dialog._toggle_pause("flow_a")
+    assert store.get("flow_a").paused is False
+    dialog.close()
+
+
+def test_pause_button_disabled_when_schedule_is_not_enabled(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, _settings = make_dialog(tmp_path)
+    dialog._toggle_pause("flow_a")
+    assert store.get("flow_a").paused is False
+    dialog.close()
+
+
+def test_sorting_by_flow_name_orders_rows_alphabetically(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "zebra")
+    _make_flow(tmp_path, "alpha")
+    dialog, _store, _settings = make_dialog(tmp_path)
+    # Flow name ascending is the default sort order, so no header click needed.
+    names = [dialog.table.item(row, COLUMN_FLOW).text() for row in range(dialog.table.rowCount())]
+    assert names == sorted(names)
+    dialog.close()
+
+
+def test_sorting_twice_on_same_column_reverses_order(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "zebra")
+    _make_flow(tmp_path, "alpha")
+    dialog, _store, _settings = make_dialog(tmp_path)
+    dialog._on_header_clicked(COLUMN_FLOW)
+    ascending = [dialog.table.item(row, COLUMN_FLOW).text() for row in range(dialog.table.rowCount())]
+    dialog._on_header_clicked(COLUMN_FLOW)
+    descending = [dialog.table.item(row, COLUMN_FLOW).text() for row in range(dialog.table.rowCount())]
+    assert descending == list(reversed(ascending))
+    dialog.close()
+
+
+def test_sort_column_and_order_persist_across_dialog_instances(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "flow_a")
+    dialog, _store, settings = make_dialog(tmp_path, settings_name="persist_sort")
+    dialog._on_header_clicked(COLUMN_LAST_RUN)
+    dialog.close()
+
+    dialog2 = ScheduleFlowsDialog(ScheduleStore(tmp_path), settings)
+    assert dialog2._sort_column == COLUMN_LAST_RUN
+    dialog2.close()
+
+
+def test_column_widths_persist_across_dialog_instances(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, settings = make_dialog(tmp_path, settings_name="persist_width")
+    dialog.table.setColumnWidth(2, 250)
+    dialog.accept()
+
+    dialog2 = ScheduleFlowsDialog(store, settings)
+    assert dialog2.table.columnWidth(2) == 250
+    dialog2.close()
+
+
+def test_last_status_tooltip_shows_failure_reason(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, _settings = make_dialog(tmp_path)
+    schedule = store.get("flow_a")
+    schedule.last_status = STATUS_FAILED
+    schedule.last_error = "image not found"
+    store.set(schedule)
+    store.save()
+    dialog.reload()
+    item = dialog.table.item(0, 5)
+    assert "image not found" in item.toolTip()
+    dialog.close()
+
+
+def test_duration_is_formatted_for_display(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, _settings = make_dialog(tmp_path)
+    schedule = store.get("flow_a")
+    schedule.last_status = STATUS_SUCCESS
+    schedule.last_duration_seconds = 125.4
+    store.set(schedule)
+    store.save()
+    dialog.reload()
+    item = dialog.table.item(0, 4)
+    assert item.text() == "2m 05s"
+    dialog.close()

@@ -162,10 +162,17 @@ class ActionEditor(QWidget):
         self.form.addRow("Action", QLabel(action.friendly_name()))
         self.form.addRow("Status", QLabel("Disabled" if not action.enabled else str(action.status).title()))
         self.form.addRow("Enabled", self._check(action.enabled, lambda value: self._set("enabled", value)))
-        self.form.addRow("Wait before", self._double(action.delay_before, lambda value: self._set("delay_before", value), 0, 9999))
+        is_click_image = action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value)
+        if is_click_image:
+            note = QLabel("This step searches continuously for its target (see Search timeout below) instead of waiting a fixed time.")
+            note.setWordWrap(True)
+            note.setStyleSheet("color: #64748b;")
+            self.form.addRow(note)
+        else:
+            self.form.addRow("Wait before", self._double(action.delay_before, lambda value: self._set("delay_before", value), 0, 9999))
 
         data = action.data
-        if action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value):
+        if is_click_image:
             self._click_image_fields(data)
         elif action.action == ActionType.TYPE_TEXT.value:
             text = QPlainTextEdit(str(data.get("text", "")))

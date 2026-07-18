@@ -169,6 +169,28 @@ def test_image_not_found_without_fallback(monkeypatch, tmp_path: Path) -> None:
         ReplayRunner(project, tmp_path, lambda m: None).run_action(action, {})
 
 
+def test_run_skips_fixed_delay_for_click_image_steps(monkeypatch, tmp_path: Path) -> None:
+    from rpa.models import ActionType, RpaAction, RpaProject
+    from rpa.runner import ReplayActionError, ReplayRunner
+
+    project = RpaProject()
+    click_action = RpaAction(ActionType.CLICK_IMAGE.value, {"image": "missing.png", "use_coordinate_fallback": False, "timeout": 0}, delay_before=5.0)
+    wait_action = RpaAction(ActionType.WAIT.value, {"seconds": 0}, delay_before=2.0)
+    project.actions = [wait_action, click_action]
+    monkeypatch.setattr("rpa.runner.wait_for_image", lambda *args, **kwargs: type("M", (), {"found": False})())
+    monkeypatch.setattr("rpa.runner.foreground_elevation_mismatch", lambda: None)
+    monkeypatch.setattr("rpa.runner.pyautogui", SimpleNamespace(click=lambda *a, **k: None, FAILSAFE=None))
+    runner = ReplayRunner(project, tmp_path, lambda m: None)
+    sleeps: list[float] = []
+    monkeypatch.setattr(runner, "sleep_checked", lambda seconds: sleeps.append(seconds))
+    with pytest.raises(ReplayActionError):
+        runner.run(include_start_delay=False)
+    # Only the WAIT step's delay_before (2.0) should be slept; the click image
+    # step's delay_before (5.0) is skipped in favor of continuous polling.
+    assert 5.0 not in sleeps
+    assert 2.0 in sleeps
+
+
 def test_pause_resume_state_without_hooks(tmp_path: Path) -> None:
     from rpa.recorder import RpaRecorder
     from rpa.models import ProjectSettings, RecorderState
@@ -179,6 +201,28 @@ def test_pause_resume_state_without_hooks(tmp_path: Path) -> None:
     assert recorder.state == RecorderState.PAUSED
     recorder.resume()
     assert recorder.state == RecorderState.RECORDING
+
+
+def test_new_recorder_continues_screenshot_numbering_from_existing_files(tmp_path: Path) -> None:
+    from rpa.recorder import RpaRecorder
+    from rpa.models import ProjectSettings
+
+    screenshots_dir = tmp_path / "screenshots"
+    screenshots_dir.mkdir()
+    (screenshots_dir / "click_0001.png").write_bytes(b"fake")
+    (screenshots_dir / "click_0012.png").write_bytes(b"fake")
+    (screenshots_dir / "click_0007.png").write_bytes(b"fake")
+
+    recorder = RpaRecorder(tmp_path, ProjectSettings(), lambda a: None, lambda m: None)
+    assert recorder._screenshot_index == 12
+
+
+def test_new_recorder_starts_at_zero_when_no_screenshots_exist(tmp_path: Path) -> None:
+    from rpa.recorder import RpaRecorder
+    from rpa.models import ProjectSettings
+
+    recorder = RpaRecorder(tmp_path, ProjectSettings(), lambda a: None, lambda m: None)
+    assert recorder._screenshot_index == 0
 
 
 def test_stop_replay_state() -> None:
