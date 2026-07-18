@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QPlainTextEdit,
     QVBoxLayout,
+    QWidget,
 )
 
 from rpa.models import ActionType, ProjectSettings, RpaAction
@@ -110,7 +111,7 @@ class ManualActionDialog(QDialog):
         row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(QLabel("X")); row.addWidget(x); row.addWidget(QLabel("Y")); row.addWidget(y); row.addWidget(button)
         box = QVBoxLayout(); box.addLayout(row)
-        wrapper = QLabel(); wrapper.setLayout(box)
+        wrapper = QWidget(); wrapper.setLayout(box)
         self.form.addRow(label, wrapper)
         setattr(self, f"{role}_x", x); setattr(self, f"{role}_y", y)
         return x, y
@@ -133,7 +134,7 @@ class ManualActionDialog(QDialog):
             browse = QPushButton("Choose Image")
             browse.clicked.connect(self._choose_image)
             row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0); row.addWidget(self.image_file); row.addWidget(browse)
-            box = QLabel(); box.setLayout(row)
+            box = QWidget(); box.setLayout(row)
             self.form.addRow("Target image", box)
         elif kind == ActionType.MOUSE_MOVE.value:
             self._pick_row("target", "Move to")
@@ -157,7 +158,7 @@ class ManualActionDialog(QDialog):
         elif kind == ActionType.OPEN_FILE.value:
             self.path = QLineEdit(); browse = QPushButton("Browse") ; browse.clicked.connect(self._browse_file)
             row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0); row.addWidget(self.path); row.addWidget(browse)
-            box = QLabel(); box.setLayout(row); self.form.addRow("Application or file", box)
+            box = QWidget(); box.setLayout(row); self.form.addRow("Application or file", box)
         elif kind == ActionType.PRESS_KEY.value:
             self.key = QComboBox(); self.key.setEditable(True); self.key.addItems(["enter", "tab", "escape", "space", "backspace", "delete", "up", "down", "left", "right"])
             self.form.addRow("Key", self.key)
