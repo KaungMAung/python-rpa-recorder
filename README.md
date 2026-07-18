@@ -11,12 +11,13 @@ The main workflow is `Record -> Review -> Test -> Run`. The step list remains vi
 - `rpa/models.py` defines project and action data.
 - `rpa/project_manager.py` saves and opens folder-based projects.
 - `rpa/recorder.py` uses `pynput` to capture global mouse and keyboard input.
-- `rpa/runner.py` replays actions with `pyautogui` in a worker thread.
+- `rpa/runner.py` replays actions with `pyautogui` in a worker thread and owns the thread-safe breakpoint gate; UI commands wake its condition without running automation work on the UI thread.
 - `rpa/image_matcher.py` captures screenshots and locates images with OpenCV.
 - `rpa/windowing.py` discovers, matches, activates, and controls native Windows application windows.
 - `rpa/generator.py` creates `generated/generated_rpa.py`.
 - `rpa/scheduler.py` stores and evaluates per-flow automatic run schedules (`flows/schedules.json`).
 - `ui/schedule_dialog.py` is the Schedule Flows page used to enable, adjust, and monitor those schedules.
+- `ui/debug_variables_dialog.py` presents editable non-sensitive runtime values while a breakpoint is paused.
 
 ## Install
 
@@ -100,6 +101,23 @@ Select a Click Image or Double Click Image step to manage targeting in **Step De
 - The confidence slider defaults to 86%. Advanced settings provide grayscale matching and highest-confidence, edge-based, or specific-match priority. Coordinate fallback is always shown as enabled with its saved position or disabled/image-required.
 
 Runtime matching captures the desktop once per poll, tries reference images in order, and logs the winning reference, confidence, location, best score, and search duration. These values are also saved in per-step run evidence. Missing, unreadable, and oversized references produce actionable warnings; oversized images specifically call out display scaling and resolution. Because image matching is pixel-based, recapture references after material DPI, display-scaling, theme, or resolution changes. Existing projects with only the legacy `image` field continue to load and run unchanged, while generated Python includes the same ordered references, grayscale, search-region, priority, and fallback behavior.
+
+## Breakpoints and Step-Through Debugging
+
+Select one or more executable steps and press **F9**, use **Step Editing > Toggle Breakpoint**, or right-click and choose **Toggle Breakpoint**. A red dot in the Step column marks each saved breakpoint. Block markers such as Else and End If cannot hold breakpoints. Breakpoints are stored in `project.json`, survive save/reload and undo/redo, and are intentionally ignored by generated Python.
+
+Normal **Run**, **Run From Here**, and **Test Step** pause before any breakpoint in their run range. **Run Until Breakpoint** starts at the selected step (or Step 1 when nothing is selected) and stops at the next saved breakpoint. With no breakpoint in range, normal execution is unchanged.
+
+While paused, the main step list reappears with the paused row highlighted and the floating runner shows the current and next executable step. Its controls are:
+
+- **Resume** continues until the next breakpoint.
+- **Step Over** executes the current step and pauses before the next executable step.
+- **Skip Step** records the current step as skipped and pauses before the next executable step.
+- **Restart Selected** restarts debugging at the enabled executable row selected in the current run range.
+- **Variables** shows current runtime values. Project, non-sensitive runtime-input, and output values can be edited before continuing; sensitive inputs and protected built-ins remain masked/read-only.
+- **Stop Run** interrupts the breakpoint wait immediately and completes the run as Stopped.
+
+Breakpoint pauses, resumes, step-over commands, skipped steps, restarts, and variable edits are written to the Logs/Status view and the affected step's `debug_events` in execution evidence. Scheduled execution does not pause for interactive breakpoints.
 
 During Run, Run From Here, Run Until Here, Test Step, and scheduled execution, the recorder hides by default, Windows shows the desktop (minimizing other windows), and a floating **Stop Run** control remains available. The recorder is restored when execution ends; other windows remain minimized. Turn this behavior off in Settings with **Hide recorder while running**.
 
@@ -287,6 +305,18 @@ Run these checks on the same Windows account and display configuration that will
 4. Test Stop Run while a Click step is searching for an image that is not visible.
 5. With PyAutoGUI failsafe enabled, run and move the pointer into a screen corner. Confirm the run stops with the friendly safety message.
 
+### Breakpoints and Step-Through Debugging
+
+1. Add three simple steps that write distinct text, select Steps 1 and 3 with Ctrl-click, and press F9. Confirm both rows show red breakpoint dots; save, close, and reopen the flow to confirm the markers persist.
+2. Click **Run Until Breakpoint**. Confirm execution pauses before Step 1, the main step list reappears with Step 1 selected, and the floating runner shows both the current and next executable steps.
+3. Click **Step Over**. Confirm Step 1 executes and the runner pauses before Step 2 even though Step 2 has no breakpoint.
+4. Open **Variables**, change a non-sensitive project/output value, and apply it. Confirm password/sensitive inputs are redacted and protected built-ins cannot be edited.
+5. Click **Skip Step**. Confirm Step 2 does not execute, its row becomes Skipped, and execution pauses before Step 3.
+6. Select Step 1 in the visible table and click **Restart Selected**. Confirm the debugger returns to Step 1 without starting a second runner or restoring unrelated windows.
+7. Click **Resume** and confirm it pauses at Step 3. Resume again and confirm the flow completes normally.
+8. Repeat and click **Stop Run** while paused. Confirm it stops immediately, restores the recorder, and Run Details records the pause and stopped status.
+9. Generate Python and confirm the script executes the same normal step sequence without interactive breakpoint prompts.
+
 ### Window-Aware Steps
 
 1. Open Notepad, add **Select / Target Window**, click **Pick Window**, and click Notepad. Confirm its process, title, and class are populated.
@@ -315,3 +345,5 @@ Run these checks on the same Windows account and display configuration that will
 - If click replay misses, lower confidence or enable coordinate fallback.
 - If PyAutoGUI aborts, move the mouse away from the screen corner or disable failsafe in settings.
 - If generated scripts fail to locate images, confirm screenshots still exist in the project `screenshots/` folder.
+- If **Run Until Breakpoint** reports that none exists, select an enabled executable row and press F9; structural If/Else/End/Repeat markers cannot hold breakpoints.
+- If a debugger variable is read-only, it is either a sensitive Runtime Input or a protected run-provided value such as `RUN_DATE` or `CLIPBOARD_TEXT`.

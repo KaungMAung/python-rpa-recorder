@@ -67,6 +67,7 @@ class ActionStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+    STOPPED = "stopped"
 
 
 @dataclass
@@ -106,6 +107,7 @@ class RpaAction:
     delay_before: float = 0.0
     recorded_delay: float = 0.0
     status: str = ActionStatus.PENDING.value
+    breakpoint: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RpaAction":
@@ -117,6 +119,7 @@ class RpaAction:
             delay_before=float(data.get("delay_before", 0.0) or 0.0),
             recorded_delay=float(data.get("recorded_delay", 0.0) or 0.0),
             status=data.get("status", ActionStatus.PENDING.value),
+            breakpoint=bool(data.get("breakpoint", False)),
             data=dict(data.get("data") or {}),
         )
 

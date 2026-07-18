@@ -119,6 +119,15 @@ class RunDetailsDialog(QDialog):
 
     @staticmethod
     def _execution_result_text(step: dict) -> str:
+        debug_events = step.get("debug_events") or []
+        if debug_events:
+            labels = [
+                str(event.get("event", "debug")).replace("_", " ")
+                for event in debug_events if isinstance(event, dict)
+            ]
+            detail = ", ".join(labels) or "debug event"
+            error = str(step.get("error") or "").strip()
+            return f"Debug: {detail}" + (f" - {error}" if error else "")
         image = step.get("image_match")
         if isinstance(image, dict):
             reference = Path(str(image.get("reference_image") or "target")).name

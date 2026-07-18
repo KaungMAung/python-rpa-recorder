@@ -84,6 +84,7 @@ from ui.target_capture import TargetCaptureOverlay
 from ui.window_picker import WindowPickOverlay
 from ui.image_match_debug import MatchHighlightOverlay, MatchResultsDialog
 from ui.region_selector import RegionSelectionOverlay
+from ui.debug_variables_dialog import DebugVariablesDialog
 
 
 def app_root() -> Path:
@@ -112,6 +113,7 @@ class ReplayWorker(QObject):
     finished = Signal()
     failed = Signal(int, str)
     stopped = Signal()
+    debug_paused = Signal(int, str, object)
 
     def __init__(
         self,
@@ -124,6 +126,7 @@ class ReplayWorker(QObject):
         runtime_variables: dict | None = None,
         excluded_regions: list[tuple[int, int, int, int]] | None = None,
         evidence_dir: Path | None = None,
+        enable_debug: bool = False,
     ) -> None:
         super().__init__()
         self.runner = ReplayRunner(project, project_dir, self.log.emit, excluded_regions, evidence_dir)
@@ -131,6 +134,7 @@ class ReplayWorker(QObject):
         self.end_index = end_index
         self.include_start_delay = include_start_delay
         self.respect_enabled = respect_enabled
+        self.enable_debug = enable_debug
         if runtime_variables is not None:
             self.runner.runtime_variables = dict(runtime_variables)
 
@@ -145,6 +149,8 @@ class ReplayWorker(QObject):
                 self.respect_enabled,
                 self.retry_progress.emit,
                 self.control_progress.emit,
+                self.debug_paused.emit,
+                self.enable_debug,
             )
             if self.runner.had_continued_failures:
                 self.failed.emit(
@@ -163,6 +169,21 @@ class ReplayWorker(QObject):
 
     def stop(self) -> None:
         self.runner.request_stop()
+
+    def debug_resume(self) -> None:
+        self.runner.resume_debug()
+
+    def debug_step_over(self) -> None:
+        self.runner.step_over_debug()
+
+    def debug_skip(self) -> None:
+        self.runner.skip_debug_step()
+
+    def debug_restart(self, index: int) -> None:
+        self.runner.restart_debug_from(index)
+
+    def debug_update_variables(self, values: dict) -> None:
+        self.runner.update_debug_variables(values)
 
 
 class MainWindow(QMainWindow):
@@ -212,6 +233,9 @@ class MainWindow(QMainWindow):
         self.file_logger = None
         self._logs_follow_tail = True
         self.last_runtime_variables: dict = {}
+        self.debug_paused_index: int | None = None
+        self.debug_paused_values: dict = {}
+        self.debug_showed_main = False
         self.details_were_visible_before_run = True
         self.target_capture_overlay: TargetCaptureOverlay | None = None
         self.target_capture_action: RpaAction | None = None
@@ -438,8 +462,8 @@ class MainWindow(QMainWindow):
         menus = [
             ("File", ["New", "Open", "Save", "Save As"]),
             ("Record Actions", ["Record", "Pause", "Resume", "Stop"]),
-            ("Execution", ["Run", "Validate Flow", "Test This Step", "Run From Here", "Run Until Here", "Stop Run", "Schedule Flows", "Generate Python"]),
-            ("Step Editing", ["Undo", "Redo", "Add Manual Action", "Insert Before", "Insert After", "Duplicate", "Delete Action", "Move Up", "Move Down", "Enable/Disable", "Deselect All"]),
+            ("Execution", ["Run", "Run Until Breakpoint", "Validate Flow", "Test This Step", "Run From Here", "Run Until Here", "Stop Run", "Schedule Flows", "Generate Python"]),
+            ("Step Editing", ["Undo", "Redo", "Toggle Breakpoint", "Add Manual Action", "Insert Before", "Insert After", "Duplicate", "Delete Action", "Move Up", "Move Down", "Enable/Disable", "Deselect All"]),
             ("Project", ["Variables", "Settings"]),
         ]
         for menu_name, names in menus:
@@ -461,6 +485,7 @@ class MainWindow(QMainWindow):
             "Deselect All": "Esc",
             "Undo": "Ctrl+Z",
             "Redo": "Ctrl+Y",
+            "Toggle Breakpoint": "F9",
         }.get(name, "")
         friendly = {
             "Add Manual Action": "Add Step",
@@ -485,6 +510,7 @@ class MainWindow(QMainWindow):
         self.menu_actions["Stop"].triggered.connect(self.stop_recording)
         self.buttons["Run"].clicked.connect(self.run_project)
         self.menu_actions["Run"].triggered.connect(self.run_project)
+        self.menu_actions["Run Until Breakpoint"].triggered.connect(self.run_until_breakpoint)
         self.buttons["Validate Flow"].clicked.connect(self.validate_flow)
         self.menu_actions["Validate Flow"].triggered.connect(self.validate_flow)
         self.menu_actions["Test This Step"].triggered.connect(self.test_selected_step)
@@ -508,6 +534,7 @@ class MainWindow(QMainWindow):
         self.menu_actions["Move Down"].triggered.connect(lambda: self.move_action(1))
         self.buttons["Enable/Disable"].clicked.connect(self.toggle_selected_action)
         self.menu_actions["Enable/Disable"].triggered.connect(self.toggle_selected_action)
+        self.menu_actions["Toggle Breakpoint"].triggered.connect(self.toggle_breakpoint)
         self.menu_actions["Deselect All"].triggered.connect(self.clear_step_selection)
         self.menu_actions["Variables"].triggered.connect(self.variables_dialog)
         self.menu_actions["Settings"].triggered.connect(self.settings_dialog)
@@ -585,6 +612,10 @@ class MainWindow(QMainWindow):
             self.menu_actions[name].setEnabled(selected)
         for name in ("Test This Step", "Run From Here", "Run Until Here"):
             self.menu_actions[name].setEnabled(selected and not recording and not paused and not running)
+        self.menu_actions["Run Until Breakpoint"].setEnabled(
+            bool(self.project.actions) and not recording and not paused and not preparing and not running
+        )
+        self.menu_actions["Toggle Breakpoint"].setEnabled(selected and not recording and not paused and not running)
         self.menu_actions["Undo"].setEnabled(self._history_index > 0 and not recording and not paused and not preparing and not running)
         self.menu_actions["Redo"].setEnabled(self._history_index + 1 < len(self._history) and not recording and not paused and not preparing and not running)
         self.workflow_buttons["Record"].setEnabled(self.buttons["Record"].isEnabled())
@@ -885,6 +916,20 @@ class MainWindow(QMainWindow):
 
     def run_project(self) -> None:
         self._start_replay(0, len(self.project.actions) - 1, "run", True, True)
+
+    def run_until_breakpoint(self) -> None:
+        selected = self.table.selected_index()
+        start = selected if selected >= 0 else 0
+        if not any(
+            action.breakpoint and action.action not in CONTROL_TYPES
+            for action in self.project.actions[start:]
+        ):
+            QMessageBox.information(
+                self, "Run Until Breakpoint",
+                "There is no executable breakpoint at or after the selected step. Toggle one with F9 first.",
+            )
+            return
+        self._start_replay(start, len(self.project.actions) - 1, "debug", True, True)
 
     def validate_flow(self) -> None:
         if not self.project.actions:
@@ -1356,6 +1401,7 @@ class MainWindow(QMainWindow):
         }
         source = {
             "run": "Manual", "test": "Test Step", "from": "Run From Here", "until": "Run Until Here",
+            "debug": "Run Until Breakpoint",
         }.get(mode, "Manual")
         try:
             self._begin_evidence(self.project_dir, self.project, source)
@@ -1404,12 +1450,17 @@ class MainWindow(QMainWindow):
             runtime_variables,
             self._image_match_exclusions(),
             self.active_evidence.folder,
+            any(
+                action.breakpoint and action.action not in CONTROL_TYPES
+                for action in self.project.actions[start_index:end_index + 1]
+            ),
         )
         self.replay_worker.moveToThread(self.replay_thread)
         self.replay_thread.started.connect(self.replay_worker.run)
         self.replay_worker.action_status.connect(self.set_action_status)
         self.replay_worker.retry_progress.connect(self._retry_progress)
         self.replay_worker.control_progress.connect(self._control_progress)
+        self.replay_worker.debug_paused.connect(self._debug_paused)
         self.replay_worker.log.connect(self.log)
         self.replay_worker.finished.connect(self.run_completed)
         self.replay_worker.stopped.connect(self.run_stopped)
@@ -1450,6 +1501,108 @@ class MainWindow(QMainWindow):
             worker.stop()
             self.log("stop scheduled replay requested")
 
+    def _debug_paused(self, index: int, reason: str, values: dict) -> None:
+        if not self.replay_worker or not 0 <= index < len(self.project.actions):
+            return
+        self.debug_paused_index = index
+        self.debug_paused_values = dict(values)
+        action = self.project.actions[index]
+        action.status = "paused"
+        self.running_action_index = index
+        self.table.update_action(index, action)
+        self.table.selectRow(index)
+        item = self.table.item(index, 0)
+        if item:
+            self.table.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+        next_index = self._next_executable_index(index + 1)
+        next_text = (
+            f"Next: Step {next_index + 1} - {self.project.actions[next_index].summary()}"
+            if next_index is not None else "Next: end of run"
+        )
+        if self.execution_floating:
+            label = "Breakpoint" if reason == "breakpoint" else "Step complete"
+            self.execution_floating.set_debug_paused(
+                f"Paused before Step {index + 1} - {action.summary()} ({label})", next_text,
+            )
+            self._position_execution_toolbar()
+        if not self.isVisible():
+            self.debug_showed_main = True
+            self.showMaximized() if self.replay_was_maximized else self.showNormal()
+            self.raise_()
+            self.activateWindow()
+        self.update_status(f"Paused before Step {index + 1}")
+
+    def _next_executable_index(self, start: int) -> int | None:
+        end = min(self.run_end_index, len(self.project.actions) - 1)
+        for index in range(max(0, start), end + 1):
+            action = self.project.actions[index]
+            if action.action not in CONTROL_TYPES and action.enabled:
+                return index
+        return None
+
+    def _continue_debug(self, command: str) -> None:
+        worker = self.replay_worker
+        if not worker or self.debug_paused_index is None:
+            return
+        current = self.debug_paused_index
+        self.debug_paused_index = None
+        self.debug_paused_values = {}
+        if self.execution_floating:
+            self.execution_floating.set_debug_running(f"Step {current + 1} - Debug running")
+            self._position_execution_toolbar()
+        if self.debug_showed_main and self._active_run_settings and self._active_run_settings.hide_window_during_replay:
+            self.hide()
+        self.debug_showed_main = False
+        if command == "resume":
+            worker.debug_resume()
+        elif command == "step":
+            worker.debug_step_over()
+        elif command == "skip":
+            worker.debug_skip()
+
+    def debug_resume(self) -> None:
+        self._continue_debug("resume")
+
+    def debug_step_over(self) -> None:
+        self._continue_debug("step")
+
+    def debug_skip(self) -> None:
+        self._continue_debug("skip")
+
+    def debug_restart_selected(self) -> None:
+        worker = self.replay_worker
+        if not worker or self.debug_paused_index is None:
+            return
+        index = self.table.selected_index()
+        if not self.run_start_index <= index <= self.run_end_index:
+            QMessageBox.warning(self, "Restart Debugging", "Select a step inside the current run range.")
+            return
+        if self.project.actions[index].action in CONTROL_TYPES or not self.project.actions[index].enabled:
+            QMessageBox.warning(self, "Restart Debugging", "Select an enabled executable step, not a block marker.")
+            return
+        current = self.debug_paused_index
+        self.debug_paused_index = None
+        self.debug_paused_values = {}
+        if self.debug_showed_main and self._active_run_settings and self._active_run_settings.hide_window_during_replay:
+            self.hide()
+        self.debug_showed_main = False
+        if self.execution_floating:
+            self.execution_floating.set_debug_running(f"Restarting from Step {index + 1}")
+        worker.debug_restart(index)
+        self.log(f"[Debug] Restart requested: Step {current + 1} -> Step {index + 1}")
+
+    def debug_variables_dialog(self) -> None:
+        worker = self.replay_worker
+        if not worker or self.debug_paused_index is None:
+            return
+        values = dict(worker.runner.runtime_variables)
+        sensitive = sensitive_variable_names(self.project)
+        protected = {"RUN_DATE", "CLIPBOARD_TEXT"}
+        dialog = DebugVariablesDialog(self.project, values, sensitive, protected, self)
+        if dialog.exec() == QDialog.Accepted:
+            worker.debug_update_variables(dialog.values)
+            self.debug_paused_values = dict(dialog.values)
+
     def _retry_progress(self, index: int, attempt: int, total: int, _reason: str) -> None:
         if self.execution_floating:
             self.execution_floating.set_status(f"Step {index + 1} · Retry {attempt}/{total}")
@@ -1467,6 +1620,9 @@ class MainWindow(QMainWindow):
         self.replay_thread = None
         self.replay_worker = None
         self.running_action_index = None
+        self.debug_paused_index = None
+        self.debug_paused_values = {}
+        self.debug_showed_main = False
         self._restore_details_after_run()
         self._restore_run_environment()
         self.update_buttons()
@@ -1479,15 +1635,20 @@ class MainWindow(QMainWindow):
     def _prepare_run_environment(self, settings: ProjectSettings, label: str) -> None:
         """Shared desktop preparation for interactive and scheduled replay."""
         self._active_run_settings = settings
-        if not settings.hide_window_during_replay:
-            return
         self.replay_was_maximized = self.isMaximized()
         self.execution_floating = FloatingExecutionToolbar()
         self.execution_floating.stop_requested.connect(self.stop_run)
+        self.execution_floating.resume_requested.connect(self.debug_resume)
+        self.execution_floating.step_over_requested.connect(self.debug_step_over)
+        self.execution_floating.skip_requested.connect(self.debug_skip)
+        self.execution_floating.restart_requested.connect(self.debug_restart_selected)
+        self.execution_floating.variables_requested.connect(self.debug_variables_dialog)
         self.execution_floating.set_status(label)
         self.execution_floating.show()
         self._position_execution_toolbar()
         self.execution_floating.position_changed.connect(self._execution_toolbar_moved)
+        if not settings.hide_window_during_replay:
+            return
         self.hide()
         # Prepare a clean desktop before replay begins. The always-on-top stop
         # control remains available, and other windows are intentionally not
@@ -1588,6 +1749,9 @@ class MainWindow(QMainWindow):
     def run_stopped(self) -> None:
         elapsed = time.monotonic() - self.run_started_at if self.run_started_at else 0.0
         last_step = self.running_action_index + 1 if self.running_action_index is not None else self.run_start_index + 1
+        if self.running_action_index is not None and 0 <= self.running_action_index < len(self.project.actions):
+            self.project.actions[self.running_action_index].status = "stopped"
+            self.table.update_action(self.running_action_index, self.project.actions[self.running_action_index])
         self.log("automation stopped by user")
         runner = self.replay_worker.runner if self.replay_worker else None
         self.last_runtime_variables = dict(getattr(runner, "runtime_variables", {}))
@@ -2265,6 +2429,7 @@ class MainWindow(QMainWindow):
             clones.append(RpaAction(
                 clone.action, deepcopy(clone.data), name=clone.name, enabled=clone.enabled,
                 delay_before=clone.delay_before, recorded_delay=clone.recorded_delay,
+                breakpoint=clone.breakpoint,
             ))
         self.project.actions[insert_at:insert_at] = clones
         self.mark_dirty()
@@ -2319,6 +2484,24 @@ class MainWindow(QMainWindow):
                 self.workspace_splitter.setSizes([700, 420])
         self.update_buttons()
         self.update_status()
+
+    def toggle_breakpoint(self) -> None:
+        indices = self.table.selected_indices()
+        if not indices:
+            return
+        executable = [index for index in indices if self.project.actions[index].action not in CONTROL_TYPES]
+        if not executable:
+            show_error(self, "Breakpoint Not Available", "Breakpoints can be set only on executable steps, not block markers.")
+            return
+        enable = not all(self.project.actions[index].breakpoint for index in executable)
+        for index in executable:
+            self.project.actions[index].breakpoint = enable
+            self.table.update_action(index, self.project.actions[index])
+        self.mark_dirty()
+        self.log(
+            f"{'set' if enable else 'cleared'} breakpoint on "
+            + ", ".join(f"Step {index + 1}" for index in executable)
+        )
 
     def clear_step_selection(self) -> None:
         self.table.clearSelection()
@@ -2557,6 +2740,7 @@ class MainWindow(QMainWindow):
             ("Ctrl+G", self.generate_python),
             ("F5", self.run_project),
             ("Shift+F5", self.stop_run),
+            ("F9", self.toggle_breakpoint),
         ]:
             shortcut = QShortcut(QKeySequence(key), self)
             shortcut.activated.connect(lambda h=handler: self._run_shortcut(h))
@@ -2571,6 +2755,7 @@ class MainWindow(QMainWindow):
 
     def handle_table_context_action(self, action: str) -> None:
         handlers = {
+            "toggle_breakpoint": self.toggle_breakpoint,
             "test": self.test_selected_step,
             "run_from": self.run_from_here,
             "run_until": self.run_until_here,

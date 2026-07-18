@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QPoint, Qt, QTimer, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 
 class FloatingRecorderToolbar(QWidget):
@@ -93,23 +93,69 @@ class FloatingRecorderToolbar(QWidget):
 class FloatingExecutionToolbar(QWidget):
     stop_requested = Signal()
     position_changed = Signal(QPoint)
+    resume_requested = Signal()
+    step_over_requested = Signal()
+    skip_requested = Signal()
+    restart_requested = Signal()
+    variables_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__(None, Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setWindowTitle("Automation Running")
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 6, 10, 6)
         self.status = QLabel("Running automation")
         self.status.setStyleSheet("font-weight: 600;")
-        stop = QPushButton("Stop Run")
-        stop.setStyleSheet("background: #ea580c; color: white; font-weight: 600; padding: 4px 12px;")
-        stop.clicked.connect(self.stop_requested)
-        layout.addWidget(self.status)
-        layout.addWidget(stop)
+        self.next_step = QLabel("")
+        self.next_step.setStyleSheet("color: #475569;")
+        self.debug_controls = QWidget()
+        debug_layout = QHBoxLayout(self.debug_controls)
+        debug_layout.setContentsMargins(0, 2, 0, 0)
+        for label, signal in (
+            ("Resume", self.resume_requested),
+            ("Step Over", self.step_over_requested),
+            ("Skip Step", self.skip_requested),
+            ("Restart Selected", self.restart_requested),
+            ("Variables", self.variables_requested),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(signal)
+            debug_layout.addWidget(button)
+        self.stop = QPushButton("Stop Run")
+        self.stop.setStyleSheet("background: #ea580c; color: white; font-weight: 600; padding: 4px 12px;")
+        self.stop.clicked.connect(self.stop_requested)
+        header = QHBoxLayout()
+        header.addWidget(self.status, 1)
+        header.addWidget(self.stop)
+        layout.addLayout(header)
+        layout.addWidget(self.next_step)
+        layout.addWidget(self.debug_controls)
+        self.debug_controls.hide()
         self.setStyleSheet("QWidget { background: #eff6ff; border: 1px solid #bfdbfe; }")
 
     def set_status(self, text: str) -> None:
         self.status.setText(text)
+        self.adjustSize()
+
+    def set_debug_paused(self, current: str, next_step: str = "") -> None:
+        self.status.setText(current)
+        self.next_step.setText(next_step)
+        self.next_step.setVisible(bool(next_step))
+        self.debug_controls.show()
+        self.setStyleSheet(
+            "QWidget { background: #f5f3ff; border: 1px solid #c4b5fd; } "
+            "QPushButton { padding: 4px 8px; }"
+        )
+        self.stop.setStyleSheet("background: #dc2626; color: white; font-weight: 600; padding: 4px 12px;")
+        self.adjustSize()
+
+    def set_debug_running(self, text: str) -> None:
+        self.status.setText(text)
+        self.next_step.clear()
+        self.next_step.hide()
+        self.debug_controls.hide()
+        self.setStyleSheet("QWidget { background: #eff6ff; border: 1px solid #bfdbfe; }")
+        self.stop.setStyleSheet("background: #ea580c; color: white; font-weight: 600; padding: 4px 12px;")
         self.adjustSize()
 
     def moveEvent(self, event) -> None:

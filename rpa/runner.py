@@ -61,9 +61,47 @@ class ReplayRunner:
         self.window_resolver: WindowResolver | None = None
         self._last_window_result: dict[str, Any] | None = None
         self._last_image_result: dict[str, Any] | None = None
+        self._debug_condition = threading.Condition()
+        self._debug_command: tuple[str, int | None] | None = None
+        self._debug_pause_next = False
+        self._debug_paused_index: int | None = None
+        self._debug_events: dict[int, list[dict[str, Any]]] = {}
 
     def request_stop(self) -> None:
         self._stop_event.set()
+        with self._debug_condition:
+            self._debug_condition.notify_all()
+
+    def resume_debug(self) -> None:
+        self._send_debug_command("resume")
+
+    def step_over_debug(self) -> None:
+        self._send_debug_command("step")
+
+    def skip_debug_step(self) -> None:
+        self._send_debug_command("skip")
+
+    def restart_debug_from(self, index: int) -> None:
+        self._send_debug_command("restart", int(index))
+
+    def update_debug_variables(self, values: dict[str, Any]) -> None:
+        with self._debug_condition:
+            if self._debug_paused_index is not None:
+                changed = [name for name, value in values.items() if self.runtime_variables.get(name) != value]
+                self.runtime_variables.update(values)
+                if changed:
+                    self.log(f"[Debug] Updated {len(changed)} variable value(s) while paused")
+                    self._record_debug_event(
+                        self._debug_paused_index, "variables_updated",
+                        f"Updated {len(changed)} editable variable value(s)",
+                    )
+
+    def _send_debug_command(self, command: str, index: int | None = None) -> None:
+        with self._debug_condition:
+            if self._debug_paused_index is None:
+                return
+            self._debug_command = (command, index)
+            self._debug_condition.notify_all()
 
     def stop_requested(self) -> bool:
         return self._stop_event.is_set()
@@ -92,6 +130,8 @@ class ReplayRunner:
         respect_enabled: bool = True,
         retry_callback: Callable[[int, int, int, str], None] | None = None,
         control_callback: Callable[[int, str], None] | None = None,
+        debug_callback: Callable[[int, str, dict[str, Any]], None] | None = None,
+        enable_debug: bool = False,
     ) -> None:
         gui = get_pyautogui()
         gui.FAILSAFE = self.project.settings.pyautogui_failsafe
@@ -135,9 +175,40 @@ class ReplayRunner:
                     action_callback(index, "skipped")
                 index += 1
                 continue
+            debug_command, restart_index = (
+                self._debug_gate(index, action, debug_callback)
+                if enable_debug else ("execute", None)
+            )
+            if debug_command == "restart":
+                debug_record = self._start_step_record(action, index)
+                debug_record["debug_events"] = self._take_debug_events(index)
+                self._finish_step_record(
+                    debug_record, "Skipped", "Debugger restarted before this step executed",
+                )
+                if action_callback:
+                    action_callback(index, "skipped")
+                if restart_index is not None and start_index <= restart_index <= end_index:
+                    self.log(f"[Debug] Restarting from Step {restart_index + 1}")
+                    self._record_debug_event(restart_index, "restart", "Restarted from selected step")
+                    loop_states.clear()
+                    self._initialize_restart_loop_states(loop_states, flow, restart_index)
+                    index = restart_index
+                continue
+            if debug_command == "skip":
+                record = self._start_step_record(action, index)
+                record["debug_events"] = self._take_debug_events(index)
+                self._finish_step_record(record, "Skipped", "Skipped while paused in debugger")
+                self.log(f"[Debug] Skipped Step {index + 1}: {action.summary()}")
+                if action_callback:
+                    action_callback(index, "skipped")
+                index += 1
+                continue
             if action_callback:
                 action_callback(index, "running")
             record = self._start_step_record(action, index)
+            debug_events = self._take_debug_events(index)
+            if debug_events:
+                record["debug_events"] = debug_events
             self._capture_step_screenshot(record, index, "before", bool(action.data.get("capture_before")))
             self.log(f"action started: {index + 1} {action.action}")
             # Click Image steps rely on continuous polling with their own search
@@ -235,6 +306,77 @@ class ReplayRunner:
             self.log(f"action completed: {index + 1} {action.action}")
             index += 1
         self.log("replay completed")
+
+    def _debug_gate(
+        self, index: int, action: RpaAction,
+        callback: Callable[[int, str, dict[str, Any]], None] | None,
+    ) -> tuple[str, int | None]:
+        reason = "step" if self._debug_pause_next else "breakpoint"
+        should_pause = self._debug_pause_next or bool(action.breakpoint)
+        if not should_pause:
+            return "execute", None
+        self._debug_pause_next = False
+        message = "Step Over pause" if reason == "step" else "Breakpoint reached"
+        self.log(f"[Debug] {message} before Step {index + 1}: {action.summary()}")
+        self._record_debug_event(index, "pause", reason)
+        with self._debug_condition:
+            self._debug_paused_index = index
+            self._debug_command = None
+        if callback:
+            callback(index, reason, dict(self.runtime_variables))
+        with self._debug_condition:
+            while self._debug_command is None and not self.stop_requested():
+                self._debug_condition.wait(timeout=0.1)
+            if self.stop_requested():
+                self._debug_paused_index = None
+                record = self._start_step_record(action, index)
+                record["debug_events"] = self._take_debug_events(index)
+                self._finish_step_record(record, "Stopped", "Stopped while paused at breakpoint")
+                self.log(f"[Debug] Stopped while paused before Step {index + 1}")
+                raise StopReplay()
+            command, target = self._debug_command
+            self._debug_command = None
+            self._debug_paused_index = None
+        if command == "resume":
+            self.log(f"[Debug] Resumed at Step {index + 1}")
+            self._record_debug_event(index, "resume", "Continued to next breakpoint")
+            return "execute", None
+        if command == "step":
+            self.log(f"[Debug] Executing Step {index + 1} and pausing at the next executable step")
+            self._record_debug_event(index, "step_over", "Execute next step")
+            self._debug_pause_next = True
+            return "execute", None
+        if command == "skip":
+            self._record_debug_event(index, "skip", "Skipped current step")
+            self._debug_pause_next = True
+            return "skip", None
+        if command == "restart":
+            self._debug_pause_next = True
+            return "restart", target
+        return "execute", None
+
+    def _record_debug_event(self, index: int, event: str, detail: str) -> None:
+        self._debug_events.setdefault(index, []).append({
+            "event": event,
+            "detail": detail,
+            "at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    def _take_debug_events(self, index: int) -> list[dict[str, Any]]:
+        return self._debug_events.pop(index, [])
+
+    def _initialize_restart_loop_states(self, loop_states: dict[int, dict[str, Any]], flow, index: int) -> None:
+        """Treat a restart inside a loop body as the loop's first active iteration."""
+        for start in flow.enclosing_loops.get(index, []):
+            action = self.project.actions[start]
+            data = resolve_placeholders_strict(action.data, self.runtime_variables)
+            state: dict[str, Any] = {"iteration": 1, "type": action.action}
+            if action.action == ActionType.REPEAT_COUNT.value:
+                state["limit"] = max(0, self._safe_int(data.get("count", 1), 1))
+            else:
+                state["limit"] = max(1, self._safe_int(data.get("max_iterations", 1000), 1000))
+                state["data"] = data
+            loop_states[start] = state
 
     def _run_control_step(
         self,

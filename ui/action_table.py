@@ -16,6 +16,8 @@ STATUS_COLORS = {
     ActionStatus.COMPLETED.value: "#16a34a",
     ActionStatus.FAILED.value: "#dc2626",
     ActionStatus.SKIPPED.value: "#ca8a04",
+    ActionStatus.STOPPED.value: "#7c3aed",
+    "paused": "#7c3aed",
 }
 
 
@@ -97,6 +99,8 @@ class ActionTable(QTableWidget):
         group = row in self._flow.group_ends
         expanded = action.id not in self._collapsed_action_ids
         step_text = f"{'▾' if expanded else '▸'} {row + 1}" if group else str(row + 1)
+        if action.breakpoint and action.action not in CONTROL_TYPES:
+            step_text = f"● {step_text}"
         indent = "    " * depth
         values = [
             step_text,
@@ -119,6 +123,9 @@ class ActionTable(QTableWidget):
             if col == 5:
                 color = STATUS_COLORS[ActionStatus.SKIPPED.value] if not action.enabled else STATUS_COLORS.get(action.status, STATUS_COLORS[ActionStatus.PENDING.value])
                 item.setForeground(QColor(color))
+            if action.breakpoint and action.action not in CONTROL_TYPES and col == 0:
+                item.setForeground(QColor("#dc2626"))
+                item.setToolTip("Breakpoint: execution pauses before this step. Press F9 to toggle.")
             if not action.enabled and col != 5:
                 item.setForeground(QColor("#94a3b8"))
             if col in (0, 5):
@@ -184,6 +191,7 @@ class ActionTable(QTableWidget):
         selected = self.selected_index() >= 0
         menu = QMenu(self)
         for key, label in [
+            ("toggle_breakpoint", "Toggle Breakpoint"),
             ("test", "Test This Step"),
             ("run_from", "Run From Here"),
             ("run_until", "Run Until Here"),
