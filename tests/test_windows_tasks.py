@@ -10,11 +10,11 @@ from rpa.models import ActionType, RpaAction, RpaProject
 from rpa.project_manager import ProjectManager
 from rpa.scheduler import (
     FlowSchedule, ScheduleStore, TASK_DISABLED, TASK_MISSING, TASK_REGISTERED,
-    TASK_REGISTRATION_FAILED,
+    TASK_REGISTRATION_FAILED, TASK_RUNNING,
 )
 from rpa.windows_tasks import (
     TaskOperationResult, WindowsTaskRegistrar, sanitize_task_component,
-    standalone_runner_command, task_name, task_xml,
+    reconcile_schedules, standalone_runner_command, task_name, task_xml,
 )
 
 
@@ -42,6 +42,8 @@ def test_multiple_schedules_persist_with_stable_ids_and_legacy_api(tmp_path: Pat
     schedules = restored.list_schedules()
     assert len(schedules) == 2
     assert restored.get("demo").schedule_id == primary.schedule_id
+    assert restored.get("demo").flow_id
+    assert restored.get("demo").flow_id == restored.get_by_id(second.schedule_id).flow_id
     assert restored.get_by_id(second.schedule_id).interval_minutes == 15
     assert project_json.exists()
 
@@ -49,14 +51,16 @@ def test_multiple_schedules_persist_with_stable_ids_and_legacy_api(tmp_path: Pat
 def test_task_name_command_and_xml_match_windows_requirements(tmp_path: Path) -> None:
     project_json = _project(tmp_path, "invoice_export")
     schedule = FlowSchedule(
-        "Invoice: Export / Daily", schedule_id="abc123", enabled=True,
+        "Invoice: Export / Daily", flow_id="flow-id-42", schedule_id="abc123", enabled=True,
         interval_minutes=5, execution_timeout_minutes=45,
         run_with_highest_privileges=True,
     )
     command = standalone_runner_command(project_json, schedule.schedule_id)
     xml = task_xml(schedule, command)
 
-    assert task_name(schedule) == "RPA Recorder\\Invoice_ Export _ Daily - abc123"
+    assert task_name(schedule) == r"\PythonRPARecorder\Flow_flow-id-42_abc123"
+    renamed = FlowSchedule("Renamed Flow", flow_id="flow-id-42", schedule_id="abc123")
+    assert task_name(renamed) == task_name(schedule)
     assert command[-5:] == ["--project", str(project_json.resolve()), "--schedule-id", "abc123", "--scheduled-run"]
     assert "<LogonType>InteractiveToken</LogonType>" in xml
     assert "<StartWhenAvailable>true</StartWhenAvailable>" in xml
@@ -86,7 +90,9 @@ def test_registrar_creates_then_disables_task_without_password(tmp_path: Path, m
     assert result.ok and result.status == TASK_DISABLED
     assert calls[0][0] == "powershell.exe"
     assert calls[1][1:3] == ["/Create", "/TN"]
-    assert calls[2][-1] == "/DISABLE"
+    assert any(call[-1] == "/DISABLE" for call in calls)
+    assert sum("/Create" in call for call in calls) == 1
+    assert any("/Delete" in call and "RPA Recorder" in " ".join(call) for call in calls)
     assert "Password" not in xml_text[0]
     assert "InteractiveToken" in xml_text[0]
 
@@ -156,6 +162,57 @@ def test_query_reports_deleted_windows_task_as_missing(tmp_path: Path, monkeypat
 
     assert result.ok
     assert result.status == TASK_MISSING
+
+
+def test_query_running_status_uses_only_explicit_state_field(monkeypatch) -> None:
+    schedule = FlowSchedule("Demo Flow", flow_id="flow1", schedule_id="state1", enabled=True)
+    import rpa.windows_tasks as task_module
+    monkeypatch.setattr(task_module.os, "name", "nt")
+    outputs = iter([
+        "Status: Ready\nStop the task if it runs longer than: 1 hour",
+        "Status: Running\nStop the task if it runs longer than: 1 hour",
+    ])
+    registrar = WindowsTaskRegistrar(command_runner=lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0, stdout=next(outputs), stderr="",
+    ), allow_elevation=False)
+    assert registrar.query(schedule).status == TASK_REGISTERED
+    assert registrar.query(schedule).status == TASK_RUNNING
+
+
+def test_startup_reconciliation_registers_enabled_and_disables_saved_task(tmp_path: Path) -> None:
+    _project(tmp_path, "enabled_flow")
+    _project(tmp_path, "disabled_flow")
+    store = ScheduleStore(tmp_path)
+    enabled = store.get("enabled_flow"); enabled.enabled = True
+    disabled = store.get("disabled_flow"); disabled.enabled = False
+    store.set(enabled); store.set(disabled); store.save()
+
+    class FakeRegistrar:
+        def __init__(self):
+            self.synced = []; self.disabled = []; self.cleaned = []
+
+        def sync(self, schedule, _project_json):
+            self.synced.append(schedule.schedule_id)
+            return TaskOperationResult(True, TASK_REGISTERED, task_name(schedule))
+
+        def query(self, schedule):
+            return TaskOperationResult(True, TASK_REGISTERED, task_name(schedule))
+
+        def disable(self, schedule):
+            self.disabled.append(schedule.schedule_id)
+            return TaskOperationResult(True, TASK_DISABLED, task_name(schedule))
+
+        def cleanup_old_task_names(self, schedule):
+            self.cleaned.append(schedule.schedule_id)
+
+    registrar = FakeRegistrar()
+    results = reconcile_schedules(store, registrar)
+    restored = ScheduleStore(tmp_path)
+    assert registrar.synced == [enabled.schedule_id]
+    assert registrar.disabled == [disabled.schedule_id]
+    assert len(results) == 2
+    assert restored.get_by_id(enabled.schedule_id).windows_task_name == task_name(enabled)
+    assert restored.get_by_id(disabled.schedule_id).task_status == TASK_DISABLED
 
 
 def test_scheduled_controller_updates_existing_history_and_evidence(tmp_path: Path, monkeypatch) -> None:
@@ -269,6 +326,8 @@ def test_schedule_dialog_syncs_add_edit_disable_delete_and_test_run(tmp_path: Pa
     )
     dialog._toggle_enabled(primary.schedule_id)
     assert primary.schedule_id in fake.synced
+    dialog._repair_task(primary.schedule_id)
+    assert fake.synced.count(primary.schedule_id) >= 2
 
     dialog._selected_flow_name = "dialog_flow"
     dialog._add_schedule()

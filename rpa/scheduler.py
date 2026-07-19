@@ -86,6 +86,7 @@ def utc_now() -> datetime:
 @dataclass
 class FlowSchedule:
     flow_name: str
+    flow_id: str = ""
     schedule_id: str = ""
     enabled: bool = False
     paused: bool = False
@@ -102,6 +103,7 @@ class FlowSchedule:
     task_error: str | None = None
     execution_timeout_minutes: int | None = None
     run_with_highest_privileges: bool = False
+    windows_task_name: str = ""
 
     @classmethod
     def from_dict(cls, flow_name: str, data: dict[str, Any]) -> "FlowSchedule":
@@ -123,6 +125,7 @@ class FlowSchedule:
             ))
         return cls(
             flow_name=flow_name,
+            flow_id=str(data.get("flow_id") or ""),
             schedule_id=str(data.get("schedule_id") or legacy_schedule_id(flow_name)),
             enabled=bool(data.get("enabled", False)),
             paused=bool(data.get("paused", False)),
@@ -139,6 +142,7 @@ class FlowSchedule:
             task_error=data.get("task_error"),
             execution_timeout_minutes=_optional_positive_int(data.get("execution_timeout_minutes")),
             run_with_highest_privileges=bool(data.get("run_with_highest_privileges", False)),
+            windows_task_name=str(data.get("windows_task_name") or ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -299,6 +303,7 @@ class ScheduleStore:
         for flow_name, data in raw.items():
             if isinstance(data, dict):
                 primary = FlowSchedule.from_dict(flow_name, data)
+                self._ensure_flow_identity(primary)
                 self._schedules[flow_name] = primary
                 if "task_status" not in data:
                     self._task_registration_migrations.add(primary.schedule_id)
@@ -306,6 +311,7 @@ class ScheduleStore:
                     if not isinstance(extra_data, dict):
                         continue
                     extra = FlowSchedule.from_dict(flow_name, extra_data)
+                    self._ensure_flow_identity(extra)
                     if extra.schedule_id and extra.schedule_id != primary.schedule_id:
                         self._additional_schedules[extra.schedule_id] = extra
                         if "task_status" not in extra_data:
@@ -345,9 +351,14 @@ class ScheduleStore:
     def get(self, flow_name: str) -> FlowSchedule:
         if flow_name in self._additional_schedules:
             return self._additional_schedules[flow_name]
-        return self._schedules.setdefault(
-            flow_name, FlowSchedule(flow_name=flow_name, schedule_id=legacy_schedule_id(flow_name)),
+        schedule = self._schedules.setdefault(
+            flow_name, FlowSchedule(
+                flow_name=flow_name, flow_id=self._flow_id(flow_name),
+                schedule_id=legacy_schedule_id(flow_name),
+            ),
         )
+        self._ensure_flow_identity(schedule)
+        return schedule
 
     def get_by_id(self, schedule_id: str) -> FlowSchedule | None:
         if schedule_id in self._additional_schedules:
@@ -376,7 +387,9 @@ class ScheduleStore:
 
     def create_schedule(self, flow_name: str) -> FlowSchedule:
         self.get(flow_name)
-        schedule = FlowSchedule(flow_name=flow_name, schedule_id=uuid4().hex[:12])
+        schedule = FlowSchedule(
+            flow_name=flow_name, flow_id=self._flow_id(flow_name), schedule_id=uuid4().hex[:12],
+        )
         self._additional_schedules[schedule.schedule_id] = schedule
         return schedule
 
@@ -388,12 +401,14 @@ class ScheduleStore:
             if schedule.schedule_id == schedule_id:
                 removed = schedule
                 self._schedules[flow_name] = FlowSchedule(
-                    flow_name=flow_name, schedule_id=legacy_schedule_id(flow_name),
+                    flow_name=flow_name, flow_id=self._flow_id(flow_name),
+                    schedule_id=legacy_schedule_id(flow_name),
                 )
                 return removed
         return None
 
     def set(self, schedule: FlowSchedule) -> None:
+        self._ensure_flow_identity(schedule)
         primary = self._schedules.get(schedule.flow_name)
         if primary is None or primary.schedule_id == schedule.schedule_id:
             self._schedules[schedule.flow_name] = schedule
@@ -412,3 +427,18 @@ class ScheduleStore:
     def due_flows(self, now: datetime | None = None) -> list[FlowSchedule]:
         now = now or utc_now()
         return [schedule for schedule in self.list_schedules() if is_due(schedule, now)]
+
+    def _ensure_flow_identity(self, schedule: FlowSchedule) -> None:
+        if not schedule.flow_id:
+            schedule.flow_id = self._flow_id(schedule.flow_name)
+
+    def _flow_id(self, flow_name: str) -> str:
+        project_json = self.flows_root / flow_name / "project.json"
+        try:
+            raw = json.loads(project_json.read_text(encoding="utf-8"))
+            value = str((raw.get("project") or {}).get("id") or "").strip()
+            if value:
+                return value
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+        return uuid5(NAMESPACE_URL, f"python-rpa-recorder-flow:{flow_name}").hex

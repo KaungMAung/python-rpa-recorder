@@ -267,7 +267,8 @@ class ScheduleFlowsDialog(QDialog):
         grid.setVerticalSpacing(9)
         self.detail_values: dict[str, QLabel] = {}
         fields = [
-            ("Schedule ID", "schedule_id"), ("Windows task", "task_status"),
+            ("Schedule ID", "schedule_id"), ("Task name", "task_name"),
+            ("Registration", "task_status"), ("Task error", "task_error"),
             ("Last run", "last_run"), ("Duration", "duration"), ("Result", "result"),
             ("Next run", "next_run"), ("Error", "error"),
         ]
@@ -383,11 +384,16 @@ class ScheduleFlowsDialog(QDialog):
         self.test_run_btn = QPushButton("Test Run (Windows Task Command)")
         self.test_run_btn.setEnabled(False)
         self.test_run_btn.clicked.connect(self._test_selected)
+        self.repair_task_btn = QPushButton("Repair / Register Task")
+        self.repair_task_btn.setEnabled(False)
+        self.repair_task_btn.setToolTip("Create or update this schedule's Windows Task Scheduler task")
+        self.repair_task_btn.clicked.connect(self._repair_selected_task)
         self.delete_schedule_btn = QPushButton("Delete Schedule")
         self.delete_schedule_btn.setEnabled(False)
         self.delete_schedule_btn.clicked.connect(self._delete_selected)
         layout.addWidget(self.detail_run_btn)
         layout.addWidget(self.test_run_btn)
+        layout.addWidget(self.repair_task_btn)
         layout.addWidget(self.detail_pause_btn)
         layout.addWidget(self.detail_enabled_btn)
         layout.addWidget(self.delete_schedule_btn)
@@ -484,12 +490,14 @@ class ScheduleFlowsDialog(QDialog):
         if self.task_registrar is not None:
             changed = False
             for schedule in schedules:
-                before = (schedule.task_status, schedule.task_error)
+                before = (schedule.task_status, schedule.task_error, schedule.windows_task_name)
                 if self.store.needs_task_registration_migration(schedule.schedule_id):
                     self._sync_task(schedule)
                 else:
                     self._query_task_status(schedule)
-                changed = changed or before != (schedule.task_status, schedule.task_error)
+                changed = changed or before != (
+                    schedule.task_status, schedule.task_error, schedule.windows_task_name,
+                )
                 self.store.set(schedule)
             if changed:
                 self.store.save()
@@ -565,7 +573,9 @@ class ScheduleFlowsDialog(QDialog):
         next_item.setToolTip(self._exact_time(schedule.next_run_at))
         self.table.setItem(row, COLUMN_NEXT_RUN, next_item)
         task_item = self._badge_item(schedule.task_status, schedule.task_status)
-        task_item.setToolTip(schedule.task_error or schedule.task_status)
+        task_item.setToolTip("\n".join(filter(None, (
+            schedule.windows_task_name, schedule.task_error or schedule.task_status,
+        ))))
         self.table.setItem(row, COLUMN_TASK, task_item)
         self.table.setCellWidget(row, COLUMN_ACTIONS, self._build_actions_cell(schedule))
 
@@ -578,6 +588,7 @@ class ScheduleFlowsDialog(QDialog):
         menu = QMenu(button)
         menu.addAction("Run Now", lambda identifier=schedule.schedule_id: self._run_schedule_now(identifier))
         menu.addAction("Test Run", lambda identifier=schedule.schedule_id: self._test_schedule(identifier))
+        menu.addAction("Repair / Register Task", lambda identifier=schedule.schedule_id: self._repair_task(identifier))
         pause_action = menu.addAction("Resume" if schedule.paused else "Pause", lambda identifier=schedule.schedule_id: self._toggle_pause(identifier))
         pause_action.setEnabled(schedule.enabled)
         menu.addAction("Enable" if not schedule.enabled else "Disable", lambda identifier=schedule.schedule_id: self._toggle_enabled(identifier))
@@ -682,6 +693,7 @@ class ScheduleFlowsDialog(QDialog):
         self.detail_interval.setEnabled(enabled)
         self.detail_run_btn.setEnabled(enabled)
         self.test_run_btn.setEnabled(enabled and self.task_registrar is not None)
+        self.repair_task_btn.setEnabled(enabled and self.task_registrar is not None)
         self.delete_schedule_btn.setEnabled(enabled)
         self.detail_enabled_btn.setEnabled(enabled)
         self.runtime_inputs_btn.setEnabled(enabled)
@@ -698,8 +710,10 @@ class ScheduleFlowsDialog(QDialog):
             state = self._state_text(schedule)
             self.detail_name.setText(schedule.flow_name)
             self.detail_values["schedule_id"].setText(schedule.schedule_id)
+            self.detail_values["task_name"].setText(schedule.windows_task_name or "Not registered")
             self.detail_values["task_status"].setText(schedule.task_status)
             self.detail_values["task_status"].setToolTip(schedule.task_error or schedule.task_status)
+            self.detail_values["task_error"].setText(schedule.task_error or "None")
             self._style_label_badge(self.detail_state, state)
             self.detail_values["last_run"].setText(self._detail_time(schedule.last_run_at))
             self.detail_values["duration"].setText(self._format_duration(schedule.last_duration_seconds))
@@ -851,9 +865,29 @@ class ScheduleFlowsDialog(QDialog):
         if self._detail_schedule is not None:
             self._test_schedule(self._detail_schedule.schedule_id)
 
+    def _repair_selected_task(self) -> None:
+        if self._detail_schedule is not None:
+            self._repair_task(self._detail_schedule.schedule_id)
+
     def _delete_selected(self) -> None:
         if self._detail_schedule is not None:
             self._delete_schedule(self._detail_schedule.schedule_id)
+
+    def _repair_task(self, identifier: str) -> None:
+        schedule = self._resolve_schedule(identifier)
+        if schedule is None or self.task_registrar is None:
+            return
+        if self._sync_task(schedule):
+            QMessageBox.information(
+                self, "Windows Task Registered",
+                f"Task Scheduler is synchronized with this schedule.\n\n{schedule.windows_task_name}",
+            )
+        else:
+            QMessageBox.warning(
+                self, "Task Registration Failed",
+                schedule.task_error or "Windows rejected task registration.",
+            )
+        self.reload()
 
     # -- actions ---------------------------------------------------------
 
@@ -873,6 +907,7 @@ class ScheduleFlowsDialog(QDialog):
         self.store.mark_task_registration_attempted(schedule.schedule_id)
         schedule.task_status = result.status
         schedule.task_error = result.error
+        schedule.windows_task_name = result.task_name
         self.store.set(schedule)
         self.store.save()
         if result.ok:
@@ -891,6 +926,7 @@ class ScheduleFlowsDialog(QDialog):
         result = self.task_registrar.query(schedule)
         schedule.task_status = result.status
         schedule.task_error = result.error
+        schedule.windows_task_name = result.task_name
 
     def _add_schedule(self) -> None:
         flow_name = self._selected_flow_name

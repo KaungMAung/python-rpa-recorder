@@ -12,13 +12,15 @@ from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
 from typing import Callable
+from uuid import NAMESPACE_URL, uuid5
 
 from .scheduler import (
-    FlowSchedule, TASK_DISABLED, TASK_MISSING, TASK_REGISTERED,
+    FlowSchedule, ScheduleStore, TASK_DISABLED, TASK_MISSING, TASK_REGISTERED,
     TASK_REGISTRATION_FAILED, TASK_RUNNING,
 )
 
-TASK_FOLDER = "RPA Recorder"
+TASK_FOLDER = r"\PythonRPARecorder"
+LEGACY_TASK_FOLDER = r"\RPA Recorder"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -29,6 +31,7 @@ class TaskOperationResult:
     task_name: str
     error: str | None = None
     command: list[str] | None = None
+    elevated: bool = False
 
 
 def sanitize_task_component(value: str) -> str:
@@ -38,7 +41,15 @@ def sanitize_task_component(value: str) -> str:
 
 
 def task_name(schedule: FlowSchedule) -> str:
-    return f"{TASK_FOLDER}\\{sanitize_task_component(schedule.flow_name)} - {schedule.schedule_id}"
+    flow_identity = schedule.flow_id or uuid5(
+        NAMESPACE_URL, f"python-rpa-recorder-flow:{schedule.flow_name}",
+    ).hex
+    flow_id = sanitize_task_component(flow_identity)
+    return f"{TASK_FOLDER}\\Flow_{flow_id}_{sanitize_task_component(schedule.schedule_id)}"
+
+
+def legacy_task_name(schedule: FlowSchedule) -> str:
+    return f"{LEGACY_TASK_FOLDER}\\{sanitize_task_component(schedule.flow_name)} - {schedule.schedule_id}"
 
 
 def standalone_runner_command(project_json: Path, schedule_id: str) -> list[str]:
@@ -67,6 +78,13 @@ class WindowsTaskRegistrar:
         result = self._register(schedule, project_json)
         if not result.ok:
             return result
+        if result.elevated:
+            return result
+        cleanup_error = self.cleanup_old_task_names(schedule)
+        if cleanup_error:
+            if self.allow_elevation and _needs_elevation(cleanup_error):
+                return self._run_elevated_helper("sync", schedule, project_json)
+            return self._failed(schedule, f"The new task was registered, but an obsolete duplicate could not be removed: {cleanup_error}")
         if not schedule.enabled or schedule.paused:
             return self.disable(schedule)
         return result
@@ -78,6 +96,13 @@ class WindowsTaskRegistrar:
         if not result.ok and self.allow_elevation and _needs_elevation(result.error):
             # The helper needs only the task definition and a syntactically valid project path field.
             result = self._run_elevated_helper("delete", schedule, Path.cwd() / "project.json")
+            result.elevated = True
+        if result.ok:
+            cleanup_error = self.cleanup_old_task_names(schedule)
+            if cleanup_error:
+                if self.allow_elevation and _needs_elevation(cleanup_error):
+                    return self._run_elevated_helper("delete", schedule, Path.cwd() / "project.json")
+                return self._failed(schedule, f"An obsolete task could not be removed: {cleanup_error}")
         return result
 
     def enable(self, schedule: FlowSchedule) -> TaskOperationResult:
@@ -99,15 +124,35 @@ class WindowsTaskRegistrar:
         )
         if not result.ok or result.status == TASK_MISSING:
             return result
-        output = (result.error or "").casefold()
-        if "running" in output:
+        output = result.error or ""
+        if _task_is_running(output):
             result.status = TASK_RUNNING
-        elif not schedule.enabled or schedule.paused:
+        elif _task_is_disabled(output):
             result.status = TASK_DISABLED
         else:
             result.status = TASK_REGISTERED
         result.error = None
         return result
+
+    def cleanup_old_task_names(self, schedule: FlowSchedule) -> str | None:
+        if os.name != "nt":
+            return None
+        candidates = {legacy_task_name(schedule)}
+        if schedule.windows_task_name:
+            candidates.add(schedule.windows_task_name)
+        candidates.discard(task_name(schedule))
+        errors = []
+        for old_name in candidates:
+            try:
+                completed = self._run_task_command(
+                    ["/Delete", "/TN", old_name, "/F"], missing_ok=True,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                errors.append(str(exc))
+                continue
+            if completed.returncode != 0:
+                errors.append((completed.stderr or completed.stdout or f"exit code {completed.returncode}").strip())
+        return "; ".join(errors) or None
 
     def test_run(self, schedule: FlowSchedule, project_json: Path) -> TaskOperationResult:
         invalid = self._validate(schedule, project_json)
@@ -128,7 +173,9 @@ class WindowsTaskRegistrar:
         folder_result = self._ensure_task_folder(schedule, command)
         if not folder_result.ok:
             if self.allow_elevation and _needs_elevation(folder_result.error):
-                return self._run_elevated_helper("sync", schedule, project_json)
+                elevated = self._run_elevated_helper("sync", schedule, project_json)
+                elevated.elevated = True
+                return elevated
             return folder_result
         xml = task_xml(schedule, command)
         temp_path = None
@@ -142,6 +189,7 @@ class WindowsTaskRegistrar:
             )
             if not result.ok and self.allow_elevation and _needs_elevation(result.error):
                 result = self._run_elevated_helper("sync", schedule, project_json)
+                result.elevated = True
             return result
         finally:
             if temp_path is not None:
@@ -158,8 +206,8 @@ class WindowsTaskRegistrar:
         script = (
             "$service=New-Object -ComObject 'Schedule.Service';$service.Connect();"
             "$root=$service.GetFolder('\\');"
-            "try{$null=$root.GetFolder('\\RPA Recorder')}"
-            "catch{$null=$root.CreateFolder('RPA Recorder')}"
+            "try{$null=$root.GetFolder('\\PythonRPARecorder')}"
+            "catch{$null=$root.CreateFolder('PythonRPARecorder')}"
         )
         try:
             completed = self._run(
@@ -180,10 +228,7 @@ class WindowsTaskRegistrar:
         if os.name != "nt":
             return self._failed(schedule, "Windows Task Scheduler is available only on Windows.", command)
         try:
-            completed = self._run(
-                ["schtasks.exe", *arguments], capture_output=True, text=True,
-                creationflags=CREATE_NO_WINDOW, timeout=30,
-            )
+            completed = self._run_task_command(arguments)
         except (OSError, subprocess.SubprocessError) as exc:
             return self._failed(schedule, f"Task Scheduler command failed: {exc}", command)
         output = "\n".join(value.strip() for value in (completed.stdout, completed.stderr) if value and value.strip())
@@ -194,6 +239,21 @@ class WindowsTaskRegistrar:
         return self._failed(
             schedule, output or f"Task Scheduler returned exit code {completed.returncode}.", command,
         )
+
+    def _run_task_command(
+        self, arguments: list[str], missing_ok: bool = False,
+    ) -> subprocess.CompletedProcess:
+        completed = self._run(
+            ["schtasks.exe", *arguments], capture_output=True, text=True,
+            creationflags=CREATE_NO_WINDOW, timeout=30,
+        )
+        if missing_ok:
+            output = "\n".join(
+                value.strip() for value in (completed.stdout, completed.stderr) if value and value.strip()
+            )
+            if completed.returncode != 0 and _is_missing(output):
+                return subprocess.CompletedProcess(completed.args, 0, completed.stdout, completed.stderr)
+        return completed
 
     def _run_elevated_helper(
         self, operation: str, schedule: FlowSchedule, project_json: Path,
@@ -320,6 +380,51 @@ def run_task_helper(request_path: Path, result_path: Path) -> int:
         return 1
 
 
+def reconcile_schedules(
+    store: ScheduleStore, registrar: WindowsTaskRegistrar,
+) -> list[TaskOperationResult]:
+    """Make saved schedules and Windows tasks agree without duplicate GUI polling."""
+    store.load()
+    store.remove_missing_flows()
+    results: list[TaskOperationResult] = []
+    updates: list[tuple[str, str, str, str | None, str]] = []
+    for schedule in store.list_schedules():
+        project_json = (store.flows_root / schedule.flow_name / "project.json").resolve()
+        if schedule.enabled:
+            # /Create /F makes this idempotent and also applies interval/runner changes.
+            result = registrar.sync(schedule, project_json)
+        else:
+            result = registrar.query(schedule)
+            if result.ok and result.status not in {TASK_MISSING, TASK_DISABLED}:
+                result = registrar.disable(schedule)
+            registrar.cleanup_old_task_names(schedule)
+        schedule.task_status = result.status
+        schedule.task_error = result.error
+        schedule.windows_task_name = result.task_name
+        store.mark_task_registration_attempted(schedule.schedule_id)
+        store.set(schedule)
+        updates.append((
+            schedule.schedule_id, schedule.flow_id, result.status, result.error, result.task_name,
+        ))
+        results.append(result)
+    # Task registration can wait for UAC. Merge only task metadata into the
+    # latest file so a scheduled run finishing concurrently cannot lose history.
+    latest = ScheduleStore(store.flows_root, history_limit=store.history_limit)
+    for schedule_id, flow_id, status, error, registered_name in updates:
+        current = latest.get_by_id(schedule_id)
+        if current is None:
+            continue
+        current.flow_id = flow_id
+        current.task_status = status
+        current.task_error = error
+        current.windows_task_name = registered_name
+        latest.mark_task_registration_attempted(schedule_id)
+        latest.set(current)
+    latest.save()
+    store.load()
+    return results
+
+
 def _start_boundary(schedule: FlowSchedule) -> str:
     try:
         value = datetime.fromisoformat(schedule.next_run_at) if schedule.next_run_at else None
@@ -344,6 +449,26 @@ def _needs_elevation(error: str | None) -> bool:
 def _is_missing(error: str | None) -> bool:
     value = str(error or "").casefold()
     return any(token in value for token in ("cannot find", "does not exist", "not found"))
+
+
+def _task_is_running(output: str) -> bool:
+    """Match only an explicit task-state field, never descriptive settings text."""
+    for line in str(output).splitlines():
+        key, separator, value = line.partition(":")
+        if not separator:
+            continue
+        normalized_key = key.strip().casefold()
+        if normalized_key in {"status", "scheduled task state"}:
+            return value.strip().casefold() == "running"
+    return False
+
+
+def _task_is_disabled(output: str) -> bool:
+    for line in str(output).splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip().casefold() in {"status", "scheduled task state"}:
+            return value.strip().casefold() == "disabled"
+    return False
 
 
 def _ps(value: str) -> str:

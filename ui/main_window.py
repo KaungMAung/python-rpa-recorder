@@ -11,6 +11,7 @@ import time
 import sys
 import shiboken6
 import weakref
+import threading
 from uuid import uuid4
 
 from PySide6.QtCore import QItemSelectionModel, QObject, QPoint, QRect, QSettings, QThread, QTimer, Qt, QUrl, Signal, Slot
@@ -75,7 +76,7 @@ from rpa.variables import (
 )
 from rpa.utils import foreground_elevation_mismatch
 from rpa.windowing import NativeWindowBackend
-from rpa.windows_tasks import WindowsTaskRegistrar
+from rpa.windows_tasks import WindowsTaskRegistrar, reconcile_schedules
 from rpa.step_editing import (
     clipboard_payload, complete_contiguous_selection, delete_steps, jump_targets,
     paste_payload, reorder_steps, restore_jump_targets, validate_structure,
@@ -265,6 +266,7 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             schedule_history_limit = 100
         self.schedule_store = ScheduleStore(flows_root(), history_limit=schedule_history_limit)
+        self.windows_task_registrar = WindowsTaskRegistrar() if sys.platform == "win32" else None
         self._scheduled_runs: dict[str, tuple[QThread, ReplayWorker]] = {}
         self._schedule_queue: list[str] = []
         self.schedule_timer = QTimer(self)
@@ -1053,11 +1055,37 @@ class MainWindow(QMainWindow):
     def schedule_flows_dialog(self) -> None:
         dialog = ScheduleFlowsDialog(
             self.schedule_store, self.settings, self,
-            task_registrar=WindowsTaskRegistrar(),
+            task_registrar=self.windows_task_registrar,
         )
         dialog.run_now_requested.connect(lambda name: self._run_flow_now(name))
         dialog.task_log.connect(self.log)
         dialog.exec()
+
+    def start_scheduler_reconciliation(self) -> None:
+        """Reconcile Windows tasks after the main window is visible, without blocking Qt."""
+        if self.windows_task_registrar is None:
+            return
+        thread = threading.Thread(
+            target=self._reconcile_schedule_tasks, name="scheduler-reconciliation", daemon=True,
+        )
+        thread.start()
+
+    def _reconcile_schedule_tasks(self) -> None:
+        if self.windows_task_registrar is None:
+            return
+        try:
+            store = ScheduleStore(flows_root(), history_limit=self.schedule_store.history_limit)
+            results = reconcile_schedules(store, self.windows_task_registrar)
+        except Exception as exc:
+            self.log_recorded.emit(f"[Scheduler] Startup reconciliation failed: {exc}")
+            return
+        for result in results:
+            if result.ok:
+                self.log_recorded.emit(f"[Scheduler] {result.status}: {result.task_name}")
+            else:
+                self.log_recorded.emit(
+                    f"[Scheduler] Registration failed for {result.task_name}: {result.error}"
+                )
 
     def _check_schedules(self) -> None:
         self.schedule_store.load()

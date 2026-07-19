@@ -42,6 +42,7 @@ def main() -> int:
 
     window = MainWindow()
     window.show()
+    window.start_scheduler_reconciliation()
     return app.exec()
 
 

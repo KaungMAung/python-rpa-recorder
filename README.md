@@ -59,7 +59,7 @@ Right-click a step to test only that step, run from it, run until it, enable or 
 
 ## Scheduling Flows
 
-On Windows, every saved schedule is registered as its own Windows Task Scheduler task, so the recorder does not need to remain open. A flow may have several schedules; use **Add Schedule** to create another interval for the selected flow. Existing one-schedule-per-flow data remains compatible and receives a stable schedule ID automatically.
+On Windows, every enabled schedule is registered as its own Windows Task Scheduler task under `\PythonRPARecorder\`, so the recorder does not need to remain open. Task names use the saved project flow ID plus schedule ID (`Flow_<flow-id>_<schedule-id>`), so flow renames cannot create duplicates. A flow may have several schedules; use **Add Schedule** to create another interval for the selected flow. Existing one-schedule-per-flow data remains compatible and receives stable flow/schedule identities automatically.
 
 Open `Schedule Flows` (Execution toolbar group or menu, `⏱`) to see every saved flow and manage its automatic schedule. The header summarizes enabled, paused, disabled, and currently running flows. Search by flow name or filter by schedule/run status; a clear empty state explains when nothing matches.
 
@@ -78,12 +78,13 @@ Select a row to open its Details panel. The panel shows the latest run, duration
 
 - **Run Now** - starts the standalone runner immediately without affecting its schedule or next run time.
 - **Test Run** - launches the exact command stored in the Windows task, including the project path and schedule ID.
+- **Repair / Register Task** - recreates or updates a missing/broken task and shows the exact registration error if Windows rejects it.
 - **Pause / Resume** - temporarily stops automatic runs while keeping the interval configuration intact. No confirmation needed.
 - **Enable / Disable** - fully turns the schedule on or off. Disabling asks for confirmation first.
 - **Details** - selects the row and opens full run information in the side panel (failure details also remain available on the Last status tooltip).
 - **Delete Schedule** - removes that schedule and its corresponding Windows task. Other schedules for the same flow are unaffected.
 
-The header shows the auto-refresh state and refreshes every 5 seconds so `Running` status and countdowns stay current; use **Refresh** or `F5` for an immediate update. Click `Flow`, `Last run`, `Next run`, or `Last status` headers to sort (click again to reverse); column widths and the chosen sort order are remembered between openings. Row selection and all controls support keyboard navigation.
+The header shows the auto-refresh state and refreshes every 5 seconds so task state and countdowns stay current; use **Refresh** or `F5` for an immediate update. `Running` is shown only when Task Scheduler's explicit state field says the task is running; descriptive settings containing the word "running" are ignored. Click `Flow`, `Last run`, `Next run`, or `Last status` headers to sort (click again to reverse); column widths and the chosen sort order are remembered between openings. Row selection and all controls support keyboard navigation.
 
 Each Windows task runs only while the Windows user is logged on, starts as soon as practical after a missed start, and uses the Task Scheduler **IgnoreNew** policy so a second instance of the same schedule cannot overlap its active run. In Details, optionally set an execution timeout or enable **Run with highest privileges**. The recorder never stores a Windows password. If registration needs elevation, only the small task-registration helper requests UAC approval; the main application is not relaunched as administrator.
 
@@ -97,7 +98,7 @@ When running from source, the equivalent command uses the current Python interpr
 
 Scheduled runs use the same validation, evidence, history, runtime-input, retry, and desktop preparation behavior as manual Run. Windows deterministically minimizes normal top-level windows before execution (it does not use the toggling Win+D shortcut), the safely positioned floating **Stop Run** control remains available, and a recorder window that was visible before preparation is restored after success, failure, timeout, or stop. Other minimized applications remain minimized. Results are written directly to the existing run-history storage, so they appear when Schedule Flows is opened after the recorder has been closed. Desktop preparation and recorder restoration counts are written to the run evidence log for troubleshooting.
 
-Schedules and run history are stored permanently in `flows/schedules.json` and persist across app restarts. Additional schedules are stored alongside the compatible primary flow schedule. History includes start/end time, duration, total step attempts, final status, failed/stopped step, and error. It keeps the latest 100 records per schedule by default; adjust the retention control in the Details panel from 10 to 1,000 records. Existing schedule files are migrated automatically from their previous latest-run fields.
+Schedules and run history are stored permanently in `flows/schedules.json` and persist across app restarts. The Windows task name, flow ID, registration status, and registration error are stored with each schedule. At startup, enabled schedules are reconciled idempotently using Task Scheduler's update (`/F`) behavior; disabled schedules have existing tasks disabled, obsolete legacy task names are removed, and missing tasks remain clearly reported. Windows uses Task Scheduler as the authoritative automatic runner, so the in-app polling scheduler is not also active and cannot produce duplicate runs. The internal polling scheduler remains the non-Windows fallback. Additional schedules are stored alongside the compatible primary flow schedule. History includes start/end time, duration, total step attempts, final status, failed/stopped step, and error. It keeps the latest 100 records per schedule by default; adjust the retention control in the Details panel from 10 to 1,000 records. Existing schedule files are migrated automatically from their previous latest-run fields.
 
 ## Step Details
 
@@ -373,7 +374,7 @@ Run these checks on the same Windows account and display configuration that will
 ### Windows Task Scheduler
 
 1. Save a small flow, open **Schedule Flows**, select it, and enable its schedule at the 5-minute interval.
-2. Confirm the Windows task status becomes **Registered**. In Task Scheduler, verify the task is named `RPA Recorder\<flow name> - <schedule id>`, uses **Run only when user is logged on**, **Start the task as soon as possible after a scheduled start is missed**, and **Do not start a new instance**.
+2. Confirm the Windows task status becomes **Registered**. In Task Scheduler, open `\PythonRPARecorder\` and verify the task is named `Flow_<flow-id>_<schedule-id>`, uses **Run only when user is logged on**, **Start the task as soon as possible after a scheduled start is missed**, and **Do not start a new instance**.
 3. Click **Add Schedule**, choose a different interval, and enable it. Confirm a second task with a different schedule ID exists for the same flow.
 4. Close Python RPA Recorder and click **Test Run** before closing, or choose **Run** in Windows Task Scheduler. Confirm the standalone floating Stop Run window appears, the desktop is prepared, and the flow executes without the main app staying open.
 5. Reopen the recorder and Schedule Flows. Confirm the run appears in that schedule's history and Run Details opens its evidence.
@@ -420,7 +421,7 @@ Run these checks on the same Windows account and display configuration that will
 - If click replay misses, lower confidence or enable coordinate fallback.
 - If PyAutoGUI aborts, move the mouse away from the screen corner or disable failsafe in settings.
 - If generated scripts fail to locate images, confirm screenshots still exist in the project `screenshots/` folder.
-- If a schedule shows **Task missing**, select it and save or toggle its enabled state to register it again. Also confirm the flow's `project.json` still exists at the saved location.
+- If a schedule shows **Task missing**, use **Repair / Register Task**. Also confirm the flow's `project.json` still exists at the saved location.
 - If a schedule shows **Registration failed**, hover the status or check Logs/Status for the Task Scheduler error. A cancelled UAC prompt, Windows policy, invalid project path, or insufficient task-folder permission is reported without storing credentials.
 - If a Test Run fails to launch, verify that the installed executable still exists. Source runs require the same Python environment and `app.py` path used when the task was registered; edit or re-save the schedule after moving the application.
 - If **Run Until Breakpoint** reports that none exists, select an enabled executable row and press F9; structural If/Else/End/Repeat markers cannot hold breakpoints.
