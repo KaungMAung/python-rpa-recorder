@@ -62,6 +62,7 @@ class ActionType(str, Enum):
     COMMENT = "comment"
     GROUP_START = "group_start"
     GROUP_END = "group_end"
+    RUN_SUBFLOW = "run_subflow"
 
 
 class ActionStatus(str, Enum):
@@ -221,6 +222,8 @@ class RpaAction:
             return str(data.get("name") or "Step group")
         if self.action == ActionType.GROUP_END.value:
             return "End group"
+        if self.action == ActionType.RUN_SUBFLOW.value:
+            return f"Run subflow: {data.get('flow_name') or data.get('project') or 'choose a flow'}"
         return self.action
 
     def friendly_name(self) -> str:
@@ -353,6 +356,7 @@ FRIENDLY_ACTION_NAMES = {
     ActionType.COMMENT.value: "Comment / Note",
     ActionType.GROUP_START.value: "Group",
     ActionType.GROUP_END.value: "End Group",
+    ActionType.RUN_SUBFLOW.value: "Run Subflow",
 }
 
 

@@ -227,7 +227,12 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
     ]
     lines.insert(11, "import re")
     helper_insert = lines.index("def main():")
-    lines[helper_insert:helper_insert] = _generated_window_helpers()
+    subflow_helpers = (
+        _generated_subflow_helpers()
+        if any(action.action == ActionType.RUN_SUBFLOW.value for action in project.actions)
+        else []
+    )
+    lines[helper_insert:helper_insert] = _generated_window_helpers() + subflow_helpers
     if function_lines:
         insert_at = lines.index("def main():")
         lines[insert_at:insert_at] = function_lines
@@ -398,6 +403,12 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
             lines.append(f"    time.sleep(as_float({data.get('wait_after', 1.0)!r}))")
             if str(data.get("output_variable", "")).strip():
                 lines.append(f"    RUNTIME_VARIABLES[{str(data.get('output_variable')).strip()!r}] = opened_path")
+        elif action.action == ActionType.RUN_SUBFLOW.value:
+            lines.append(
+                "    run_subflow("
+                f"{data.get('project', '')!r}, {data.get('input_mappings', {})!r}, "
+                f"{data.get('output_mappings', {})!r})"
+            )
         elif action.action == ActionType.CLICK_COORDINATE.value:
             lines.append("    time.sleep(PRE_CLICK_PAUSE)")
             lines.append(f"    click_x, click_y = as_int({data.get('x', 0)!r}), as_int({data.get('y', 0)!r})")
@@ -502,6 +513,38 @@ def _condition_expression(action_type: str, data: dict, project: RpaProject) -> 
             f"{data.get('value', '')!r}, {bool(data.get('case_sensitive', False))!r})"
         )
     raise ValueError(f"Unsupported generated condition: {action_type}")
+
+
+def _generated_subflow_helpers() -> list[str]:
+    source = r'''
+def run_subflow(reference, input_mappings, output_mappings):
+    from rpa.project_manager import ProjectManager
+    from rpa.runner import ReplayRunner
+    from rpa.variables import prepare_runtime_variables
+    target = (PROJECT_DIR / str(resolve(reference))).resolve()
+    if not target.is_file():
+        raise RuntimeError(f'Subflow project is missing: {reference}')
+    child = ProjectManager().load(target)
+    supplied = {
+        child_name: RUNTIME_VARIABLES[parent_name]
+        for child_name, parent_name in dict(input_mappings or {}).items()
+        if parent_name in RUNTIME_VARIABLES
+    }
+    values, input_errors = prepare_runtime_variables(child, supplied)
+    if input_errors:
+        raise ValueError(input_errors[0])
+    runner = ReplayRunner(child, target.parent, lambda message: print(f'[Subflow {child.project.name}] {message}'))
+    runner.subflow_stack = [(PROJECT_DIR / 'project.json').resolve(), target]
+    runner.runtime_variables = values
+    runner.run(include_start_delay=False)
+    failed = next((item for item in runner.step_results if item.get('status') == 'Failed'), None)
+    if failed:
+        raise RuntimeError(str(failed.get('error') or 'subflow failed'))
+    for child_name, parent_name in dict(output_mappings or {}).items():
+        if child_name in runner.runtime_variables:
+            RUNTIME_VARIABLES[parent_name] = runner.runtime_variables[child_name]
+'''
+    return textwrap.dedent(source).strip().splitlines() + [""]
 
 
 def _generated_window_helpers() -> list[str]:

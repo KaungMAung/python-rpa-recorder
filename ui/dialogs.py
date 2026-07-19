@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import QSettings, Signal
 from PySide6.QtWidgets import (
     QComboBox,
@@ -29,6 +31,7 @@ from rpa.models import ActionType, ProjectSettings, RpaAction, RpaProject, Runti
 from rpa.variables import INPUT_TYPES, VARIABLE_NAME_PATTERN, validate_variable_configuration
 from ui.condition_editor import ConditionEditor
 from ui.window_target_editor import WindowTargetEditor
+from ui.subflow_editor import SubflowEditor
 import shiboken6
 
 
@@ -65,11 +68,15 @@ class ManualActionDialog(QDialog):
     screen_pick_requested = Signal(str)
     diagnostic = Signal(str)
 
-    def __init__(self, settings: ProjectSettings, variables: dict[str, str], parent=None) -> None:
+    def __init__(
+        self, settings: ProjectSettings, variables: dict[str, str], parent=None,
+        project_dir: Path | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Add Step")
         self.settings = settings
         self.variables = variables
+        self.project_dir = Path(project_dir) if project_dir else None
         self.picked: dict[str, tuple[int, int]] = {}
         self._picker_active = False
         self._picker_snapshot: dict = {}
@@ -89,6 +96,7 @@ class ManualActionDialog(QDialog):
             ("Open File", ActionType.OPEN_FILE.value),
             ("Run Python", ActionType.RUN_PYTHON.value),
             ("Python Code", ActionType.PYTHON_CODE.value),
+            ("Run Subflow", ActionType.RUN_SUBFLOW.value),
             ("If Image Exists", ActionType.IF_IMAGE_EXISTS.value),
             ("If Image Does Not Exist", ActionType.IF_IMAGE_NOT_EXISTS.value),
             ("If Window Exists", ActionType.IF_WINDOW_EXISTS.value),
@@ -161,6 +169,7 @@ class ManualActionDialog(QDialog):
             "direction", "amount", "text", "wait_ms", "path", "key", "keys", "condition_editor",
             "repeat_count", "max_iterations", "iteration_delay", "window_editor", "relative_x", "relative_y",
             "scale_window", "absolute_fallback", "window_button", "window_move_duration",
+            "subflow_editor",
         ):
             if hasattr(self, name):
                 delattr(self, name)
@@ -304,6 +313,12 @@ class ManualActionDialog(QDialog):
                     self.window_move_duration = QDoubleSpinBox(); self.window_move_duration.setRange(0, 60)
                     self.window_move_duration.setDecimals(2); self.window_move_duration.setValue(0.2); self.window_move_duration.setSuffix(" s")
                     self.form.addRow("Move duration", self.window_move_duration)
+        elif kind == ActionType.RUN_SUBFLOW.value:
+            self.subflow_editor = SubflowEditor(
+                self.project_dir, list(self.variables), parent=self,
+            )
+            self.subflow_editor.changed.connect(self._update_summary)
+            self.form.addRow("Saved flow", self.subflow_editor)
         else:
             self.form.addRow(QLabel("This advanced step can be edited after insertion."))
         self._update_summary()
@@ -414,6 +429,8 @@ class ManualActionDialog(QDialog):
             required_key = {"variable": "variable", "window_exists": "window_title", "path_exists": "path"}.get(condition_type, "image")
             if not str(data.get(required_key, "")).strip():
                 return "Complete the Repeat Until condition."
+        if action.action == ActionType.RUN_SUBFLOW.value and not str(data.get("project", "")).strip():
+            return "Choose the saved flow to run."
         if action.action in WINDOW_ACTIONS:
             window = data.get("window", {})
             has_target = any(str(window.get(key, "")).strip() for key in ("process_name", "window_title", "class_name"))
@@ -505,6 +522,8 @@ class ManualActionDialog(QDialog):
                 else:
                     data["duration"] = self.window_move_duration.value()
             return RpaAction(kind, data)
+        if kind == ActionType.RUN_SUBFLOW.value:
+            return RpaAction(kind, self.subflow_editor.data())
         defaults = {
             ActionType.WAIT.value: {"seconds": 1.0},
             ActionType.TYPE_TEXT.value: {"text": "", "interval": 0.02, "clear_first": False, "masked": False},

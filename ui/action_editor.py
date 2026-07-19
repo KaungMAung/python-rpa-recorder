@@ -29,6 +29,7 @@ from rpa.models import ActionType, RpaAction
 from rpa.control_flow import CONTROL_TYPES, METADATA_TYPES
 from ui.condition_editor import ConditionEditor
 from ui.window_target_editor import WindowTargetEditor
+from ui.subflow_editor import SubflowEditor
 
 
 WINDOW_ACTIONS = {
@@ -48,6 +49,7 @@ class ActionEditor(QWidget):
     recapture_requested = Signal(RpaAction)
     search_region_requested = Signal(RpaAction)
     advanced_changed = Signal(bool)
+    open_subflow_requested = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -264,6 +266,11 @@ class ActionEditor(QWidget):
                     ))
                 else:
                     self.form.addRow("Move duration", self._double(data.get("duration", 0.2), lambda v: self._set_data("duration", v), 0, 60))
+        elif action.action == ActionType.RUN_SUBFLOW.value:
+            subflow = SubflowEditor(self.project_dir, self.available_variables, data, self)
+            subflow.changed.connect(lambda: self._set_subflow_data(subflow.data()))
+            subflow.open_requested.connect(self.open_subflow_requested)
+            self.form.addRow("Saved flow", subflow)
         elif is_click_image:
             self._click_image_fields(data)
         elif action.action == ActionType.TYPE_TEXT.value:
@@ -364,6 +371,19 @@ class ActionEditor(QWidget):
             self._check(data.get("capture_after", False), lambda v: self._set_data("capture_after", v)),
         )
         self._loading = False
+
+    def _set_subflow_data(self, data: dict) -> None:
+        if self._loading or not self.action:
+            return
+        common = {
+            key: value for key, value in self.action.data.items()
+            if key in {
+                "retry_count", "retry_delay", "step_timeout", "failure_action",
+                "failure_jump_step", "capture_failure_screenshot", "capture_before", "capture_after",
+            }
+        }
+        self.action.data = {**data, **common}
+        self.action_changed.emit()
 
     def _click_image_fields(self, data: dict) -> None:
         references = [str(data.get("image", ""))] if data.get("image") else []

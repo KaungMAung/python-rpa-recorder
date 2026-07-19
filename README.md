@@ -305,6 +305,16 @@ The installer defaults to `%LOCALAPPDATA%\Programs\PythonRPARecorder`, does not 
 - Windows security boundaries matter: a non-administrator recorder may not capture or control administrator applications reliably. Run the recorder with the same privilege level as the target app.
 - Automated tests use mocked input APIs and Qt's offscreen platform. Real global hooks, desktop input, multi-monitor scaling, and security software still require verification on the target Windows PC.
 
+## Reusable Subflows
+
+Add **Run Subflow** when a flow should reuse another saved flow. The step editor lists flows beside the current flow; it does not accept a manually typed path. References are saved relative to the parent `project.json`, so moving the containing projects folder keeps them portable. **Open Flow** opens the selected child directly (and offers to save parent changes first).
+
+Map only the parent Project Variables, Runtime Inputs, built-ins, or earlier outputs the child needs. A child input mapping is `child input ← parent variable`; an output mapping is `child output → parent variable`. Required child Runtime Inputs not supplied by a mapping still use their configured defaults, or validation/execution reports the missing value. Declare returned names under the child flow's Output Variables.
+
+Run Subflow uses the same retry count, retry delay, step timeout, final-failure action, and screenshot/evidence settings as other executable steps. Logs are prefixed with the child flow name. The parent step's evidence contains the child's per-step status, duration, retries, errors, and mapped outputs; Stop Run and the parent timeout propagate into nested waits immediately. Validation blocks missing/corrupt targets, undefined mappings, undeclared outputs, circular references, and nesting beyond 10 child levels. Generated Python retains the relative reference and uses the same application runner for nested execution. Existing projects are unchanged because `run_subflow` is only present when explicitly added.
+
+Manual check: create sibling flows `Parent` and `Child`; give Child a required `VALUE` Runtime Input, declared `RESULT` Output Variable, and a Python step that writes `variables['RESULT']`. In Parent, add Run Subflow, select Child, map `VALUE` from a parent variable and `RESULT` back to a parent output. Run Parent and confirm the nested log prefix, returned value, and nested step results in Run Details. Then temporarily rename Child's folder and confirm Validate Flow blocks the run with a missing-subflow error.
+
 ## Manual Windows Verification With Notepad
 
 Run these checks on the same Windows account and display configuration that will run the automation. Start Notepad and Python RPA Recorder at the same elevation level unless the permission test specifically says otherwise.

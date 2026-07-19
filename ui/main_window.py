@@ -581,6 +581,7 @@ class MainWindow(QMainWindow):
         self.editor.test_locator_requested.connect(self.test_target)
         self.editor.recapture_requested.connect(self.recapture_target)
         self.editor.search_region_requested.connect(self.select_image_search_region)
+        self.editor.open_subflow_requested.connect(self._open_referenced_subflow)
         self.editor.advanced_changed.connect(lambda expanded: self.settings.setValue("advanced_expanded", expanded))
         self.clear_logs_btn.clicked.connect(self.logs.clear)
         self.copy_logs_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.logs.toPlainText()))
@@ -2157,7 +2158,9 @@ class MainWindow(QMainWindow):
             available_variables[name] = "Output Variable"
         for name in ("RUN_DATE", "CLIPBOARD_TEXT", "LAST_CLICK_X", "LAST_CLICK_Y"):
             available_variables[name] = "Built-in"
-        dialog = ManualActionDialog(self.project.settings, available_variables, self)
+        dialog = ManualActionDialog(
+            self.project.settings, available_variables, self, project_dir=self.project_dir,
+        )
         dialog.screen_pick_requested.connect(lambda role: self._begin_manual_target_capture(dialog, role))
         dialog.diagnostic.connect(self.log)
         result = dialog.exec()
@@ -2816,6 +2819,28 @@ class MainWindow(QMainWindow):
             self.refresh()
         except Exception as exc:
             show_error(self, "Open failed", str(exc))
+
+    def _open_referenced_subflow(self, reference: str) -> None:
+        if not self.project_dir:
+            return
+        target = (Path(self.project_dir) / reference).resolve()
+        if not target.is_file():
+            show_error(self, "Open Subflow", f"The referenced flow is missing:\n{reference}")
+            return
+        if self.dirty:
+            answer = QMessageBox.question(
+                self, "Save current flow?",
+                "Save changes before opening the referenced flow?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Save,
+            )
+            if answer == QMessageBox.Cancel:
+                return
+            if answer == QMessageBox.Save:
+                self.save_project()
+                if self.dirty:
+                    return
+        self.open_project_path(target)
 
     def _remember_project_path(self) -> None:
         if self.project_dir:

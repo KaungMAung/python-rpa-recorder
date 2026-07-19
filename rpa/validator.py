@@ -13,6 +13,8 @@ from .control_flow import CONTROL_TYPES, METADATA_TYPES, parse_control_flow, ran
 from .utils import MissingPlaceholderError, resolve_placeholders_strict
 from .variables import VARIABLE_NAME_PATTERN, built_in_variables
 from .windowing import normalize_window_target
+from .project_manager import ProjectManager
+from .subflows import mapping_dict, resolve_subflow_project, validate_subflow_dependencies
 
 LEVEL_ERROR = "Error"
 LEVEL_WARNING = "Warning"
@@ -82,6 +84,12 @@ def validate_project_detailed(
         issues.append(ValidationIssue(
             issue.level, issue.step_number, _step_name(action) if action else "Control Flow", issue.reason,
         ))
+    if project_dir:
+        for step_number, reason in validate_subflow_dependencies(project, project_dir):
+            action = project.actions[step_number - 1] if 0 < step_number <= len(project.actions) else None
+            issues.append(ValidationIssue(
+                LEVEL_ERROR, step_number, _step_name(action) if action else "Run Subflow", reason,
+            ))
     for index, action in enumerate(project.actions):
         if action.action in CONTROL_TYPES and not action.enabled:
             issues.append(ValidationIssue(
@@ -141,6 +149,15 @@ def validate_project_detailed(
             issues.append(ValidationIssue(LEVEL_ERROR, step_number, name, f"action data cannot be resolved: {exc}"))
             resolved = action.data
 
+        if action.action == ActionType.RUN_SUBFLOW.value:
+            raw_mappings = action.data.get("input_mappings")
+            if isinstance(raw_mappings, dict):
+                for parent_name in mapping_dict(raw_mappings).values():
+                    if parent_name not in variables:
+                        issues.append(ValidationIssue(
+                            LEVEL_ERROR, step_number, name,
+                            f"subflow input uses undefined parent variable: {parent_name}",
+                        ))
         _validate_common(
             action, resolved, step_number, name, issues, len(project.actions), start_index + 1, end_index + 1,
         )
@@ -275,6 +292,35 @@ def _validate_action(
     issues: list[ValidationIssue],
 ) -> None:
     action_type = action.action
+    if action_type == ActionType.RUN_SUBFLOW.value:
+        reference = str(data.get("project", "")).strip()
+        if not reference:
+            _add(issues, LEVEL_ERROR, number, name, "choose a target flow")
+            return
+        if Path(reference).is_absolute():
+            _add(issues, LEVEL_ERROR, number, name, "subflow reference must be relative so the project remains portable")
+            return
+        for key, label in (("input_mappings", "input mappings"), ("output_mappings", "output mappings")):
+            if not isinstance(data.get(key, {}), dict):
+                _add(issues, LEVEL_ERROR, number, name, f"subflow {label} must be an object")
+        if not project_dir:
+            return
+        try:
+            target = resolve_subflow_project(project_dir, reference)
+            child = ProjectManager().load(target)
+        except (OSError, ValueError, TypeError):
+            return  # Dependency validation reports the precise load error.
+        known_inputs = set(child.variables) | set(child.runtime_inputs)
+        for child_name in mapping_dict(data.get("input_mappings")).keys():
+            if child_name not in known_inputs:
+                _add(issues, LEVEL_ERROR, number, name, f"subflow input is not defined by the target flow: {child_name}")
+        known_outputs = set(child.output_variables)
+        for child_name, parent_name in mapping_dict(data.get("output_mappings")).items():
+            if child_name not in known_outputs:
+                _add(issues, LEVEL_ERROR, number, name, f"subflow output is not declared by the target flow: {child_name}")
+            if not VARIABLE_NAME_PATTERN.fullmatch(parent_name):
+                _add(issues, LEVEL_ERROR, number, name, f"invalid parent output variable name: {parent_name}")
+        return
     if action_type in _WINDOW_ACTIONS:
         _validate_window_action(action_type, data, number, name, issues)
         return
@@ -489,6 +535,9 @@ def _collect_created_variables(action: RpaAction, variables: dict[str, Any]) -> 
     output_name = str(action.data.get("output_variable", "")).strip() if isinstance(action.data, dict) else ""
     if output_name:
         variables.setdefault(output_name, 0)
+    if action.action == ActionType.RUN_SUBFLOW.value and isinstance(action.data, dict):
+        for parent_name in mapping_dict(action.data.get("output_mappings")).values():
+            variables.setdefault(parent_name, 0)
     if action.action not in {ActionType.RUN_PYTHON.value, ActionType.PYTHON_CODE.value}:
         return
     code = str(action.data.get("code", "")) if isinstance(action.data, dict) else ""

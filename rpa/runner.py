@@ -11,6 +11,8 @@ from typing import Any, Callable
 
 from .image_matcher import find_image, screenshot_image, wait_for_image, wait_for_references
 from .models import ActionStatus, ActionType, RpaAction, RpaProject, condition_summary
+from .project_manager import ProjectManager
+from .subflows import MAX_SUBFLOW_DEPTH, mapping_dict, resolve_subflow_project
 from .control_flow import CONTROL_TYPES, IF_TYPES, LOOP_TYPES, METADATA_TYPES, parse_control_flow
 from .utils import MissingPlaceholderError, foreground_elevation_mismatch, resolve_placeholders_strict
 from .variables import prepare_runtime_variables
@@ -54,6 +56,7 @@ class ReplayRunner:
         self.first_failed_index: int | None = None
         self.first_failure_error: str | None = None
         self._step_deadline: float | None = None
+        self._external_deadline: float | None = None
         self._best_image_confidence = 0.0
         self.evidence_dir = Path(evidence_dir) if evidence_dir else None
         self.step_results: list[dict[str, Any]] = []
@@ -61,6 +64,9 @@ class ReplayRunner:
         self.window_resolver: WindowResolver | None = None
         self._last_window_result: dict[str, Any] | None = None
         self._last_image_result: dict[str, Any] | None = None
+        self._last_subflow_result: dict[str, Any] | None = None
+        self._active_subrunner: ReplayRunner | None = None
+        self.subflow_stack: list[Path] = [(self.project_dir / "project.json").resolve()]
         self._debug_condition = threading.Condition()
         self._debug_command: tuple[str, int | None] | None = None
         self._debug_pause_next = False
@@ -69,6 +75,8 @@ class ReplayRunner:
 
     def request_stop(self) -> None:
         self._stop_event.set()
+        if self._active_subrunner is not None:
+            self._active_subrunner.request_stop()
         with self._debug_condition:
             self._debug_condition.notify_all()
 
@@ -116,7 +124,11 @@ class ReplayRunner:
             time.sleep(min(0.05, deadline - time.monotonic()))
 
     def _step_timed_out(self) -> bool:
-        return self._step_deadline is not None and time.monotonic() >= self._step_deadline
+        now = time.monotonic()
+        return (
+            (self._step_deadline is not None and now >= self._step_deadline)
+            or (self._external_deadline is not None and now >= self._external_deadline)
+        )
 
     def _poll_cancelled(self) -> bool:
         return self.stop_requested() or self._step_timed_out()
@@ -227,6 +239,7 @@ class ReplayRunner:
             try:
                 self._last_window_result = None
                 self._last_image_result = None
+                self._last_subflow_result = None
                 control_data = resolve_placeholders_strict(action.data, self.runtime_variables)
             except MissingPlaceholderError:
                 control_data = action.data
@@ -272,6 +285,8 @@ class ReplayRunner:
                     record["window_result"] = dict(self._last_window_result)
                 if self._last_image_result:
                     record["image_match"] = dict(self._last_image_result)
+                if self._last_subflow_result:
+                    record["subflow"] = dict(self._last_subflow_result)
                 if action_callback:
                     action_callback(index, "failed")
                 failure_message = str(final_error)
@@ -308,6 +323,8 @@ class ReplayRunner:
                 record["window_result"] = dict(self._last_window_result)
             if self._last_image_result:
                 record["image_match"] = dict(self._last_image_result)
+            if self._last_subflow_result:
+                record["subflow"] = dict(self._last_subflow_result)
             self._capture_step_screenshot(record, index, "after", bool(action.data.get("capture_after")))
             self._finish_step_record(record, "Success")
             self.log(f"action completed: {index + 1} {action.action}")
@@ -643,6 +660,8 @@ class ReplayRunner:
             self._store_output(data, variables, opened_path)
         elif action.action in (ActionType.RUN_PYTHON.value, ActionType.PYTHON_CODE.value):
             self.run_python_code(action, data, variables, step_number)
+        elif action.action == ActionType.RUN_SUBFLOW.value:
+            self._run_subflow(action, data, variables, step_number)
         else:
             raise ValueError(f"Unsupported action: {action.action}")
 
@@ -650,6 +669,70 @@ class ReplayRunner:
         if self.window_resolver is None:
             self.window_resolver = WindowResolver(sleep=self.sleep_checked)
         return self.window_resolver
+
+    def _run_subflow(
+        self, action: RpaAction, data: dict[str, Any], variables: dict[str, Any], step_number: int,
+    ) -> None:
+        target = resolve_subflow_project(self.project_dir, str(data.get("project", "")))
+        if not target.is_file():
+            raise FileNotFoundError(f"subflow project is missing: {data.get('project') or target}")
+        if target in self.subflow_stack:
+            chain = " -> ".join(path.parent.name for path in [*self.subflow_stack, target])
+            raise RuntimeError(f"circular subflow reference: {chain}")
+        if len(self.subflow_stack) >= MAX_SUBFLOW_DEPTH + 1:
+            raise RuntimeError(f"subflow nesting exceeds the maximum depth of {MAX_SUBFLOW_DEPTH}")
+        child = ProjectManager().load(target)
+        input_map = mapping_dict(data.get("input_mappings"))
+        output_map = mapping_dict(data.get("output_mappings"))
+        supplied: dict[str, Any] = {}
+        for child_name, parent_name in input_map.items():
+            if parent_name not in variables:
+                raise ValueError(f"parent variable '{parent_name}' is not available for subflow input '{child_name}'")
+            supplied[child_name] = variables[parent_name]
+        child_variables, input_errors = prepare_runtime_variables(child, supplied, validate_paths=True)
+        child_variables.update(supplied)
+        if input_errors:
+            raise ValueError(input_errors[0])
+        flow_name = str(data.get("flow_name") or child.project.name or target.parent.name)
+        self.log(f"[Subflow {flow_name}] started from Step {step_number}")
+        evidence_dir = self.evidence_dir / "subflows" / f"step_{step_number}_{action.id[:8]}" if self.evidence_dir else None
+        nested = ReplayRunner(child, target.parent, lambda message: self.log(f"[Subflow {flow_name}] {message}"), evidence_dir=evidence_dir)
+        nested.runtime_variables = child_variables
+        nested._stop_event = self._stop_event
+        nested._external_deadline = self._step_deadline or self._external_deadline
+        nested.subflow_stack = [*self.subflow_stack, target]
+        self._active_subrunner = nested
+        try:
+            nested.run(include_start_delay=False, enable_debug=False)
+            if nested.had_continued_failures:
+                raise RuntimeError(nested.first_failure_error or "subflow completed with failed steps")
+            for child_name, parent_name in output_map.items():
+                if child_name not in nested.runtime_variables:
+                    raise ValueError(f"subflow output '{child_name}' was not produced")
+                variables[parent_name] = nested.runtime_variables[child_name]
+            self._last_subflow_result = {
+                "flow_name": flow_name,
+                "project": str(data.get("project", "")),
+                "status": "Success",
+                "attempts": nested.total_attempts,
+                "outputs": {parent: nested.runtime_variables[child] for child, parent in output_map.items()},
+                "step_results": nested.step_results,
+            }
+            self.log(f"[Subflow {flow_name}] completed; {len(nested.step_results)} step result(s)")
+        except Exception as exc:
+            self._last_subflow_result = {
+                "flow_name": flow_name,
+                "project": str(data.get("project", "")),
+                "status": "Stopped" if isinstance(exc, StopReplay) else "Failed",
+                "attempts": nested.total_attempts,
+                "error": str(exc),
+                "step_results": nested.step_results,
+            }
+            self.log(f"[Subflow {flow_name}] failed: {exc}")
+            raise
+        finally:
+            self.total_attempts += nested.total_attempts
+            self._active_subrunner = None
 
     def _window_target_for(self, data: dict[str, Any]) -> dict[str, Any]:
         target = normalize_window_target(data)
