@@ -88,6 +88,15 @@ class ActionEditor(QWidget):
         self.preview.setMaximumHeight(220)
         self.preview.setStyleSheet("background: #f8fafc; border: 1px solid #d8dee8; color: #64748b; padding: 4px;")
 
+        # Image matching fields intentionally live after the test controls and
+        # preview. Keeping them in their own form preserves the existing widgets
+        # and signal wiring while giving the target workflow a natural order.
+        self.image_target_widget = QWidget()
+        self.image_target_form = QFormLayout(self.image_target_widget)
+        self.image_target_form.setContentsMargins(0, 6, 0, 0)
+        self.image_target_form.setHorizontalSpacing(14)
+        self.image_target_form.setVerticalSpacing(10)
+
         self.advanced_button = QPushButton("Advanced Settings")
         self.advanced_button.setCheckable(True)
         self.advanced_button.setStyleSheet("text-align: left; font-weight: 600; padding: 6px;")
@@ -117,6 +126,7 @@ class ActionEditor(QWidget):
         layout.addLayout(target_buttons)
         layout.addWidget(self.preview_heading)
         layout.addWidget(self.preview)
+        layout.addWidget(self.image_target_widget)
         layout.addWidget(self.advanced_button)
         layout.addWidget(self.advanced_widget)
         layout.addStretch(1)
@@ -141,6 +151,7 @@ class ActionEditor(QWidget):
             self.recapture_button,
             self.preview_heading,
             self.preview,
+            self.image_target_widget,
             self.advanced_button,
         ):
             widget.setVisible(visible)
@@ -166,6 +177,7 @@ class ActionEditor(QWidget):
     def _rebuild(self) -> None:
         self._loading = True
         self._clear_layout(self.form)
+        self._clear_layout(self.image_target_form)
         self._clear_layout(self.advanced_form)
         self.preview.clear()
         self.preview.setText("No target image")
@@ -181,6 +193,7 @@ class ActionEditor(QWidget):
         self.recapture_button.setVisible(action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value))
         self.preview_heading.setVisible(action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value))
         self.preview.setVisible(action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value))
+        self.image_target_widget.setVisible(action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value))
         self.title.setText(f"Step Details - {action.friendly_name()}")
 
         name = QLineEdit(action.name)
@@ -402,6 +415,16 @@ class ActionEditor(QWidget):
         self.action_changed.emit()
 
     def _click_image_fields(self, data: dict) -> None:
+        fallback_enabled = bool(data.get("use_coordinate_fallback", True))
+        fallback_check = self._check(fallback_enabled, lambda value: self._set_data("use_coordinate_fallback", value))
+        fallback_status = QLabel()
+        self._update_fallback_status(fallback_status, fallback_enabled)
+        fallback_check.toggled.connect(lambda enabled: self._update_fallback_status(fallback_status, enabled))
+        fallback_layout = QHBoxLayout(); fallback_layout.setContentsMargins(0, 0, 0, 0)
+        fallback_layout.addWidget(fallback_check); fallback_layout.addWidget(fallback_status, 1)
+        fallback_box = QWidget(); fallback_box.setLayout(fallback_layout)
+        self.form.addRow("Coordinate fallback", fallback_box)
+
         references = [str(data.get("image", ""))] if data.get("image") else []
         references.extend(str(item) for item in data.get("reference_images", []) if str(item))
         reference_list = QListWidget()
@@ -427,7 +450,7 @@ class ActionEditor(QWidget):
         reference_layout.setContentsMargins(0, 0, 0, 0)
         reference_layout.addWidget(reference_list)
         reference_layout.addLayout(controls)
-        self.form.addRow("Reference images", reference_box)
+        self.image_target_form.addRow("Reference images", reference_box)
 
         confidence = float(data.get("confidence", 0.86))
         slider = QSlider(Qt.Horizontal)
@@ -444,7 +467,7 @@ class ActionEditor(QWidget):
         confidence_layout.addWidget(slider, 1)
         confidence_layout.addWidget(value_label)
         confidence_box = QWidget(); confidence_box.setLayout(confidence_layout)
-        self.form.addRow("Match confidence", confidence_box)
+        self.image_target_form.addRow("Match confidence", confidence_box)
 
         region = data.get("search_region") or {}
         region_label = QLabel(
@@ -458,17 +481,7 @@ class ActionEditor(QWidget):
         region_layout = QHBoxLayout(); region_layout.setContentsMargins(0, 0, 0, 0)
         region_layout.addWidget(region_label, 1); region_layout.addWidget(choose_region); region_layout.addWidget(clear_region)
         region_box = QWidget(); region_box.setLayout(region_layout)
-        self.form.addRow("Search area", region_box)
-
-        fallback_enabled = bool(data.get("use_coordinate_fallback", True))
-        fallback_check = self._check(fallback_enabled, lambda value: self._set_data("use_coordinate_fallback", value))
-        fallback_status = QLabel()
-        self._update_fallback_status(fallback_status, fallback_enabled)
-        fallback_check.toggled.connect(lambda enabled: self._update_fallback_status(fallback_status, enabled))
-        fallback_layout = QHBoxLayout(); fallback_layout.setContentsMargins(0, 0, 0, 0)
-        fallback_layout.addWidget(fallback_check); fallback_layout.addWidget(fallback_status, 1)
-        fallback_box = QWidget(); fallback_box.setLayout(fallback_layout)
-        self.form.addRow("Coordinate fallback", fallback_box)
+        self.image_target_form.addRow("Search area", region_box)
 
         self.advanced_form.addRow("Search timeout", self._number_field(data.get("timeout", 10), lambda v: self._set_data("timeout", v)))
         self.advanced_form.addRow("Grayscale matching", self._check(data.get("grayscale", False), lambda v: self._set_data("grayscale", v)))

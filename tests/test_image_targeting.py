@@ -114,7 +114,7 @@ def test_validator_rejects_bad_advanced_image_settings(tmp_path: Path) -> None:
 
 
 def test_action_editor_exposes_image_debug_controls(tmp_path: Path) -> None:
-    from PySide6.QtWidgets import QApplication, QListWidget, QSlider
+    from PySide6.QtWidgets import QApplication, QFormLayout, QListWidget, QSlider
     from ui.action_editor import ActionEditor
 
     app = QApplication.instance() or QApplication([])
@@ -135,6 +135,28 @@ def test_action_editor_exposes_image_debug_controls(tmp_path: Path) -> None:
     assert references is not None and references.count() == 1
     assert editor.locate_button.text() == "Test Match Now"
     assert "Capture" in editor.recapture_button.text()
+
+    main_labels = [
+        editor.form.itemAt(row, QFormLayout.ItemRole.LabelRole).widget().text()
+        for row in range(editor.form.rowCount())
+        if editor.form.itemAt(row, QFormLayout.ItemRole.LabelRole) is not None
+    ]
+    target_labels = [
+        editor.image_target_form.itemAt(row, QFormLayout.ItemRole.LabelRole).widget().text()
+        for row in range(editor.image_target_form.rowCount())
+        if editor.image_target_form.itemAt(row, QFormLayout.ItemRole.LabelRole) is not None
+    ]
+    assert "Coordinate fallback" in main_labels
+    assert target_labels == ["Reference images", "Match confidence", "Search area"]
+
+    root = editor.layout()
+    form_index = next(i for i in range(root.count()) if root.itemAt(i).layout() is editor.form)
+    test_index = next(
+        i for i in range(root.count())
+        if root.itemAt(i).layout() is not None
+        and root.itemAt(i).layout().indexOf(editor.test_step_button) >= 0
+    )
+    assert form_index < test_index < root.indexOf(editor.preview) < root.indexOf(editor.image_target_widget)
 
     slider.setValue(92)
     assert action.data["confidence"] == 0.92
