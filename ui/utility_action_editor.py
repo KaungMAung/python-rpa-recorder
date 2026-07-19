@@ -29,12 +29,13 @@ class UtilityActionEditor(QWidget):
 
     def __init__(
         self, action_type: str, data: dict | None = None,
-        variables: list[str] | None = None, parent=None,
+        variables: list[str] | None = None, parent=None, guided: bool = False,
     ) -> None:
         super().__init__(parent)
         self.action_type = action_type
         self.initial = dict(data or {})
         self.variables = list(variables or [])
+        self.guided = guided
         self.controls: dict[str, QWidget] = {}
         self.form = QFormLayout(self)
         self.form.setContentsMargins(0, 0, 0, 0)
@@ -42,6 +43,47 @@ class UtilityActionEditor(QWidget):
         note.setWordWrap(True); note.setStyleSheet("color: #64748b;")
         self.form.addRow(note)
         self._build()
+        if self.guided:
+            self._hide_optional_fields()
+
+    def _hide_optional_fields(self) -> None:
+        basic = {
+            ActionType.LAUNCH_APPLICATION.value: {"path"},
+            ActionType.WAIT_PROCESS.value: {"process_name"},
+            ActionType.ACTIVATE_PROCESS.value: {"process_name"},
+            ActionType.CLOSE_PROCESS.value: {"process_name"},
+            ActionType.READ_CLIPBOARD.value: {"output_variable"},
+            ActionType.WRITE_CLIPBOARD.value: {"text"},
+            ActionType.COPY_PATH.value: {"source", "destination"},
+            ActionType.MOVE_PATH.value: {"source", "destination"},
+            ActionType.RENAME_PATH.value: {"source", "destination"},
+            ActionType.DELETE_PATH.value: {"path"},
+            ActionType.WAIT_PATH.value: {"path", "path_type"},
+            ActionType.RUN_POWERSHELL.value: {"command"},
+            ActionType.RUN_PYTHON_SCRIPT.value: {"path"},
+            ActionType.SHOW_NOTIFICATION.value: {"title", "message"},
+        }.get(self.action_type, set())
+        optional: list[QWidget] = []
+        for key, control in self.controls.items():
+            if key in basic:
+                continue
+            field = control
+            while field.parentWidget() is not None and field.parentWidget() is not self:
+                field = field.parentWidget()
+            optional.append(field)
+            self.form.setRowVisible(field, False)
+        if not optional:
+            return
+        toggle = QPushButton("Advanced  ▸")
+        toggle.setCheckable(True)
+
+        def show_optional(expanded: bool) -> None:
+            toggle.setText("Advanced  ▾" if expanded else "Advanced  ▸")
+            for field in optional:
+                self.form.setRowVisible(field, expanded)
+
+        toggle.toggled.connect(show_optional)
+        self.form.insertRow(1, "", toggle)
 
     def _line(self, key: str, default: str = "", placeholder: str = "") -> QLineEdit:
         field = QLineEdit(str(self.initial.get(key, default)))

@@ -182,6 +182,8 @@ def test_manual_drag_form_creates_picked_positions() -> None:
 def test_manual_dialog_visible_confirmation_returns_accepted() -> None:
     app()
     dialog = ManualActionDialog(ProjectSettings(), {}, None)
+    dialog.select_intent("click", ActionType.CLICK_COORDINATE.value)
+    dialog._show_guided_details()
     QTimer.singleShot(0, lambda: QTest.mouseClick(dialog.confirm_button, Qt.LeftButton))
     assert dialog.exec() == QDialog.DialogCode.Accepted
 
@@ -261,6 +263,8 @@ def test_toolbar_add_step_updates_and_persists_active_flow(tmp_path) -> None:
         if not dialogs:
             QTimer.singleShot(10, accept_real_dialog)
             return
+        dialogs[0].select_intent("click", ActionType.CLICK_COORDINATE.value)
+        dialogs[0]._show_guided_details()
         button_box = dialogs[0].findChild(QDialogButtonBox)
         QTest.mouseClick(button_box.button(QDialogButtonBox.Ok), Qt.LeftButton)
 
@@ -311,7 +315,8 @@ def test_click_image_picker_keeps_parent_open_until_add_step(tmp_path, monkeypat
 
     def open_picker() -> None:
         dialog = next(widget for widget in QApplication.topLevelWidgets() if isinstance(widget, ManualActionDialog) and widget.isVisible())
-        dialog.type_box.setCurrentIndex(dialog.type_box.findData(ActionType.CLICK_IMAGE.value))
+        dialog.select_intent("click", ActionType.CLICK_IMAGE.value)
+        dialog._show_guided_details()
         QTest.mouseClick(dialog.target_pick_button, Qt.LeftButton)
         QTimer.singleShot(250, confirm_picker)
 

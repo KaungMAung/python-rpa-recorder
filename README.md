@@ -125,7 +125,21 @@ The lower Logs/Status and Validation area has a practical minimum height and rem
 
 ## Adding Steps
 
-Use **Add Step** to configure an action in plain language. Click, double-click, right-click, mouse move, and drag steps have **Pick on Screen** controls: the recorder hides while a crosshair overlay captures the selected position. Press Esc or right-click to cancel without changing the new step. This works across monitors, including monitors positioned to the left of the primary display.
+**Add Step** opens the Guided Flow Builder. Start with one of ten everyday intentions: **Click something**, **Type
+text**, **Open an application**, **Wait for something**, **Work with a window**, **Work with a file**, **Add a
+condition**, **Repeat steps**, **Run another flow**, or **Run a script or command**. The next screen offers only the
+plain-language choices related to that intention, and the final screen asks only for that action's fields. Each stage
+explains what is missing immediately and shows a live sentence describing the configured step. Optional utility
+settings stay under **Advanced**.
+
+Use **Pick on Screen**, **Pick Window**, and **Browse** directly from the relevant configuration screen. **Test
+Match** checks a configured image without inserting the step; **Test Step** runs an executable draft once through the
+normal runner and removes the temporary draft afterward. Conditions and repeat markers are tested with their
+surrounding flow. Experienced users can choose **Use the full step editor** at any time to access the complete existing
+action list. Guided and full modes both create the same `RpaAction` records, so existing projects, execution,
+validation, save/reload, and generated Python remain unchanged.
+
+Click, double-click, right-click, mouse move, and drag steps have **Pick on Screen** controls: the recorder hides while a crosshair overlay captures the selected position. Press Esc or right-click to cancel without changing the new step. This works across monitors, including monitors positioned to the left of the primary display.
 
 For clicks, choose coordinate-only execution or capture/select an image target. Captured targets use image matching first and retain the selected coordinate as a fallback. Scroll uses direction and amount, typing accepts multiline text and variable insertion, waiting accepts milliseconds, keyboard steps offer common keys/shortcuts, and file/application steps use Browse.
 

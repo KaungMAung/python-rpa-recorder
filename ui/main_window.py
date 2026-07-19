@@ -253,6 +253,8 @@ class MainWindow(QMainWindow):
         self.search_region_action: RpaAction | None = None
         self.match_highlight_overlay: MatchHighlightOverlay | None = None
         self.manual_capture_dialog: ManualActionDialog | None = None
+        self.manual_test_dialog: ManualActionDialog | None = None
+        self._manual_test_action_id: str | None = None
         self.manual_capture_role = "target"
         self.window_pick_overlay: WindowPickOverlay | None = None
         self.manual_capture_snapshot: dict = {}
@@ -1403,6 +1405,36 @@ class MainWindow(QMainWindow):
             return
         self._start_replay(index, index, "test", False, False, force_validation_enabled=True)
 
+    def _test_manual_action(self, dialog: ManualActionDialog, action: RpaAction) -> None:
+        """Test a guided step through the normal replay lifecycle without saving it."""
+        if self.replay_thread is not None or self._scheduled_runs:
+            QMessageBox.information(self, "Test Step", "Another flow is already running.")
+            dialog.finish_step_test()
+            return
+        if action.action in NON_EXECUTABLE_TYPES:
+            QMessageBox.information(
+                self, "Test Step",
+                "Conditions, repeat blocks, and notes need surrounding steps, so they are tested when the flow runs.",
+            )
+            dialog.finish_step_test()
+            return
+        if action.action == ActionType.PYTHON_CODE.value and not self.confirm_python_code_warning():
+            dialog.finish_step_test()
+            return
+        self.manual_test_dialog = dialog
+        self._manual_test_action_id = action.id
+        self.project.actions.append(action)
+        test_index = len(self.project.actions) - 1
+        self.refresh()
+        self.table.selectRow(test_index)
+        self.log(f"[Guided Builder] testing unsaved step: {action.summary()}")
+        self._start_replay(
+            test_index, test_index, "test", False, False,
+            force_validation_enabled=True,
+        )
+        if self.replay_thread is None:
+            self._cleanup_manual_test_action()
+
     def _start_replay(
         self,
         start_index: int,
@@ -1679,8 +1711,21 @@ class MainWindow(QMainWindow):
         self.debug_showed_main = False
         self._restore_details_after_run()
         self._restore_run_environment()
+        self._cleanup_manual_test_action()
         self.update_buttons()
         self.update_status()
+
+    def _cleanup_manual_test_action(self) -> None:
+        action_id = self._manual_test_action_id
+        dialog = self.manual_test_dialog
+        self._manual_test_action_id = None
+        self.manual_test_dialog = None
+        if action_id:
+            self.project.actions = [action for action in self.project.actions if action.id != action_id]
+            self.refresh()
+            self.log("[Guided Builder] unsaved test step removed after testing")
+        if dialog is not None and shiboken6.isValid(dialog):
+            dialog.finish_step_test()
 
     def _hide_details_for_run(self) -> None:
         self.details_were_visible_before_run = self.editor_scroll.isVisible()
@@ -1886,12 +1931,15 @@ class MainWindow(QMainWindow):
                 )
 
     def test_target(self, action: RpaAction | None = None) -> None:
-        action = action if action in self.project.actions else None
+        action = action if isinstance(action, RpaAction) else None
         if action is None:
             index = self.table.selected_index()
             action = self.project.actions[index] if index >= 0 else None
-        if not action or action.action not in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value):
-            QMessageBox.information(self, "Test Target", "Select a Click step to test its target image.")
+        if not action or action.action not in (
+            ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value,
+            ActionType.IF_IMAGE_EXISTS.value, ActionType.IF_IMAGE_NOT_EXISTS.value,
+        ):
+            QMessageBox.information(self, "Test Target", "Select an image-based step to test its target image.")
             return
         if not self.project_dir:
             show_error(self, "Test Target", "Open or create an automation first.")
@@ -2190,6 +2238,8 @@ class MainWindow(QMainWindow):
             self.project.settings, available_variables, self, project_dir=self.project_dir,
         )
         dialog.screen_pick_requested.connect(lambda role: self._begin_manual_target_capture(dialog, role))
+        dialog.test_match_requested.connect(self.test_target)
+        dialog.test_step_requested.connect(lambda action: self._test_manual_action(dialog, action))
         dialog.diagnostic.connect(self.log)
         result = dialog.exec()
         self.log(f"[Add Step] dialog result: {'accepted' if result == QDialog.Accepted else 'cancelled'}")

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QFileDialog,
@@ -17,7 +18,9 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
+    QStackedWidget,
     QCheckBox,
     QPlainTextEdit,
     QTabWidget,
@@ -28,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from rpa.models import ActionType, ProjectSettings, RpaAction, RpaProject, RuntimeInputDefinition
+from rpa.control_flow import CONTROL_TYPES, METADATA_TYPES
 from rpa.variables import INPUT_TYPES, VARIABLE_NAME_PATTERN, validate_variable_configuration
 from ui.condition_editor import ConditionEditor
 from ui.window_target_editor import WindowTargetEditor
@@ -68,6 +72,74 @@ class ManualActionDialog(QDialog):
 
     screen_pick_requested = Signal(str)
     diagnostic = Signal(str)
+    test_match_requested = Signal(RpaAction)
+    test_step_requested = Signal(RpaAction)
+
+    GUIDED_INTENTS = [
+        ("click", "Click something", "Choose a point, image, mouse movement, drag, or scroll.", [
+            ("Click once", ActionType.CLICK_COORDINATE.value),
+            ("Double-click", ActionType.DOUBLE_CLICK_IMAGE.value),
+            ("Right-click", "right_click"),
+            ("Click an image", ActionType.CLICK_IMAGE.value),
+            ("Move the mouse", ActionType.MOUSE_MOVE.value),
+            ("Drag something", ActionType.DRAG.value),
+            ("Scroll", ActionType.SCROLL.value),
+        ]),
+        ("type", "Type text", "Type text, press one key, or use a keyboard shortcut.", [
+            ("Type text", ActionType.TYPE_TEXT.value),
+            ("Press one key", ActionType.PRESS_KEY.value),
+            ("Use a keyboard shortcut", ActionType.HOTKEY.value),
+        ]),
+        ("open", "Open an application", "Start an application or open a document.", [
+            ("Launch an application", ActionType.LAUNCH_APPLICATION.value),
+            ("Open an application or file", ActionType.OPEN_FILE.value),
+        ]),
+        ("wait", "Wait for something", "Wait for time to pass or for something to appear.", [
+            ("Wait for a length of time", ActionType.WAIT.value),
+            ("Wait for a window", ActionType.WAIT_WINDOW.value),
+            ("Wait for an application process", ActionType.WAIT_PROCESS.value),
+            ("Wait for a file or folder", ActionType.WAIT_PATH.value),
+        ]),
+        ("window", "Work with a window", "Find, activate, resize, close, or click inside a window.", [
+            ("Remember a target window", ActionType.SELECT_WINDOW.value),
+            ("Wait for a window", ActionType.WAIT_WINDOW.value),
+            ("Bring a window to the front", ActionType.ACTIVATE_WINDOW.value),
+            ("Maximize a window", ActionType.MAXIMIZE_WINDOW.value),
+            ("Minimize a window", ActionType.MINIMIZE_WINDOW.value),
+            ("Restore a window", ActionType.RESTORE_WINDOW.value),
+            ("Close a window", ActionType.CLOSE_WINDOW.value),
+            ("Click inside a window", ActionType.CLICK_WINDOW_RELATIVE.value),
+            ("Move the mouse inside a window", ActionType.MOVE_WINDOW_RELATIVE.value),
+        ]),
+        ("file", "Work with a file", "Open, copy, move, rename, delete, or wait for a file or folder.", [
+            ("Open a file", ActionType.OPEN_FILE.value),
+            ("Copy a file or folder", ActionType.COPY_PATH.value),
+            ("Move a file or folder", ActionType.MOVE_PATH.value),
+            ("Rename a file or folder", ActionType.RENAME_PATH.value),
+            ("Delete a file or folder", ActionType.DELETE_PATH.value),
+            ("Wait for a file or folder", ActionType.WAIT_PATH.value),
+        ]),
+        ("condition", "Add a condition", "Run steps only when an image, window, path, or value matches.", [
+            ("If an image exists", ActionType.IF_IMAGE_EXISTS.value),
+            ("If an image does not exist", ActionType.IF_IMAGE_NOT_EXISTS.value),
+            ("If a window exists", ActionType.IF_WINDOW_EXISTS.value),
+            ("If a file or folder exists", ActionType.IF_PATH_EXISTS.value),
+            ("If a variable matches", ActionType.IF_VARIABLE.value),
+        ]),
+        ("repeat", "Repeat steps", "Repeat a block a number of times or until something happens.", [
+            ("Repeat a number of times", ActionType.REPEAT_COUNT.value),
+            ("Repeat until a condition is met", ActionType.REPEAT_UNTIL.value),
+            ("Leave the current repeat block", ActionType.BREAK_LOOP.value),
+        ]),
+        ("subflow", "Run another flow", "Choose another saved flow and optionally map its variables.", [
+            ("Run another saved flow", ActionType.RUN_SUBFLOW.value),
+        ]),
+        ("script", "Run a script or command", "Run PowerShell, a Python script, or advanced Python code.", [
+            ("Run a PowerShell command", ActionType.RUN_POWERSHELL.value),
+            ("Run a Python script", ActionType.RUN_PYTHON_SCRIPT.value),
+            ("Run Python code", ActionType.PYTHON_CODE.value),
+        ]),
+    ]
 
     def __init__(
         self, settings: ProjectSettings, variables: dict[str, str], parent=None,
@@ -81,6 +153,8 @@ class ManualActionDialog(QDialog):
         self.picked: dict[str, tuple[int, int]] = {}
         self._picker_active = False
         self._picker_snapshot: dict = {}
+        self._guided_mode = True
+        self._selected_intent: str | None = None
         self.type_box = QComboBox()
         for label, value in [
             ("Click", ActionType.CLICK_COORDINATE.value),
@@ -139,6 +213,7 @@ class ManualActionDialog(QDialog):
         self.summary.setWordWrap(True)
         self.summary.setStyleSheet("background: #f1f5f9; color: #334155; padding: 8px; border: 1px solid #d8dee8;")
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.button_box = buttons
         self.confirm_button = buttons.button(QDialogButtonBox.Ok)
         self.confirm_button.setText("Add Step")
         buttons.button(QDialogButtonBox.Cancel).setText("Discard")
@@ -149,19 +224,256 @@ class ManualActionDialog(QDialog):
         # dialog when diagnosing a rejected result.
         self.confirm_button.clicked.connect(self._confirm)
         buttons.rejected.connect(self.reject)
-        layout = QVBoxLayout(self)
-        top = QFormLayout()
-        top.addRow("What should this step do?", self.type_box)
-        layout.addLayout(top)
-        layout.addLayout(self.form)
-        layout.addWidget(QLabel("Step summary"))
-        layout.addWidget(self.summary)
+        self.pages = QStackedWidget()
+        self.intent_page = self._build_intent_page()
+        self.choice_page = self._build_choice_page()
+        self.details_page = QScrollArea()
+        self.details_page.setWidgetResizable(True)
+        self.details_page.setFrameShape(QScrollArea.NoFrame)
+        details_content = QWidget()
+        self.details_page.setWidget(details_content)
+        details_layout = QVBoxLayout(details_content)
+        details_layout.setContentsMargins(4, 4, 4, 4)
+        details_layout.setSpacing(10)
+        details_header = QHBoxLayout()
+        self.details_back_button = QPushButton("← Back")
+        self.details_back_button.clicked.connect(self._back_from_details)
+        self.details_heading = QLabel("Configure this step")
+        self.details_heading.setStyleSheet("font-size: 16px; font-weight: 650;")
+        details_header.addWidget(self.details_back_button)
+        details_header.addWidget(self.details_heading, 1)
+        details_layout.addLayout(details_header)
+        self.advanced_toggle = QPushButton("Advanced  ▸")
+        self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setToolTip("Show the complete action list for experienced users")
+        self.advanced_toggle.toggled.connect(self._toggle_guided_advanced)
+        details_layout.addWidget(self.advanced_toggle)
+        self.type_selector_widget = QWidget()
+        top = QFormLayout(self.type_selector_widget)
+        top.setContentsMargins(0, 0, 0, 0)
+        top.addRow("Technical action type", self.type_box)
+        self.type_selector_widget.setVisible(False)
+        details_layout.addWidget(self.type_selector_widget)
+        details_layout.addLayout(self.form)
+        test_row = QHBoxLayout()
+        self.test_match_button = QPushButton("Test Match")
+        self.test_match_button.setToolTip("Check the target image now without adding the step")
+        self.test_match_button.clicked.connect(self._test_match)
+        self.test_step_button = QPushButton("Test Step")
+        self.test_step_button.setToolTip("Run this configured step once without adding it to the flow")
+        self.test_step_button.clicked.connect(self._test_step)
+        test_row.addWidget(self.test_match_button)
+        test_row.addWidget(self.test_step_button)
+        test_row.addStretch(1)
+        details_layout.addLayout(test_row)
+        details_layout.addWidget(QLabel("Live step summary"))
+        details_layout.addWidget(self.summary)
+        self.validation_label = QLabel()
+        self.validation_label.setWordWrap(True)
+        details_layout.addWidget(self.validation_label)
         confirmation_note = QLabel("Click Add Step to add this step. Discard closes without changing the flow.")
         confirmation_note.setStyleSheet("color: #475569;")
-        layout.addWidget(confirmation_note)
-        layout.addWidget(buttons)
+        details_layout.addWidget(confirmation_note)
+        details_layout.addWidget(buttons)
+        self.pages.addWidget(self.intent_page)
+        self.pages.addWidget(self.choice_page)
+        self.pages.addWidget(self.details_page)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.addWidget(self.pages)
         self.type_box.currentIndexChanged.connect(self._rebuild)
         self._rebuild()
+        self.pages.setCurrentWidget(self.intent_page)
+        self.resize(720, 620)
+
+    def _build_intent_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        title = QLabel("What would you like the flow to do?")
+        title.setStyleSheet("font-size: 20px; font-weight: 700;")
+        description = QLabel("Choose the outcome in everyday language. You can fine-tune it on the next screens.")
+        description.setWordWrap(True)
+        description.setStyleSheet("color: #64748b;")
+        layout.addWidget(title)
+        layout.addWidget(description)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        self.intent_buttons: dict[str, QPushButton] = {}
+        for index, (key, label, help_text, _choices) in enumerate(self.GUIDED_INTENTS):
+            button = QPushButton(label)
+            button.setObjectName(f"intent_{key}")
+            button.setMinimumHeight(46)
+            button.setToolTip(help_text)
+            button.setStyleSheet("text-align: left; padding: 9px 12px; font-weight: 600;")
+            button.clicked.connect(lambda _checked=False, selected=key: self._choose_intent(selected))
+            self.intent_buttons[key] = button
+            grid.addWidget(button, index // 2, index % 2)
+        layout.addLayout(grid)
+        layout.addStretch(1)
+        full = QPushButton("Use the full step editor")
+        full.setToolTip("Show every technical action type in the existing editor")
+        full.clicked.connect(self._use_full_editor)
+        layout.addWidget(full)
+        return page
+
+    def _build_choice_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        header = QHBoxLayout()
+        back = QPushButton("← Back")
+        back.clicked.connect(lambda: self.pages.setCurrentWidget(self.intent_page))
+        self.choice_heading = QLabel("Choose an action")
+        self.choice_heading.setStyleSheet("font-size: 18px; font-weight: 700;")
+        header.addWidget(back)
+        header.addWidget(self.choice_heading, 1)
+        layout.addLayout(header)
+        self.choice_help = QLabel()
+        self.choice_help.setWordWrap(True)
+        self.choice_help.setStyleSheet("color: #64748b;")
+        layout.addWidget(self.choice_help)
+        question = QLabel("Which best describes what should happen?")
+        question.setStyleSheet("font-weight: 600;")
+        layout.addWidget(question)
+        self.guided_type_box = QComboBox()
+        self.guided_type_box.setObjectName("guidedActionChoice")
+        self.guided_type_box.currentIndexChanged.connect(self._guided_choice_changed)
+        layout.addWidget(self.guided_type_box)
+        self.choice_validation = QLabel("Choose one option to continue.")
+        self.choice_validation.setStyleSheet("color: #b45309;")
+        layout.addWidget(self.choice_validation)
+        layout.addStretch(1)
+        controls = QHBoxLayout()
+        full = QPushButton("Use the full step editor")
+        full.clicked.connect(self._use_full_editor)
+        self.choice_continue = QPushButton("Continue →")
+        self.choice_continue.setDefault(True)
+        self.choice_continue.clicked.connect(self._show_guided_details)
+        controls.addWidget(full)
+        controls.addStretch(1)
+        controls.addWidget(self.choice_continue)
+        layout.addLayout(controls)
+        return page
+
+    def _intent_definition(self, key: str):
+        return next((item for item in self.GUIDED_INTENTS if item[0] == key), None)
+
+    def _choose_intent(self, key: str) -> None:
+        definition = self._intent_definition(key)
+        if definition is None:
+            return
+        self._selected_intent = key
+        _key, label, help_text, choices = definition
+        self.choice_heading.setText(label)
+        self.choice_help.setText(help_text)
+        self.guided_type_box.blockSignals(True)
+        self.guided_type_box.clear()
+        self.guided_type_box.addItem("Choose what should happen…", None)
+        for choice_label, action_type in choices:
+            self.guided_type_box.addItem(choice_label, action_type)
+        self.guided_type_box.setCurrentIndex(0)
+        self.guided_type_box.blockSignals(False)
+        self._guided_choice_changed()
+        self.pages.setCurrentWidget(self.choice_page)
+
+    def _guided_choice_changed(self, _index: int | None = None) -> None:
+        selected = self.guided_type_box.currentData() is not None
+        self.choice_continue.setEnabled(selected)
+        self.choice_validation.setText("Ready to continue." if selected else "Choose one option to continue.")
+        self.choice_validation.setStyleSheet("color: #166534;" if selected else "color: #b45309;")
+
+    def _show_guided_details(self) -> None:
+        action_type = self.guided_type_box.currentData()
+        if action_type is None:
+            self.choice_validation.setText("Choose what should happen before continuing.")
+            return
+        index = self.type_box.findData(action_type)
+        if index < 0:
+            self.choice_validation.setText("That step type is unavailable in this version.")
+            return
+        self._guided_mode = True
+        if self.type_box.currentIndex() == index:
+            self._rebuild()
+        else:
+            self.type_box.setCurrentIndex(index)
+        self.type_selector_widget.setVisible(self.advanced_toggle.isChecked())
+        self.details_heading.setText(self.guided_type_box.currentText())
+        self.pages.setCurrentWidget(self.details_page)
+        self._update_summary()
+
+    def _use_full_editor(self) -> None:
+        self._guided_mode = False
+        self._selected_intent = None
+        self.details_heading.setText("Full Step Editor")
+        self.type_selector_widget.setVisible(True)
+        self.advanced_toggle.setVisible(False)
+        self.details_back_button.setText("← Guided choices")
+        self._rebuild()
+        self.pages.setCurrentWidget(self.details_page)
+        self._update_summary()
+
+    def _back_from_details(self) -> None:
+        self.advanced_toggle.setVisible(True)
+        self.details_back_button.setText("← Back")
+        if self._guided_mode and self._selected_intent:
+            self.pages.setCurrentWidget(self.choice_page)
+        else:
+            self._guided_mode = True
+            self.type_selector_widget.setVisible(False)
+            self.pages.setCurrentWidget(self.intent_page)
+
+    def _toggle_guided_advanced(self, expanded: bool) -> None:
+        self.advanced_toggle.setText("Advanced  ▾" if expanded else "Advanced  ▸")
+        if self._guided_mode:
+            self.type_selector_widget.setVisible(expanded)
+
+    def select_intent(self, key: str, action_type: str | None = None) -> None:
+        """Public helper used by keyboard integrations and UI regression tests."""
+        self._choose_intent(key)
+        if action_type is not None:
+            index = self.guided_type_box.findData(action_type)
+            self.guided_type_box.setCurrentIndex(index)
+
+    def _test_match(self) -> None:
+        error = self._validation_error()
+        if error:
+            self._show_inline_validation(error)
+            return
+        action = self.action()
+        if action.action not in (
+            ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value,
+            ActionType.IF_IMAGE_EXISTS.value, ActionType.IF_IMAGE_NOT_EXISTS.value,
+        ):
+            self._show_inline_validation("Capture or choose a target image before testing the match.")
+            return
+        self.test_match_requested.emit(action)
+
+    def _test_step(self) -> None:
+        error = self._validation_error()
+        if error:
+            self._show_inline_validation(error)
+            return
+        self.test_step_button.setEnabled(False)
+        self.confirm_button.setEnabled(False)
+        self.validation_label.setText("Testing this step… Use the floating Stop control to cancel.")
+        self.test_step_requested.emit(self.action())
+
+    def finish_step_test(self) -> None:
+        if not shiboken6.isValid(self):
+            return
+        self._update_summary()
+
+    def _show_inline_validation(self, message: str | None) -> None:
+        if message:
+            self.validation_label.setText(f"What is still needed: {message}")
+            self.validation_label.setStyleSheet(
+                "color: #991b1b; background: #fef2f2; border: 1px solid #fecaca; padding: 7px;"
+            )
+        else:
+            self.validation_label.setText("Ready to add. All required information is present.")
+            self.validation_label.setStyleSheet(
+                "color: #166534; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 7px;"
+            )
 
     def _clear_form(self) -> None:
         window_editor = getattr(self, "window_editor", None)
@@ -336,7 +648,9 @@ class ManualActionDialog(QDialog):
             self.subflow_editor.changed.connect(self._update_summary)
             self.form.addRow("Saved flow", self.subflow_editor)
         elif kind in UTILITY_ACTIONS:
-            self.utility_editor = UtilityActionEditor(kind, variables=list(self.variables), parent=self)
+            self.utility_editor = UtilityActionEditor(
+                kind, variables=list(self.variables), parent=self, guided=self._guided_mode,
+            )
             self.utility_editor.changed.connect(self._update_summary)
             self.form.addRow(self.utility_editor)
         else:
@@ -363,6 +677,8 @@ class ManualActionDialog(QDialog):
         self._picker_snapshot = snapshot
         self.type_box.setEnabled(False)
         self.confirm_button.setEnabled(False)
+        self.test_match_button.setEnabled(False)
+        self.test_step_button.setEnabled(False)
         return dict(snapshot)
 
     def finish_picker(self) -> None:
@@ -371,7 +687,7 @@ class ManualActionDialog(QDialog):
         self._picker_active = False
         self._picker_snapshot = {}
         self.type_box.setEnabled(True)
-        self.confirm_button.setEnabled(True)
+        self._update_summary()
 
     def set_screen_point(self, role: str, x: int, y: int, image: str | None = None, offsets: tuple[int, int] | None = None) -> None:
         getattr(self, f"{role}_x").setValue(x); getattr(self, f"{role}_y").setValue(y)
@@ -422,8 +738,46 @@ class ManualActionDialog(QDialog):
                 "Image matching with coordinate fallback" if self.capture_image.isChecked()
                 else "Coordinates only"
             )
-        try: self.summary.setText(self.action().summary())
-        except Exception: self.summary.setText("Complete the fields above to configure this step.")
+        try:
+            action = self.action()
+            self.summary.setText(self._plain_summary(action))
+            error = self._validation_error()
+            self._show_inline_validation(error)
+            image_action = action.action in (
+                ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value,
+                ActionType.IF_IMAGE_EXISTS.value, ActionType.IF_IMAGE_NOT_EXISTS.value,
+            )
+            self.test_match_button.setVisible(image_action)
+            self.test_step_button.setVisible(action.action not in CONTROL_TYPES | METADATA_TYPES)
+            self.test_match_button.setEnabled(not error and not self._picker_active)
+            self.test_step_button.setEnabled(not error and not self._picker_active)
+            self.confirm_button.setEnabled(not self._picker_active)
+        except Exception:
+            self.summary.setText("Complete the fields above to configure this step.")
+            self._show_inline_validation("Complete the visible fields for this step.")
+            self.test_match_button.setVisible(False)
+            self.test_step_button.setVisible(False)
+            self.confirm_button.setEnabled(not self._picker_active)
+
+    def _plain_summary(self, action: RpaAction) -> str:
+        data = action.data
+        if action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value):
+            target = Path(str(data.get("image", "target image"))).name or "target image"
+            timeout = float(data.get("timeout", self.settings.default_timeout) or self.settings.default_timeout)
+            verb = "double-click it" if action.action == ActionType.DOUBLE_CLICK_IMAGE.value else "click it"
+            return f"Wait up to {timeout:g} seconds for {target}, then {verb}."
+        if action.action == ActionType.WAIT_WINDOW.value:
+            window = data.get("window", {})
+            target = window.get("window_title") or window.get("process_name") or "the selected window"
+            timeout = float(window.get("timeout", data.get("timeout", 10)) or 10)
+            return f"Wait up to {timeout:g} seconds for {target}."
+        if action.action == ActionType.LAUNCH_APPLICATION.value:
+            target = Path(str(data.get("path", "application"))).name or "the application"
+            return f"Open {target}."
+        if action.action == ActionType.RUN_SUBFLOW.value:
+            return f"Run the saved flow {data.get('flow_name') or 'you select'}."
+        text = action.summary()
+        return text if text.endswith(".") else f"{text}."
 
     def _validation_error(self) -> str | None:
         action = self.action()
