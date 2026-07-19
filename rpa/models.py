@@ -63,6 +63,20 @@ class ActionType(str, Enum):
     GROUP_START = "group_start"
     GROUP_END = "group_end"
     RUN_SUBFLOW = "run_subflow"
+    LAUNCH_APPLICATION = "launch_application"
+    WAIT_PROCESS = "wait_process"
+    ACTIVATE_PROCESS = "activate_process"
+    CLOSE_PROCESS = "close_process"
+    READ_CLIPBOARD = "read_clipboard"
+    WRITE_CLIPBOARD = "write_clipboard"
+    COPY_PATH = "copy_path"
+    MOVE_PATH = "move_path"
+    RENAME_PATH = "rename_path"
+    DELETE_PATH = "delete_path"
+    WAIT_PATH = "wait_path"
+    RUN_POWERSHELL = "run_powershell"
+    RUN_PYTHON_SCRIPT = "run_python_script"
+    SHOW_NOTIFICATION = "show_notification"
 
 
 class ActionStatus(str, Enum):
@@ -224,6 +238,28 @@ class RpaAction:
             return "End group"
         if self.action == ActionType.RUN_SUBFLOW.value:
             return f"Run subflow: {data.get('flow_name') or data.get('project') or 'choose a flow'}"
+        if self.action == ActionType.LAUNCH_APPLICATION.value:
+            return f"Launch {data.get('path') or 'application'}"
+        if self.action in {ActionType.WAIT_PROCESS.value, ActionType.ACTIVATE_PROCESS.value, ActionType.CLOSE_PROCESS.value}:
+            verb = {ActionType.WAIT_PROCESS.value: "Wait for", ActionType.ACTIVATE_PROCESS.value: "Activate", ActionType.CLOSE_PROCESS.value: "Close"}[self.action]
+            return f"{verb} process {data.get('process_name') or '?'}"
+        if self.action == ActionType.READ_CLIPBOARD.value:
+            return f"Read clipboard into {data.get('output_variable') or 'variable'}"
+        if self.action == ActionType.WRITE_CLIPBOARD.value:
+            return "Write text to clipboard"
+        if self.action in {ActionType.COPY_PATH.value, ActionType.MOVE_PATH.value, ActionType.RENAME_PATH.value}:
+            verb = self.action.split("_", 1)[0].title()
+            return f"{verb} {data.get('source') or 'path'} to {data.get('destination') or '?'}"
+        if self.action == ActionType.DELETE_PATH.value:
+            return f"Delete {data.get('path') or 'path'}"
+        if self.action == ActionType.WAIT_PATH.value:
+            return f"Wait for {data.get('path') or 'file or folder'}"
+        if self.action == ActionType.RUN_POWERSHELL.value:
+            return "Run PowerShell command"
+        if self.action == ActionType.RUN_PYTHON_SCRIPT.value:
+            return f"Run Python script {data.get('path') or ''}".strip()
+        if self.action == ActionType.SHOW_NOTIFICATION.value:
+            return f"Show notification: {data.get('title') or 'Python RPA Recorder'}"
         return self.action
 
     def friendly_name(self) -> str:
@@ -357,6 +393,20 @@ FRIENDLY_ACTION_NAMES = {
     ActionType.GROUP_START.value: "Group",
     ActionType.GROUP_END.value: "End Group",
     ActionType.RUN_SUBFLOW.value: "Run Subflow",
+    ActionType.LAUNCH_APPLICATION.value: "Launch Application",
+    ActionType.WAIT_PROCESS.value: "Wait for Process",
+    ActionType.ACTIVATE_PROCESS.value: "Activate Process",
+    ActionType.CLOSE_PROCESS.value: "Close Process",
+    ActionType.READ_CLIPBOARD.value: "Read Clipboard",
+    ActionType.WRITE_CLIPBOARD.value: "Write Clipboard",
+    ActionType.COPY_PATH.value: "Copy File or Folder",
+    ActionType.MOVE_PATH.value: "Move File or Folder",
+    ActionType.RENAME_PATH.value: "Rename File or Folder",
+    ActionType.DELETE_PATH.value: "Delete File or Folder",
+    ActionType.WAIT_PATH.value: "Wait for File or Folder",
+    ActionType.RUN_POWERSHELL.value: "Run PowerShell Command",
+    ActionType.RUN_PYTHON_SCRIPT.value: "Run Python Script",
+    ActionType.SHOW_NOTIFICATION.value: "Show Desktop Notification",
 }
 
 

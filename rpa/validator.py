@@ -292,6 +292,17 @@ def _validate_action(
     issues: list[ValidationIssue],
 ) -> None:
     action_type = action.action
+    if action_type in {
+        ActionType.LAUNCH_APPLICATION.value, ActionType.WAIT_PROCESS.value,
+        ActionType.ACTIVATE_PROCESS.value, ActionType.CLOSE_PROCESS.value,
+        ActionType.READ_CLIPBOARD.value, ActionType.WRITE_CLIPBOARD.value,
+        ActionType.COPY_PATH.value, ActionType.MOVE_PATH.value, ActionType.RENAME_PATH.value,
+        ActionType.DELETE_PATH.value, ActionType.WAIT_PATH.value,
+        ActionType.RUN_POWERSHELL.value, ActionType.RUN_PYTHON_SCRIPT.value,
+        ActionType.SHOW_NOTIFICATION.value,
+    }:
+        _validate_utility_action(action_type, data, project_dir, number, name, issues)
+        return
     if action_type == ActionType.RUN_SUBFLOW.value:
         reference = str(data.get("project", "")).strip()
         if not reference:
@@ -485,6 +496,88 @@ def _validate_condition_data(
         _add(issues, LEVEL_ERROR, number, name, f"unsupported condition type: {condition_type}")
 
 
+def _validate_utility_action(
+    action_type: str, data: dict[str, Any], project_dir: Path | None,
+    number: int, name: str, issues: list[ValidationIssue],
+) -> None:
+    def path_value(key: str) -> tuple[str, Path | None]:
+        raw = str(data.get(key, "")).strip()
+        return raw, (_resolve_path(raw, project_dir) if raw and project_dir else None)
+
+    if action_type == ActionType.LAUNCH_APPLICATION.value:
+        raw, path = path_value("path")
+        if not raw:
+            _add(issues, LEVEL_ERROR, number, name, "choose an application to launch")
+        elif path and not path.is_file() and shutil.which(raw) is None:
+            _add(issues, LEVEL_ERROR, number, name, f"application is missing: {raw}")
+    elif action_type in {ActionType.WAIT_PROCESS.value, ActionType.ACTIVATE_PROCESS.value, ActionType.CLOSE_PROCESS.value}:
+        process = str(data.get("process_name", "")).strip()
+        if not process:
+            _add(issues, LEVEL_ERROR, number, name, "process name is required")
+        elif "/" in process or "\\" in process:
+            _add(issues, LEVEL_WARNING, number, name, "use the process filename, for example notepad.exe")
+    elif action_type == ActionType.READ_CLIPBOARD.value:
+        if not str(data.get("output_variable", "")).strip():
+            _add(issues, LEVEL_ERROR, number, name, "choose an output variable for the clipboard text")
+    elif action_type == ActionType.WRITE_CLIPBOARD.value:
+        if "text" not in data:
+            _add(issues, LEVEL_ERROR, number, name, "clipboard text is required")
+    elif action_type in {ActionType.COPY_PATH.value, ActionType.MOVE_PATH.value, ActionType.RENAME_PATH.value}:
+        source_raw, source = path_value("source")
+        destination_raw, destination = path_value("destination")
+        if not source_raw:
+            _add(issues, LEVEL_ERROR, number, name, "choose the source file or folder")
+        elif source and not source.exists():
+            _add(issues, LEVEL_ERROR, number, name, f"source is missing: {source_raw}")
+        if not destination_raw:
+            _add(issues, LEVEL_ERROR, number, name, "choose the destination path")
+        elif destination and destination.exists():
+            _add(issues, LEVEL_WARNING, number, name, f"destination already exists: {destination_raw}")
+        if destination and destination.parent.exists() and not os.access(destination.parent, os.W_OK):
+            _add(issues, LEVEL_ERROR, number, name, f"destination folder is not writable: {destination.parent}")
+    elif action_type == ActionType.DELETE_PATH.value:
+        raw, path = path_value("path")
+        if not raw:
+            _add(issues, LEVEL_ERROR, number, name, "choose the file or folder to delete")
+        elif path and not path.exists():
+            _add(issues, LEVEL_ERROR, number, name, f"delete target is missing: {raw}")
+        elif path and not os.access(path.parent, os.W_OK):
+            _add(issues, LEVEL_ERROR, number, name, f"delete target cannot be modified with current permissions: {raw}")
+    elif action_type == ActionType.WAIT_PATH.value:
+        raw, _path = path_value("path")
+        if not raw:
+            _add(issues, LEVEL_ERROR, number, name, "enter the file or folder to wait for")
+        if str(data.get("path_type", "either")) not in {"file", "folder", "either"}:
+            _add(issues, LEVEL_ERROR, number, name, "path type must be File, Folder, or Either")
+    elif action_type == ActionType.RUN_POWERSHELL.value:
+        if not str(data.get("command", "")).strip():
+            _add(issues, LEVEL_ERROR, number, name, "PowerShell command is required")
+        if os.name == "nt" and shutil.which("powershell.exe") is None and shutil.which("powershell") is None:
+            _add(issues, LEVEL_ERROR, number, name, "PowerShell executable was not found")
+    elif action_type == ActionType.RUN_PYTHON_SCRIPT.value:
+        raw, path = path_value("path")
+        if not raw:
+            _add(issues, LEVEL_ERROR, number, name, "choose a Python script")
+        elif path and (not path.is_file() or path.suffix.casefold() not in {".py", ".pyw"}):
+            _add(issues, LEVEL_ERROR, number, name, f"Python script is missing or invalid: {raw}")
+    elif action_type == ActionType.SHOW_NOTIFICATION.value:
+        if not str(data.get("message", "")).strip():
+            _add(issues, LEVEL_ERROR, number, name, "notification message is required")
+
+    if action_type in {ActionType.WAIT_PROCESS.value, ActionType.WAIT_PATH.value, ActionType.RUN_POWERSHELL.value, ActionType.RUN_PYTHON_SCRIPT.value}:
+        timeout = _finite_number(data.get("timeout", 30.0))
+        if timeout is None or timeout <= 0:
+            _add(issues, LEVEL_ERROR, number, name, "operation timeout must be greater than zero")
+    if "working_directory" in data and str(data.get("working_directory", "")).strip() and project_dir:
+        working = _resolve_path(str(data["working_directory"]), project_dir)
+        if not working.is_dir():
+            _add(issues, LEVEL_ERROR, number, name, f"working directory is missing: {data['working_directory']}")
+    for field, label in (("stderr_variable", "stderr variable"), ("exit_code_variable", "exit-code variable")):
+        value = str(data.get(field, "")).strip()
+        if value and not VARIABLE_NAME_PATTERN.fullmatch(value):
+            _add(issues, LEVEL_ERROR, number, name, f"{label} name is invalid")
+
+
 def _validate_coordinates(
     data: dict[str, Any], keys: tuple[str, str], number: int, name: str,
     issues: list[ValidationIssue], label: str,
@@ -538,6 +631,11 @@ def _collect_created_variables(action: RpaAction, variables: dict[str, Any]) -> 
     if action.action == ActionType.RUN_SUBFLOW.value and isinstance(action.data, dict):
         for parent_name in mapping_dict(action.data.get("output_mappings")).values():
             variables.setdefault(parent_name, 0)
+    if isinstance(action.data, dict):
+        for field in ("stderr_variable", "exit_code_variable"):
+            name = str(action.data.get(field, "")).strip()
+            if name:
+                variables.setdefault(name, 0)
     if action.action not in {ActionType.RUN_PYTHON.value, ActionType.PYTHON_CODE.value}:
         return
     code = str(action.data.get("code", "")) if isinstance(action.data, dict) else ""

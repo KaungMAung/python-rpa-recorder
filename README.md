@@ -315,6 +315,16 @@ Run Subflow uses the same retry count, retry delay, step timeout, final-failure 
 
 Manual check: create sibling flows `Parent` and `Child`; give Child a required `VALUE` Runtime Input, declared `RESULT` Output Variable, and a Python step that writes `variables['RESULT']`. In Parent, add Run Subflow, select Child, map `VALUE` from a parent variable and `RESULT` back to a parent output. Run Parent and confirm the nested log prefix, returned value, and nested step results in Run Details. Then temporarily rename Child's folder and confirm Validate Flow blocks the run with a missing-subflow error.
 
+## Windows Utility Steps
+
+**Add Step** includes Windows-oriented actions that avoid fragile screen clicks: Launch Application; Wait for, Activate, or Close Process; Read or Write Clipboard; Copy, Move, Rename, Delete, or Wait for a file/folder; Run PowerShell Command; Run Python Script; and Show Desktop Notification. Each form exposes only its relevant application/process/path/command fields and provides Browse or Pick Running controls. Paths, arguments, commands, messages, and working folders accept the same `{{VARIABLE}}` placeholders as other actions.
+
+PowerShell and Python Script steps capture stdout, stderr, exit code, and duration in the step's execution evidence. Optional output fields store stdout, stderr, and exit code in named variables for later steps. A non-zero exit code fails the step unless **Allow a non-zero exit code** is enabled. **Mask command and arguments in logs** replaces the stored command line with `[REDACTED]`; use sensitive Runtime Inputs as well when secret values are passed. Stop Run terminates a running child command promptly, including during retries and timeouts.
+
+All utility actions use the normal Advanced Settings for retry count, delay, step timeout, final-failure action, and evidence screenshots. Validation checks required fields, missing applications/scripts/source paths, output-variable names, working folders, destination permissions where Windows exposes them, operation timeouts, and PowerShell availability. A Wait for File/Folder target is intentionally allowed to be absent before execution. Delete is permanent and should be limited to a narrowly selected path. Existing Open File and Python Code steps remain compatible and unchanged.
+
+Manual check: launch Notepad, pick `notepad.exe` for Wait/Activate Process, write text to the clipboard and read it into an output variable, then copy/move/rename/delete a disposable file under a test folder. Run a PowerShell command that writes to both output streams and a Python script that returns a non-zero exit code; confirm stdout/stderr/code/duration in Run Details and failure handling. Finally run a long script, click Stop Run, and confirm its process exits promptly and the evidence status is Stopped.
+
 ## Manual Windows Verification With Notepad
 
 Run these checks on the same Windows account and display configuration that will run the automation. Start Notepad and Python RPA Recorder at the same elevation level unless the permission test specifically says otherwise.

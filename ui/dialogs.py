@@ -32,6 +32,7 @@ from rpa.variables import INPUT_TYPES, VARIABLE_NAME_PATTERN, validate_variable_
 from ui.condition_editor import ConditionEditor
 from ui.window_target_editor import WindowTargetEditor
 from ui.subflow_editor import SubflowEditor
+from ui.utility_action_editor import UTILITY_ACTIONS, UtilityActionEditor
 import shiboken6
 
 
@@ -94,6 +95,20 @@ class ManualActionDialog(QDialog):
             ("Hotkey", ActionType.HOTKEY.value),
             ("Scroll", ActionType.SCROLL.value),
             ("Open File", ActionType.OPEN_FILE.value),
+            ("Launch Application", ActionType.LAUNCH_APPLICATION.value),
+            ("Wait for Process", ActionType.WAIT_PROCESS.value),
+            ("Activate Process", ActionType.ACTIVATE_PROCESS.value),
+            ("Close Process", ActionType.CLOSE_PROCESS.value),
+            ("Read Clipboard", ActionType.READ_CLIPBOARD.value),
+            ("Write Clipboard", ActionType.WRITE_CLIPBOARD.value),
+            ("Copy File or Folder", ActionType.COPY_PATH.value),
+            ("Move File or Folder", ActionType.MOVE_PATH.value),
+            ("Rename File or Folder", ActionType.RENAME_PATH.value),
+            ("Delete File or Folder", ActionType.DELETE_PATH.value),
+            ("Wait for File or Folder", ActionType.WAIT_PATH.value),
+            ("Run PowerShell Command", ActionType.RUN_POWERSHELL.value),
+            ("Run Python Script", ActionType.RUN_PYTHON_SCRIPT.value),
+            ("Show Desktop Notification", ActionType.SHOW_NOTIFICATION.value),
             ("Run Python", ActionType.RUN_PYTHON.value),
             ("Python Code", ActionType.PYTHON_CODE.value),
             ("Run Subflow", ActionType.RUN_SUBFLOW.value),
@@ -170,6 +185,7 @@ class ManualActionDialog(QDialog):
             "repeat_count", "max_iterations", "iteration_delay", "window_editor", "relative_x", "relative_y",
             "scale_window", "absolute_fallback", "window_button", "window_move_duration",
             "subflow_editor",
+            "utility_editor",
         ):
             if hasattr(self, name):
                 delattr(self, name)
@@ -319,6 +335,10 @@ class ManualActionDialog(QDialog):
             )
             self.subflow_editor.changed.connect(self._update_summary)
             self.form.addRow("Saved flow", self.subflow_editor)
+        elif kind in UTILITY_ACTIONS:
+            self.utility_editor = UtilityActionEditor(kind, variables=list(self.variables), parent=self)
+            self.utility_editor.changed.connect(self._update_summary)
+            self.form.addRow(self.utility_editor)
         else:
             self.form.addRow(QLabel("This advanced step can be edited after insertion."))
         self._update_summary()
@@ -431,6 +451,27 @@ class ManualActionDialog(QDialog):
                 return "Complete the Repeat Until condition."
         if action.action == ActionType.RUN_SUBFLOW.value and not str(data.get("project", "")).strip():
             return "Choose the saved flow to run."
+        required = {
+            ActionType.LAUNCH_APPLICATION.value: ("path", "Choose an application to launch."),
+            ActionType.WAIT_PROCESS.value: ("process_name", "Choose or enter a process name."),
+            ActionType.ACTIVATE_PROCESS.value: ("process_name", "Choose or enter a process name."),
+            ActionType.CLOSE_PROCESS.value: ("process_name", "Choose or enter a process name."),
+            ActionType.READ_CLIPBOARD.value: ("output_variable", "Enter a variable for the clipboard text."),
+            ActionType.COPY_PATH.value: ("source", "Choose the source file or folder."),
+            ActionType.MOVE_PATH.value: ("source", "Choose the source file or folder."),
+            ActionType.RENAME_PATH.value: ("source", "Choose the source file or folder."),
+            ActionType.DELETE_PATH.value: ("path", "Choose the file or folder to delete."),
+            ActionType.WAIT_PATH.value: ("path", "Enter the file or folder to wait for."),
+            ActionType.RUN_POWERSHELL.value: ("command", "Enter a PowerShell command."),
+            ActionType.RUN_PYTHON_SCRIPT.value: ("path", "Choose a Python script."),
+            ActionType.SHOW_NOTIFICATION.value: ("message", "Enter the notification message."),
+        }
+        if action.action in required:
+            field, message = required[action.action]
+            if not str(data.get(field, "")).strip():
+                return message
+        if action.action in {ActionType.COPY_PATH.value, ActionType.MOVE_PATH.value, ActionType.RENAME_PATH.value} and not str(data.get("destination", "")).strip():
+            return "Choose the destination path."
         if action.action in WINDOW_ACTIONS:
             window = data.get("window", {})
             has_target = any(str(window.get(key, "")).strip() for key in ("process_name", "window_title", "class_name"))
@@ -524,6 +565,8 @@ class ManualActionDialog(QDialog):
             return RpaAction(kind, data)
         if kind == ActionType.RUN_SUBFLOW.value:
             return RpaAction(kind, self.subflow_editor.data())
+        if kind in UTILITY_ACTIONS:
+            return RpaAction(kind, self.utility_editor.data())
         defaults = {
             ActionType.WAIT.value: {"seconds": 1.0},
             ActionType.TYPE_TEXT.value: {"text": "", "interval": 0.02, "clear_first": False, "masked": False},

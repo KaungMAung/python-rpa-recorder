@@ -10,6 +10,16 @@ from pathlib import Path
 from .models import ActionType, RpaProject
 from .control_flow import CONTROL_TYPES, parse_control_flow
 
+UTILITY_ACTION_TYPES = {
+    ActionType.LAUNCH_APPLICATION.value, ActionType.WAIT_PROCESS.value,
+    ActionType.ACTIVATE_PROCESS.value, ActionType.CLOSE_PROCESS.value,
+    ActionType.READ_CLIPBOARD.value, ActionType.WRITE_CLIPBOARD.value,
+    ActionType.COPY_PATH.value, ActionType.MOVE_PATH.value, ActionType.RENAME_PATH.value,
+    ActionType.DELETE_PATH.value, ActionType.WAIT_PATH.value,
+    ActionType.RUN_POWERSHELL.value, ActionType.RUN_PYTHON_SCRIPT.value,
+    ActionType.SHOW_NOTIFICATION.value,
+}
+
 
 def generate_python(project: RpaProject, project_dir: Path) -> Path:
     out_dir = Path(project_dir) / "generated"
@@ -232,7 +242,12 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
         if any(action.action == ActionType.RUN_SUBFLOW.value for action in project.actions)
         else []
     )
-    lines[helper_insert:helper_insert] = _generated_window_helpers() + subflow_helpers
+    utility_helpers = (
+        _generated_utility_helpers()
+        if any(action.action in UTILITY_ACTION_TYPES for action in project.actions)
+        else []
+    )
+    lines[helper_insert:helper_insert] = _generated_window_helpers() + subflow_helpers + utility_helpers
     if function_lines:
         insert_at = lines.index("def main():")
         lines[insert_at:insert_at] = function_lines
@@ -409,6 +424,8 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
                 f"{data.get('project', '')!r}, {data.get('input_mappings', {})!r}, "
                 f"{data.get('output_mappings', {})!r})"
             )
+        elif action.action in UTILITY_ACTION_TYPES:
+            lines.append(f"    run_utility_action({action.action!r}, {data!r})")
         elif action.action == ActionType.CLICK_COORDINATE.value:
             lines.append("    time.sleep(PRE_CLICK_PAUSE)")
             lines.append(f"    click_x, click_y = as_int({data.get('x', 0)!r}), as_int({data.get('y', 0)!r})")
@@ -543,6 +560,20 @@ def run_subflow(reference, input_mappings, output_mappings):
     for child_name, parent_name in dict(output_mappings or {}).items():
         if child_name in runner.runtime_variables:
             RUNTIME_VARIABLES[parent_name] = runner.runtime_variables[child_name]
+'''
+    return textwrap.dedent(source).strip().splitlines() + [""]
+
+
+def _generated_utility_helpers() -> list[str]:
+    source = r'''
+def run_utility_action(action_type, data):
+    from rpa.models import RpaAction, RpaProject
+    from rpa.runner import ReplayRunner
+    utility_runner = ReplayRunner(RpaProject(), PROJECT_DIR, lambda message: print(f'[Utility] {message}'))
+    utility_runner.runtime_variables = RUNTIME_VARIABLES
+    utility_runner.run_action(RpaAction(action_type, dict(data)), RUNTIME_VARIABLES)
+    if utility_runner._last_utility_result:
+        print('[Utility] result:', utility_runner._last_utility_result)
 '''
     return textwrap.dedent(source).strip().splitlines() + [""]
 

@@ -30,6 +30,7 @@ from rpa.control_flow import CONTROL_TYPES, METADATA_TYPES
 from ui.condition_editor import ConditionEditor
 from ui.window_target_editor import WindowTargetEditor
 from ui.subflow_editor import SubflowEditor
+from ui.utility_action_editor import UTILITY_ACTIONS, UtilityActionEditor
 
 
 WINDOW_ACTIONS = {
@@ -271,6 +272,10 @@ class ActionEditor(QWidget):
             subflow.changed.connect(lambda: self._set_subflow_data(subflow.data()))
             subflow.open_requested.connect(self.open_subflow_requested)
             self.form.addRow("Saved flow", subflow)
+        elif action.action in UTILITY_ACTIONS:
+            utility = UtilityActionEditor(action.action, data, self.available_variables, self)
+            utility.changed.connect(lambda: self._set_utility_data(utility.data()))
+            self.form.addRow(utility)
         elif is_click_image:
             self._click_image_fields(data)
         elif action.action == ActionType.TYPE_TEXT.value:
@@ -382,6 +387,17 @@ class ActionEditor(QWidget):
                 "failure_jump_step", "capture_failure_screenshot", "capture_before", "capture_after",
             }
         }
+        self.action.data = {**data, **common}
+        self.action_changed.emit()
+
+    def _set_utility_data(self, data: dict) -> None:
+        if self._loading or not self.action:
+            return
+        common_keys = {
+            "retry_count", "retry_delay", "step_timeout", "failure_action",
+            "failure_jump_step", "capture_failure_screenshot", "capture_before", "capture_after",
+        }
+        common = {key: value for key, value in self.action.data.items() if key in common_keys}
         self.action.data = {**data, **common}
         self.action_changed.emit()
 

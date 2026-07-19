@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import subprocess
+import os
+import shutil
+import sys
 import threading
 import time
 from contextlib import redirect_stdout
@@ -18,6 +21,11 @@ from .utils import MissingPlaceholderError, foreground_elevation_mismatch, resol
 from .variables import prepare_runtime_variables
 from .windowing import (
     WindowResolver, WindowTargetError, describe_window_target, normalize_window_target,
+)
+from .native_utilities import (
+    CommandTimeoutError, command_arguments, copy_path, delete_path, move_path, process_window,
+    read_clipboard_text, run_command_interruptible, show_notification,
+    wait_for_process, write_clipboard_text,
 )
 
 pyautogui = None
@@ -65,6 +73,7 @@ class ReplayRunner:
         self._last_window_result: dict[str, Any] | None = None
         self._last_image_result: dict[str, Any] | None = None
         self._last_subflow_result: dict[str, Any] | None = None
+        self._last_utility_result: dict[str, Any] | None = None
         self._active_subrunner: ReplayRunner | None = None
         self.subflow_stack: list[Path] = [(self.project_dir / "project.json").resolve()]
         self._debug_condition = threading.Condition()
@@ -240,6 +249,7 @@ class ReplayRunner:
                 self._last_window_result = None
                 self._last_image_result = None
                 self._last_subflow_result = None
+                self._last_utility_result = None
                 control_data = resolve_placeholders_strict(action.data, self.runtime_variables)
             except MissingPlaceholderError:
                 control_data = action.data
@@ -266,6 +276,11 @@ class ReplayRunner:
                 except MissingPlaceholderError as exc:
                     final_error = ValueError(f"missing variable '{exc.variable}'")
                 except StopReplay:
+                    if self._last_utility_result:
+                        record["utility_result"] = dict(self._last_utility_result)
+                    self._finish_step_record(record, "Stopped", "Stopped by user")
+                    if action_callback:
+                        action_callback(index, "stopped")
                     raise
                 except Exception as exc:
                     final_error = self._friendly_runtime_error(exc)
@@ -287,6 +302,8 @@ class ReplayRunner:
                     record["image_match"] = dict(self._last_image_result)
                 if self._last_subflow_result:
                     record["subflow"] = dict(self._last_subflow_result)
+                if self._last_utility_result:
+                    record["utility_result"] = dict(self._last_utility_result)
                 if action_callback:
                     action_callback(index, "failed")
                 failure_message = str(final_error)
@@ -325,6 +342,8 @@ class ReplayRunner:
                 record["image_match"] = dict(self._last_image_result)
             if self._last_subflow_result:
                 record["subflow"] = dict(self._last_subflow_result)
+            if self._last_utility_result:
+                record["utility_result"] = dict(self._last_utility_result)
             self._capture_step_screenshot(record, index, "after", bool(action.data.get("capture_after")))
             self._finish_step_record(record, "Success")
             self.log(f"action completed: {index + 1} {action.action}")
@@ -662,6 +681,16 @@ class ReplayRunner:
             self.run_python_code(action, data, variables, step_number)
         elif action.action == ActionType.RUN_SUBFLOW.value:
             self._run_subflow(action, data, variables, step_number)
+        elif action.action in {
+            ActionType.LAUNCH_APPLICATION.value, ActionType.WAIT_PROCESS.value,
+            ActionType.ACTIVATE_PROCESS.value, ActionType.CLOSE_PROCESS.value,
+            ActionType.READ_CLIPBOARD.value, ActionType.WRITE_CLIPBOARD.value,
+            ActionType.COPY_PATH.value, ActionType.MOVE_PATH.value, ActionType.RENAME_PATH.value,
+            ActionType.DELETE_PATH.value, ActionType.WAIT_PATH.value,
+            ActionType.RUN_POWERSHELL.value, ActionType.RUN_PYTHON_SCRIPT.value,
+            ActionType.SHOW_NOTIFICATION.value,
+        }:
+            self._run_native_utility(action, data, variables)
         else:
             raise ValueError(f"Unsupported action: {action.action}")
 
@@ -669,6 +698,130 @@ class ReplayRunner:
         if self.window_resolver is None:
             self.window_resolver = WindowResolver(sleep=self.sleep_checked)
         return self.window_resolver
+
+    def _project_path(self, value: Any) -> Path:
+        path = Path(os.path.expandvars(os.path.expanduser(str(value))))
+        return path if path.is_absolute() else self.project_dir / path
+
+    def _utility_cancelled(self) -> bool:
+        if self.stop_requested():
+            raise StopReplay()
+        return self._step_timed_out()
+
+    def _run_native_utility(
+        self, action: RpaAction, data: dict[str, Any], variables: dict[str, Any],
+    ) -> None:
+        started = time.monotonic()
+        kind = action.action
+        result: dict[str, Any]
+        if kind == ActionType.LAUNCH_APPLICATION.value:
+            raw_executable = str(data.get("path", ""))
+            candidate = self._project_path(raw_executable)
+            executable = str(candidate) if candidate.is_file() else (shutil.which(raw_executable) or str(candidate))
+            arguments = command_arguments(data.get("arguments", ""))
+            working = str(self._project_path(data["working_directory"])) if data.get("working_directory") else None
+            try:
+                process = subprocess.Popen([executable, *arguments], cwd=working or None, shell=False)
+            except OSError as exc:
+                raise RuntimeError(f"could not launch application: {exc}") from exc
+            result = {"pid": process.pid, "path": executable, "duration_seconds": time.monotonic() - started}
+            self._store_output(data, variables, process.pid)
+        elif kind == ActionType.WAIT_PROCESS.value:
+            result = wait_for_process(
+                str(data.get("process_name", "")), float(data.get("timeout", 30.0)),
+                float(data.get("retry_interval", 0.25)), self._utility_cancelled,
+            )
+            self._store_output(data, variables, result.get("pid"))
+        elif kind in {ActionType.ACTIVATE_PROCESS.value, ActionType.CLOSE_PROCESS.value}:
+            result = process_window(
+                str(data.get("process_name", "")), close=kind == ActionType.CLOSE_PROCESS.value,
+            )
+        elif kind == ActionType.READ_CLIPBOARD.value:
+            text = read_clipboard_text()
+            self._store_output(data, variables, text)
+            result = {"characters": len(text), "value": "[PROTECTED]" if data.get("sensitive") else text}
+        elif kind == ActionType.WRITE_CLIPBOARD.value:
+            text = str(data.get("text", ""))
+            write_clipboard_text(text)
+            variables["CLIPBOARD_TEXT"] = text
+            result = {"characters": len(text), "value": "[PROTECTED]" if data.get("sensitive") else text}
+        elif kind in {ActionType.COPY_PATH.value, ActionType.MOVE_PATH.value, ActionType.RENAME_PATH.value}:
+            source = self._project_path(data.get("source", ""))
+            destination = self._project_path(data.get("destination", ""))
+            if kind == ActionType.COPY_PATH.value:
+                completed = copy_path(source, destination)
+            else:
+                completed = move_path(source, destination)
+            result = {"source": str(source), "destination": str(completed), "operation": kind}
+            self._store_output(data, variables, str(completed))
+        elif kind == ActionType.DELETE_PATH.value:
+            target = self._project_path(data.get("path", ""))
+            delete_path(target)
+            result = {"path": str(target), "deleted": True}
+        elif kind == ActionType.WAIT_PATH.value:
+            target = self._project_path(data.get("path", ""))
+            path_type = str(data.get("path_type", "either"))
+            deadline = time.monotonic() + float(data.get("timeout", 30.0))
+            while True:
+                exists = target.is_file() if path_type == "file" else target.is_dir() if path_type == "folder" else target.exists()
+                if exists:
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"{path_type} did not appear after {float(data.get('timeout', 30.0)):.1f}s: {target}")
+                self.sleep_checked(float(data.get("retry_interval", 0.25)))
+            result = {"path": str(target), "path_type": path_type}
+            self._store_output(data, variables, str(target))
+        elif kind in {ActionType.RUN_POWERSHELL.value, ActionType.RUN_PYTHON_SCRIPT.value}:
+            if kind == ActionType.RUN_POWERSHELL.value:
+                executable = shutil.which("powershell.exe") or shutil.which("powershell")
+                if not executable:
+                    raise FileNotFoundError("PowerShell executable was not found")
+                command = [executable, "-NoProfile", "-NonInteractive", "-Command", str(data.get("command", ""))]
+            else:
+                current = Path(sys.executable)
+                executable = str(current) if current.stem.casefold().startswith("python") else (shutil.which("python.exe") or shutil.which("python"))
+                if not executable:
+                    raise FileNotFoundError("Python interpreter was not found")
+                command = [executable, str(self._project_path(data.get("path", ""))), *command_arguments(data.get("arguments", ""))]
+            working = str(self._project_path(data["working_directory"])) if data.get("working_directory") else None
+            try:
+                result = run_command_interruptible(
+                    command, working, float(data.get("timeout", 60.0)), self._utility_cancelled,
+                )
+            except CommandTimeoutError as exc:
+                result = dict(exc.result)
+                result["command"] = "[REDACTED]" if data.get("sensitive") else command
+                self._last_utility_result = result
+                raise
+            except StopReplay as exc:
+                result = dict(getattr(exc, "command_result", {}))
+                result["command"] = "[REDACTED]" if data.get("sensitive") else command
+                self._last_utility_result = result
+                raise
+            result["command"] = "[REDACTED]" if data.get("sensitive") else command
+            self._store_output(data, variables, result.get("stdout", "").rstrip("\r\n"))
+            if str(data.get("stderr_variable", "")).strip():
+                variables[str(data["stderr_variable"]).strip()] = result.get("stderr", "").rstrip("\r\n")
+            if str(data.get("exit_code_variable", "")).strip():
+                variables[str(data["exit_code_variable"]).strip()] = result.get("exit_code")
+            self._last_utility_result = dict(result)
+            if result.get("exit_code") and not data.get("allow_nonzero_exit", False):
+                raise RuntimeError(f"command exited with code {result['exit_code']}: {result.get('stderr', '').strip() or 'no error output'}")
+        elif kind == ActionType.SHOW_NOTIFICATION.value:
+            show_notification(str(data.get("title", "Python RPA Recorder")), str(data.get("message", "")))
+            result = {"title": str(data.get("title", "")), "shown": True}
+        else:
+            raise ValueError(f"unsupported utility action: {kind}")
+        result.setdefault("duration_seconds", max(0.0, time.monotonic() - started))
+        self._last_utility_result = result
+        if "exit_code" in result:
+            detail = (
+                f"exit={result['exit_code']}, stdout={len(result.get('stdout', ''))} chars, "
+                f"stderr={len(result.get('stderr', ''))} chars, duration={result['duration_seconds']:.2f}s"
+            )
+        else:
+            detail = f"duration={result['duration_seconds']:.2f}s"
+        self.log(f"utility completed: {action.friendly_name()} ({detail})")
 
     def _run_subflow(
         self, action: RpaAction, data: dict[str, Any], variables: dict[str, Any], step_number: int,
