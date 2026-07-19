@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QItemSelectionModel
+from PySide6.QtCore import QItemSelectionModel, QPointF, Qt
+from PySide6.QtGui import QDropEvent
 from PySide6.QtWidgets import QApplication
 
 from rpa.control_flow import parse_control_flow
@@ -188,6 +189,67 @@ def test_filter_blocks_reorder_without_changing_order(monkeypatch) -> None:
     window.reorder_selected_steps([0], 2)
     assert [action.id for action in window.project.actions] == original
     window.close()
+
+
+def test_real_table_drop_renders_moved_row_immediately_and_round_trips(tmp_path: Path) -> None:
+    app = _app()
+    window = MainWindow()
+    actions = [
+        RpaAction(ActionType.WAIT.value, {"seconds": index / 10}, name=f"Named step {index + 1}")
+        for index in range(14)
+    ]
+    moved_id = actions[2].id
+    original_ids = [action.id for action in actions]
+    window.project = RpaProject(actions=actions)
+    window.refresh()
+    window._reset_history()
+    window.resize(1200, 800)
+    window.show()
+    app.processEvents()
+
+    window.table.selectRow(2)
+    source_indexes = [window.table.model().index(2, column) for column in range(window.table.columnCount())]
+    mime_data = window.table.model().mimeData(source_indexes)
+    destination_rect = window.table.visualRect(window.table.model().index(10, 0))
+    drop_position = QPointF(destination_rect.center().x(), destination_rect.bottom() - 1)
+    event = QDropEvent(
+        drop_position, Qt.MoveAction, mime_data, Qt.LeftButton, Qt.NoModifier,
+    )
+
+    # Invoke the actual ActionTable drop path. The model mutation is deliberately
+    # finalized on the next Qt turn, after QTableWidget's InternalMove cleanup.
+    window.table.dropEvent(event)
+    assert event.isAccepted()
+    assert [action.id for action in window.project.actions] == original_ids
+    app.processEvents()
+
+    assert window.project.actions[10].id == moved_id
+    assert window.table.selected_indices() == [10]
+    assert window.editor.action is not None and window.editor.action.id == moved_id
+    for row in range(window.table.rowCount()):
+        assert window.table.item(row, 0) is not None
+        assert window.table.item(row, 0).text() == str(row + 1)
+        for column in range(window.table.columnCount()):
+            assert window.table.item(row, column) is not None
+    assert window.table.item(10, 2).text() == "Named step 3"
+
+    window.filter_box.setText("Named step 3")
+    assert not window.table.isRowHidden(10)
+    assert sum(not window.table.isRowHidden(row) for row in range(window.table.rowCount())) == 1
+    window.filter_box.clear()
+
+    window.undo()
+    assert [action.id for action in window.project.actions] == original_ids
+    window.redo()
+    assert window.project.actions[10].id == moved_id
+
+    ProjectManager().save(window.project, tmp_path)
+    loaded = ProjectManager().load(tmp_path / "project.json")
+    assert loaded.actions[10].id == moved_id
+    generated = generate_python(loaded, tmp_path)
+    compile(generated.read_text(encoding="utf-8"), str(generated), "exec")
+    window.close()
+    app.processEvents()
 
 
 def test_ui_bulk_enable_wait_delete_and_clipboard_are_undoable(monkeypatch) -> None:

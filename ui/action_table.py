@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QMenu, QTableWidget, QTableWidgetItem
 
@@ -36,6 +36,10 @@ class ActionTable(QTableWidget):
         self._flow = parse_control_flow([])
         self._collapsed_action_ids: set[str] = set()
         self._filter_text = ""
+        self._pending_reorder: tuple[list[int], int] | None = None
+        self._drop_finalize_timer = QTimer(self)
+        self._drop_finalize_timer.setSingleShot(True)
+        self._drop_finalize_timer.timeout.connect(self._finish_drop)
         self.setHorizontalHeaderLabels(self.HEADERS)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -231,8 +235,21 @@ class ActionTable(QTableWidget):
             target = self.rowCount()
         elif self.visualRect(self.model().index(target, 0)).center().y() < position.y():
             target += 1
-        self.reorder_requested.emit(rows, target)
+        # QTableWidget completes InternalMove source cleanup *after* dropEvent
+        # returns. Emitting synchronously lets the application repopulate the
+        # table first, after which Qt clears cells from that fresh rendering.
+        # Finish the project/model reorder on the next event-loop turn, once
+        # Qt's drag bookkeeping is complete.
+        self._pending_reorder = (list(rows), target)
         event.acceptProposedAction()
+        self._drop_finalize_timer.start(0)
+
+    def _finish_drop(self) -> None:
+        pending = self._pending_reorder
+        self._pending_reorder = None
+        if pending is not None:
+            rows, target = pending
+            self.reorder_requested.emit(rows, target)
 
     def _context_menu(self, position) -> None:
         item = self.itemAt(position)
