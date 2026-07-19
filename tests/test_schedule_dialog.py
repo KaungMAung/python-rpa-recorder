@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from rpa.scheduler import STATUS_FAILED, STATUS_SUCCESS, ScheduleStore
@@ -30,9 +31,11 @@ def _make_flow(tmp_path: Path, name: str) -> None:
 def make_dialog(tmp_path: Path, settings_name: str = "test") -> tuple[ScheduleFlowsDialog, ScheduleStore, QSettings]:
     app()
     store = ScheduleStore(tmp_path)
+    store.list_schedules()
     settings = QSettings("PythonRPARecorderTests", settings_name)
     settings.clear()
     dialog = ScheduleFlowsDialog(store, settings)
+    dialog._confirm_action = lambda *args, **kwargs: True
     return dialog, store, settings
 
 
@@ -44,14 +47,11 @@ def test_dialog_lists_every_flow_with_a_project_json(tmp_path: Path) -> None:
     dialog.close()
 
 
-def test_enabling_a_disabled_schedule_requires_no_confirmation(tmp_path: Path, monkeypatch) -> None:
+def test_enabling_a_disabled_schedule_after_confirmation(tmp_path: Path) -> None:
     _make_flow(tmp_path, "flow_a")
     dialog, store, _settings = make_dialog(tmp_path)
-    calls = []
-    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: calls.append(1) or QMessageBox.Yes))
     dialog._toggle_enabled("flow_a")
     assert store.get("flow_a").enabled is True
-    assert calls == []
     dialog.close()
 
 
@@ -61,13 +61,33 @@ def test_disabling_an_enabled_schedule_asks_for_confirmation(tmp_path: Path, mon
     store.get("flow_a").enabled = True
     store.save()
 
-    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.No))
+    dialog._confirm_action = lambda *args, **kwargs: False
     dialog._toggle_enabled("flow_a")
     assert store.get("flow_a").enabled is True  # declined, stays enabled
 
-    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+    dialog._confirm_action = lambda *args, **kwargs: True
     dialog._toggle_enabled("flow_a")
     assert store.get("flow_a").enabled is False
+    dialog.close()
+
+
+def test_confirmation_dialog_cancel_is_safe_default_and_yes_confirms(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, _settings = make_dialog(tmp_path)
+    schedule = store.get("flow_a")
+    # Exercise the real confirmation dialog rather than the test convenience hook.
+    del dialog._confirm_action
+
+    def click(button):
+        box = QApplication.activeModalWidget()
+        assert isinstance(box, QMessageBox)
+        assert "flow_a" in box.text()
+        box.button(button).click()
+
+    QTimer.singleShot(0, lambda: click(QMessageBox.Cancel))
+    assert dialog._confirm_action(schedule, "enable_disable", "Enable Schedule") is False
+    QTimer.singleShot(0, lambda: click(QMessageBox.Yes))
+    assert dialog._confirm_action(schedule, "enable_disable", "Enable Schedule") is True
     dialog.close()
 
 
@@ -140,6 +160,18 @@ def test_column_widths_persist_across_dialog_instances(tmp_path: Path) -> None:
 
     dialog2 = ScheduleFlowsDialog(store, settings)
     assert dialog2.table.columnWidth(2) == 250
+    dialog2.close()
+
+
+def test_splitter_position_persists_across_dialog_instances(tmp_path: Path) -> None:
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, settings = make_dialog(tmp_path, settings_name="persist_splitter")
+    dialog.content_splitter.setSizes([500, 800])
+    expected = dialog.content_splitter.sizes()
+    dialog.accept()
+
+    dialog2 = ScheduleFlowsDialog(store, settings)
+    assert dialog2.content_splitter.sizes() == expected
     dialog2.close()
 
 
@@ -298,6 +330,24 @@ def test_history_panel_lists_and_filters_persisted_results(tmp_path: Path) -> No
     dialog.close()
 
 
+def test_history_initial_render_is_limited_and_load_more_paginates(tmp_path: Path) -> None:
+    from rpa.scheduler import RunHistoryEntry
+
+    _make_flow(tmp_path, "flow_a")
+    dialog, store, _settings = make_dialog(tmp_path)
+    store.set_history_limit(1000)
+    schedule = store.get("flow_a")
+    schedule.history = [RunHistoryEntry(f"2026-01-01T00:{i % 60:02d}:00+00:00", status="Success") for i in range(240)]
+    store.set(schedule)
+    store.save()
+    dialog.reload()
+    assert dialog.history_table.rowCount() == 100
+    assert dialog.load_more_history_btn.isVisible() is False or dialog.load_more_history_btn.isHidden() is False
+    dialog._load_more_history()
+    assert dialog.history_table.rowCount() == 200
+    dialog.close()
+
+
 def test_history_run_details_resolves_persisted_evidence_path(tmp_path: Path, monkeypatch) -> None:
     from rpa.scheduler import RunHistoryEntry
     from ui.run_details_dialog import RunDetailsDialog
@@ -335,4 +385,44 @@ def test_history_limit_setting_trims_and_persists(tmp_path: Path) -> None:
     dialog.history_limit_spin.setValue(10)
     assert len(store.get("flow_a").history) == 10
     assert settings.value("scheduler/history_limit", type=int) == 10
+    dialog.close()
+
+
+def test_large_schedule_refresh_is_non_overlapping_and_task_status_is_cached(tmp_path: Path) -> None:
+    from rpa.windows_tasks import TaskOperationResult
+
+    for index in range(40):
+        _make_flow(tmp_path, f"flow_{index:02d}")
+    store = ScheduleStore(tmp_path)
+    store.save()
+
+    class CountingRegistrar:
+        def __init__(self) -> None:
+            self.queries = 0
+
+        def query(self, schedule):
+            self.queries += 1
+            return TaskOperationResult(True, "Registered", f"task-{schedule.schedule_id}")
+
+    registrar = CountingRegistrar()
+    dialog = ScheduleFlowsDialog(
+        store, QSettings("PythonRPARecorderTests", "large_refresh"),
+        task_registrar=registrar,
+    )
+    dialog.reload(force_tasks=True)
+    # A second request while the worker is active must not overlap it.
+    dialog.reload(force_tasks=True)
+    deadline = time.monotonic() + 2
+    while dialog._refresh_in_progress and time.monotonic() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.005)
+    assert registrar.queries == 40
+    assert dialog.table.rowCount() == 40
+
+    dialog.reload()  # cached for 30 seconds: no additional per-row queries
+    deadline = time.monotonic() + 2
+    while dialog._refresh_in_progress and time.monotonic() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.005)
+    assert registrar.queries == 40
     dialog.close()

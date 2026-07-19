@@ -79,12 +79,29 @@ Select a row to open its Details panel. The panel shows the latest run, duration
 - **Run Now** - starts the standalone runner immediately without affecting its schedule or next run time.
 - **Test Run** - launches the exact command stored in the Windows task, including the project path and schedule ID.
 - **Repair / Register Task** - recreates or updates a missing/broken task and shows the exact registration error if Windows rejects it.
-- **Pause / Resume** - temporarily stops automatic runs while keeping the interval configuration intact. No confirmation needed.
-- **Enable / Disable** - fully turns the schedule on or off. Disabling asks for confirmation first.
+- **Pause / Resume** - temporarily stops automatic runs while keeping the interval configuration intact.
+- **Enable / Disable** - fully turns the schedule on or off.
 - **Details** - selects the row and opens full run information in the side panel (failure details also remain available on the Last status tooltip).
 - **Delete Schedule** - removes that schedule and its corresponding Windows task. Other schedules for the same flow are unaffected.
 
 The header shows the auto-refresh state and refreshes every 5 seconds so task state and countdowns stay current; use **Refresh** or `F5` for an immediate update. `Running` is shown only when Task Scheduler's explicit state field says the task is running; descriptive settings containing the word "running" are ignored. Click `Flow`, `Last run`, `Next run`, or `Last status` headers to sort (click again to reverse); column widths and the chosen sort order are remembered between openings. Row selection and all controls support keyboard navigation.
+
+The table and Details panel now use a resizable splitter with a wider default Details area. The splitter position,
+column widths, sort order, and Advanced section state are remembered. Long task names and errors wrap in Details and
+expose their full value in a tooltip. Primary actions remain visible in a compact grid; Test Run, runtime inputs, and
+Delete are under **More Actions**. Less-used privilege, timeout, input, and retention controls are under
+**Advanced Schedule Settings**. Run history is larger, opens a run on double-click, and initially renders only the
+newest 100 matching entries; **Load More** paginates large histories.
+
+Enable, Disable, Pause, Resume, Delete, Repair/Register, Run Now, and Test Run show a confirmation naming the exact
+flow and action, with Cancel as the safe default. Only Run Now and Pause/Resume can remember **Do not ask again**;
+destructive and system-level actions always confirm.
+
+Automatic refresh uses a non-overlapping background read for schedules and Windows tasks. Task status is cached for
+30 seconds rather than queried once per schedule on every five-second tick; **Refresh** or `F5` forces a new status
+pass. Existing rows update in place to preserve selection, sorting, and scroll position, and history is rendered only
+for the selected flow. Stale background results are discarded after edits. Timing log entries cover dialog opening,
+schedule loading, Windows task querying, history rendering, and table/details refresh.
 
 Each Windows task runs only while the Windows user is logged on, starts as soon as practical after a missed start, and uses the Task Scheduler **IgnoreNew** policy so a second instance of the same schedule cannot overlap its active run. In Details, optionally set an execution timeout or enable **Run with highest privileges**. The recorder never stores a Windows password. If registration needs elevation, only the small task-registration helper requests UAC approval; the main application is not relaunched as administrator.
 

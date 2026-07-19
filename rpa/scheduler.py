@@ -10,6 +10,8 @@ history) survives app restarts.
 from __future__ import annotations
 
 import json
+import os
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -329,9 +331,22 @@ class ScheduleStore:
                 if extra.flow_name == name
             ]
             payload[name] = data
-        temporary = self.path.with_suffix(".json.tmp")
+        temporary = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
         temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        temporary.replace(self.path)
+        try:
+            for attempt in range(5):
+                try:
+                    os.replace(temporary, self.path)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    # Windows can briefly deny replacement while a background
+                    # refresh is opening the previous JSON file.
+                    time.sleep(0.01 * (attempt + 1))
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
     def set_history_limit(self, limit: int) -> None:
         """Change retention and immediately trim persisted in-memory histories."""
@@ -384,6 +399,22 @@ class ScheduleStore:
             if schedule.flow_name in existing
         )
         return schedules
+
+    def cached_schedules(self) -> list[FlowSchedule]:
+        """Return the loaded model without scanning project directories.
+
+        UI refreshes use this for immediate redraws while filesystem discovery
+        happens in a background ScheduleStore instance.
+        """
+        return [*self._schedules.values(), *self._additional_schedules.values()]
+
+    def adopt_loaded_state(self, other: "ScheduleStore") -> None:
+        """Adopt a completed background load without reading disk again."""
+        if self.flows_root.resolve() != other.flows_root.resolve():
+            raise ValueError("Cannot adopt schedules loaded from a different flows root")
+        self._schedules = other._schedules
+        self._additional_schedules = other._additional_schedules
+        self._task_registration_migrations = other._task_registration_migrations
 
     def create_schedule(self, flow_name: str) -> FlowSchedule:
         self.get(flow_name)

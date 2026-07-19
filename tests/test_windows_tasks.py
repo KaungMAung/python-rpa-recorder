@@ -324,6 +324,7 @@ def test_schedule_dialog_syncs_add_edit_disable_delete_and_test_run(tmp_path: Pa
     dialog = ScheduleFlowsDialog(
         store, QSettings("tests", "windows_tasks_dialog"), task_registrar=fake,
     )
+    dialog._confirm_action = lambda *args, **kwargs: True
     dialog._toggle_enabled(primary.schedule_id)
     assert primary.schedule_id in fake.synced
     dialog._repair_task(primary.schedule_id)
@@ -347,6 +348,7 @@ def test_legacy_saved_schedule_is_registered_once_but_missing_task_stays_visible
     tmp_path: Path, monkeypatch,
 ) -> None:
     import json
+    import time
     from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QApplication
     from ui.schedule_dialog import ScheduleFlowsDialog
@@ -373,10 +375,15 @@ def test_legacy_saved_schedule_is_registered_once_but_missing_task_stays_visible
         ScheduleStore(tmp_path), QSettings("tests", "legacy_task_migration"),
         task_registrar=registrar,
     )
-    assert registrar.synced == 1
-    dialog.reload()
-    assert registrar.synced == 1
-    schedule = dialog.store.get("legacy_flow")
-    assert schedule.task_status == TASK_MISSING
+    # Registration migration is reconciled by the startup controller. The dialog
+    # only performs cached background status reads so opening it cannot block.
+    for _ in range(100):
+        app.processEvents()
+        if registrar.synced or dialog._task_status_cache:
+            break
+        time.sleep(0.005)
+    assert registrar.synced == 0
+    assert dialog._task_status_cache
+    assert next(iter(dialog._task_status_cache.values())).status == TASK_MISSING
     dialog.close()
     app.processEvents()
