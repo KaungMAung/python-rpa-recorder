@@ -133,6 +133,8 @@ class RpaAction:
     recorded_delay: float = 0.0
     status: str = ActionStatus.PENDING.value
     breakpoint: bool = False
+    expect: dict[str, Any] | None = None
+    on_failure: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RpaAction":
@@ -145,6 +147,8 @@ class RpaAction:
             recorded_delay=float(data.get("recorded_delay", 0.0) or 0.0),
             status=data.get("status", ActionStatus.PENDING.value),
             breakpoint=bool(data.get("breakpoint", False)),
+            expect=dict(data.get("expect") or data.get("data", {}).get("expect") or {}) or None,
+            on_failure=dict(data.get("on_failure") or data.get("data", {}).get("on_failure") or {}) or None,
             data=dict(data.get("data") or {}),
         )
 
@@ -372,6 +376,7 @@ class RpaProject:
     persisted_variable_values: dict[str, Any] = field(default_factory=dict)
     runtime_inputs: dict[str, RuntimeInputDefinition] = field(default_factory=dict)
     output_variables: list[str] = field(default_factory=list)
+    success_when: dict[str, Any] | None = None
     actions: list[RpaAction] = field(default_factory=list)
 
     @classmethod
@@ -433,6 +438,7 @@ class RpaProject:
                 for name, definition in raw_runtime_inputs.items()
             },
             output_variables=[str(name) for name in raw_output_variables],
+            success_when=dict(data.get("success_when") or {}) or None,
             actions=[RpaAction.from_dict(item) for item in data.get("actions", [])],
         )
 
@@ -465,6 +471,7 @@ class RpaProject:
                 for name, definition in self.runtime_inputs.items()
             },
             "output_variables": self.output_variables,
+            **({"success_when": self.success_when} if self.success_when else {}),
             "actions": [action.to_dict() for action in self.actions],
         }
 
