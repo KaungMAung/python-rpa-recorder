@@ -12,6 +12,10 @@ The main workflow is `Record -> Review -> Test -> Run`. The step list remains vi
 - `rpa/project_manager.py` saves and opens folder-based projects.
 - `rpa/recorder.py` uses `pynput` to capture global mouse and keyboard input.
 - `rpa/runner.py` replays actions with `pyautogui` in a worker thread and owns the thread-safe breakpoint gate; UI commands wake its condition without running automation work on the UI thread.
+- `rpa/tools.py` defines the common `RpaTool` contract and registry used to validate, execute, verify, and recover executable actions.
+- `rpa/builtin_tools.py` registers the existing image, coordinate, keyboard, wait, Python, window, variable, subflow, application, and file implementations without changing their saved action names.
+- `rpa/execution.py` provides the mutable per-run `ExecutionContext` shared by tools, including variables, flow metadata, current step, logs, screenshots, helpers, and execution state.
+- `rpa/verification.py` evaluates step expectations and flow completion criteria through one polling engine.
 - `rpa/control_flow.py` validates visual If, loop, and named-group boundaries.
 - `rpa/step_editing.py` applies ID-aware reorder, delete, copy, and paste operations while preserving jump targets.
 - `rpa/image_matcher.py` captures screenshots and locates images with OpenCV.
@@ -56,6 +60,55 @@ The recorder buffers printable typing into `type_text` actions, stores hotkeys a
 Click `Run`. Replay starts after the configured countdown. `Stop Run` requests a safe stop during waits and image polling. Click image actions search the screen first and use the original position when that option is enabled.
 
 Right-click a step to test only that step, run from it, run until it, enable or disable it, insert another step, duplicate it, delete it, or move it. Replay and step tests run outside the Qt UI thread.
+
+## Tool Architecture, Verification, and Recovery
+
+Every executable action is resolved by action type through the central `ToolRegistry`. Existing flow action names and data remain unchanged; the built-in tools delegate to the recorder's established execution helpers for image matching, windows, variables, subflows, scripts, files, and native utilities. A tool implements the common `validate(inputs, context)`, `execute(inputs, context)`, `verify(result, context)`, and `recover(error, context)` contract. The runner supplies one shared `ExecutionContext`, so runtime variables and stop state remain consistent across attempts and later steps.
+
+In **Step Details**, expand **Expected Result** to make a step successful only when its action and post-action condition both pass. Supported conditions are `image_visible`, `image_not_visible`, `file_exists`, `file_not_exists`, `variable_equals`, `variable_not_empty`, `window_title_contains`, and `process_running`. Timeout polling is interruptible by Stop Run. Steps without `expect` execute exactly as before.
+
+```json
+{
+  "action": "click_image",
+  "data": {"image": "screenshots/save.png"},
+  "expect": {
+    "type": "file_exists",
+    "value": "${output_file}",
+    "timeout_seconds": 15,
+    "poll_interval_seconds": 0.5
+  }
+}
+```
+
+Expand **Failure Handling** to configure retry count/delay, one fallback action, optional user escalation, and the final stop/continue/jump behavior. Retries rerun only the failed step and preserve the run's mutable variables. A fallback executes once after automatic retries and the original expectation is checked again. When **Ask user** is enabled, the failure dialog identifies the flow and step, shows the error and latest available screenshot, and offers **Retry**, **Skip**, or **Stop**. A failure is never skipped without an explicit configured policy or user choice.
+
+```json
+{
+  "on_failure": {
+    "retry_count": 2,
+    "retry_delay_seconds": 1,
+    "fallback_step": {"action": "press_key", "key": "f8"},
+    "ask_user": true,
+    "stop_flow": true
+  }
+}
+```
+
+In **Project → Flow Settings**, enable **Completion Criteria** and choose whether all or any conditions must pass. Completion uses the same verification engine and `${variable}` references as step expectations.
+
+```json
+{
+  "success_when": {
+    "mode": "all",
+    "conditions": [
+      {"type": "file_exists", "value": "${output_file}"},
+      {"type": "variable_not_empty", "value": "report_path"}
+    ]
+  }
+}
+```
+
+Full runs finish as `COMPLETED_VERIFIED`, `COMPLETED_UNVERIFIED`, `RECOVERED`, `FAILED`, `STOPPED_BY_USER`, or `REQUIRES_ATTENTION`. Persistent schedule history and evidence summaries retain retry totals, fallback use, verification and completion results, user decisions, and errors. The Run Details **Diagnostics** tab presents these fields. Older history records load with safe defaults, and older flows without the new fields retain their previous behavior.
 
 ## Scheduling Flows
 
