@@ -463,7 +463,7 @@ class ActionEditor(QWidget):
             self._spin(policy.get("retry_count", data.get("retry_count", 0)), lambda v: self._set_failure("retry_count", v), 0, 100),
         )
         self.failure_form.addRow(
-            "Retry delay",
+            "Delay between retries",
             self._double(
                 policy.get("retry_delay_seconds", data.get("retry_delay", 1.0)),
                 lambda v: self._set_failure("retry_delay_seconds", v), 0, 3600,
@@ -483,7 +483,7 @@ class ActionEditor(QWidget):
             self._check(policy.get("stop_flow", True), lambda v: self._set_failure("stop_flow", v)),
         )
         self.failure_form.addRow(
-            "Legacy final action",
+            "On final failure",
             self._combo(
                 [("Stop Flow", "stop"), ("Continue", "continue"), ("Jump to Step", "jump")],
                 policy.get("failure_action", data.get("failure_action", "stop")),

@@ -221,16 +221,22 @@ def test_step_details_exposes_retry_and_failure_controls() -> None:
     action = RpaAction(ActionType.WAIT.value, {"seconds": 1})
     editor.set_action(action, None)
     labels = [
+        editor.failure_form.itemAt(row, QFormLayout.LabelRole).widget().text()
+        for row in range(editor.failure_form.rowCount())
+        if editor.failure_form.itemAt(row, QFormLayout.LabelRole)
+        and editor.failure_form.itemAt(row, QFormLayout.LabelRole).widget()
+    ]
+    assert "Retry count" in labels
+    assert "Delay between retries" in labels
+    assert "On final failure" in labels
+    advanced_labels = [
         editor.advanced_form.itemAt(row, QFormLayout.LabelRole).widget().text()
         for row in range(editor.advanced_form.rowCount())
         if editor.advanced_form.itemAt(row, QFormLayout.LabelRole)
         and editor.advanced_form.itemAt(row, QFormLayout.LabelRole).widget()
     ]
-    assert "Retry count" in labels
-    assert "Delay between retries" in labels
-    assert "Step timeout (0 = off)" in labels
-    assert "On final failure" in labels
-    failure_combo = editor.advanced_widget.findChild(QComboBox)
+    assert "Step timeout (0 = off)" in advanced_labels
+    failure_combo = editor.failure_widget.findChild(QComboBox)
     assert failure_combo is not None
     assert [failure_combo.itemData(i) for i in range(failure_combo.count())] == ["stop", "continue", "jump"]
 
