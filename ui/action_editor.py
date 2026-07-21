@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import shutil
 from uuid import uuid4
 import shiboken6
@@ -32,6 +33,7 @@ from ui.window_target_editor import WindowTargetEditor
 from ui.subflow_editor import SubflowEditor
 from ui.utility_action_editor import UTILITY_ACTIONS, UtilityActionEditor
 from ui.target_preview import TargetPreviewWidget
+from rpa.verification import SUPPORTED_VERIFICATIONS
 
 
 WINDOW_ACTIONS = {
@@ -103,6 +105,20 @@ class ActionEditor(QWidget):
         self.advanced_form.setHorizontalSpacing(14)
         self.advanced_form.setVerticalSpacing(9)
 
+        self.expected_button = QPushButton("Expected Result")
+        self.expected_button.setCheckable(True)
+        self.expected_button.setStyleSheet("text-align: left; font-weight: 600; padding: 6px;")
+        self.expected_widget = QWidget()
+        self.expected_form = QFormLayout(self.expected_widget)
+        self.expected_button.toggled.connect(self.expected_widget.setVisible)
+
+        self.failure_button = QPushButton("Failure Handling")
+        self.failure_button.setCheckable(True)
+        self.failure_button.setStyleSheet("text-align: left; font-weight: 600; padding: 6px;")
+        self.failure_widget = QWidget()
+        self.failure_form = QFormLayout(self.failure_widget)
+        self.failure_button.toggled.connect(self.failure_widget.setVisible)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 16)
         layout.setSpacing(10)
@@ -124,6 +140,10 @@ class ActionEditor(QWidget):
         layout.addWidget(self.preview_heading)
         layout.addWidget(self.preview)
         layout.addWidget(self.image_target_widget)
+        layout.addWidget(self.expected_button)
+        layout.addWidget(self.expected_widget)
+        layout.addWidget(self.failure_button)
+        layout.addWidget(self.failure_widget)
         layout.addWidget(self.advanced_button)
         layout.addWidget(self.advanced_widget)
         layout.addStretch(1)
@@ -149,10 +169,14 @@ class ActionEditor(QWidget):
             self.preview_heading,
             self.preview,
             self.image_target_widget,
+            self.expected_button,
+            self.failure_button,
             self.advanced_button,
         ):
             widget.setVisible(visible)
         self.advanced_widget.setVisible(visible and self.advanced_button.isChecked())
+        self.expected_widget.setVisible(visible and self.expected_button.isChecked())
+        self.failure_widget.setVisible(visible and self.failure_button.isChecked())
         self.placeholder.setVisible(not visible)
 
     def _clear_layout(self, layout: QFormLayout) -> None:
@@ -176,6 +200,8 @@ class ActionEditor(QWidget):
         self._clear_layout(self.form)
         self._clear_layout(self.image_target_form)
         self._clear_layout(self.advanced_form)
+        self._clear_layout(self.expected_form)
+        self._clear_layout(self.failure_form)
         self.preview.clear()
         self.preview.setText("No target image")
         if not self.action:
@@ -191,6 +217,11 @@ class ActionEditor(QWidget):
         self.preview_heading.setVisible(action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value))
         self.preview.setVisible(action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value))
         self.image_target_widget.setVisible(action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value))
+        executable = action.action not in CONTROL_TYPES | METADATA_TYPES
+        self.expected_button.setVisible(executable)
+        self.failure_button.setVisible(executable)
+        self.expected_widget.setVisible(executable and self.expected_button.isChecked())
+        self.failure_widget.setVisible(executable and self.failure_button.isChecked())
         self.title.setText(f"Step Details - {action.friendly_name()}")
 
         name = QLineEdit(action.name)
@@ -371,33 +402,11 @@ class ActionEditor(QWidget):
         if is_control or is_metadata:
             self._loading = False
             return
-        retry_heading = QLabel("Retry and failure handling")
-        retry_heading.setStyleSheet("font-weight: 600; margin-top: 8px;")
-        self.advanced_form.addRow(retry_heading)
-        self.advanced_form.addRow(
-            "Retry count",
-            self._spin(data.get("retry_count", 0), lambda v: self._set_data("retry_count", v), 0, 20),
-        )
-        self.advanced_form.addRow(
-            "Delay between retries",
-            self._double(data.get("retry_delay", 1.0), lambda v: self._set_data("retry_delay", v), 0, 3600),
-        )
+        self._build_expected_result(action)
+        self._build_failure_handling(action)
         self.advanced_form.addRow(
             "Step timeout (0 = off)",
             self._double(data.get("step_timeout", 0.0), lambda v: self._set_data("step_timeout", v), 0, 86400),
-        )
-        failure_options = [
-            ("Stop Flow", "stop"),
-            ("Continue", "continue"),
-            ("Jump to Step", "jump"),
-        ]
-        self.advanced_form.addRow(
-            "On final failure",
-            self._combo(failure_options, data.get("failure_action", "stop"), lambda v: self._set_data("failure_action", v)),
-        )
-        self.advanced_form.addRow(
-            "Jump target step",
-            self._spin(data.get("failure_jump_step", 1), lambda v: self._set_data("failure_jump_step", v), 1, 9999),
         )
         self.advanced_form.addRow(
             "Capture final failure",
@@ -412,6 +421,120 @@ class ActionEditor(QWidget):
             self._check(data.get("capture_after", False), lambda v: self._set_data("capture_after", v)),
         )
         self._loading = False
+
+    def _build_expected_result(self, action: RpaAction) -> None:
+        condition = dict(action.expect or {})
+        enabled = QCheckBox("Verify an expected result after this step")
+        enabled.setChecked(bool(action.expect))
+        enabled.toggled.connect(self._toggle_expectation)
+        self.expected_form.addRow("", enabled)
+        choices = [(kind.replace("_", " ").title(), kind) for kind in sorted(SUPPORTED_VERIFICATIONS)]
+        kind = self._combo(
+            choices, condition.get("type", "file_exists"),
+            lambda value: self._set_expectation("type", value),
+        )
+        value = self._line(
+            self._variable_value_text(condition.get("value", "")),
+            lambda text: self._set_expectation("value", self._parse_variable_value(text)),
+        )
+        value.setToolTip("Image/file path, title text, process name, variable name, or expected value depending on the type.")
+        variable = QComboBox()
+        variable.setEditable(True)
+        variable.addItems(self.available_variables)
+        variable.setCurrentText(str(condition.get("variable", "")))
+        variable.currentTextChanged.connect(lambda text: self._set_expectation("variable", text.strip()))
+        self.expected_form.addRow("Condition", kind)
+        self.expected_form.addRow("Target / expected value", value)
+        self.expected_form.addRow("Variable", variable)
+        self.expected_form.addRow(
+            "Timeout",
+            self._double(condition.get("timeout_seconds", 0), lambda v: self._set_expectation("timeout_seconds", v), 0, 86400),
+        )
+        self.expected_form.addRow(
+            "Poll interval",
+            self._double(condition.get("poll_interval_seconds", 0.5), lambda v: self._set_expectation("poll_interval_seconds", v), 0.05, 3600),
+        )
+
+    def _build_failure_handling(self, action: RpaAction) -> None:
+        policy = dict(action.on_failure or {})
+        data = action.data
+        self.failure_form.addRow(
+            "Retry count",
+            self._spin(policy.get("retry_count", data.get("retry_count", 0)), lambda v: self._set_failure("retry_count", v), 0, 100),
+        )
+        self.failure_form.addRow(
+            "Retry delay",
+            self._double(
+                policy.get("retry_delay_seconds", data.get("retry_delay", 1.0)),
+                lambda v: self._set_failure("retry_delay_seconds", v), 0, 3600,
+            ),
+        )
+        fallback = QPlainTextEdit(json.dumps(policy.get("fallback_step"), indent=2) if policy.get("fallback_step") else "")
+        fallback.setPlaceholderText('{"action": "press_key", "key": "f8"}')
+        fallback.setMaximumHeight(90)
+        fallback.textChanged.connect(lambda: self._set_fallback_json(fallback))
+        self.failure_form.addRow("Fallback step (JSON)", fallback)
+        self.failure_form.addRow(
+            "Ask user",
+            self._check(policy.get("ask_user", False), lambda v: self._set_failure("ask_user", v)),
+        )
+        self.failure_form.addRow(
+            "Stop flow",
+            self._check(policy.get("stop_flow", True), lambda v: self._set_failure("stop_flow", v)),
+        )
+        self.failure_form.addRow(
+            "Legacy final action",
+            self._combo(
+                [("Stop Flow", "stop"), ("Continue", "continue"), ("Jump to Step", "jump")],
+                policy.get("failure_action", data.get("failure_action", "stop")),
+                lambda v: self._set_failure("failure_action", v),
+            ),
+        )
+        self.failure_form.addRow(
+            "Jump target step",
+            self._spin(
+                policy.get("failure_jump_step", data.get("failure_jump_step", 1)),
+                lambda v: self._set_failure("failure_jump_step", v), 1, 9999,
+            ),
+        )
+
+    def _toggle_expectation(self, enabled: bool) -> None:
+        if not self.action or self._loading:
+            return
+        self.action.expect = {"type": "file_exists", "value": ""} if enabled else None
+        self.action_changed.emit()
+
+    def _set_expectation(self, key: str, value) -> None:
+        if not self.action or self._loading or self.action.expect is None:
+            return
+        self.action.expect[key] = value
+        self.action_changed.emit()
+
+    def _set_failure(self, key: str, value) -> None:
+        if not self.action or self._loading:
+            return
+        if self.action.on_failure is None:
+            self.action.on_failure = {}
+        self.action.on_failure[key] = value
+        self.action_changed.emit()
+
+    def _set_fallback_json(self, editor: QPlainTextEdit) -> None:
+        if not self.action or self._loading:
+            return
+        text = editor.toPlainText().strip()
+        if not text:
+            self._set_failure("fallback_step", None)
+            return
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            editor.setStyleSheet("border: 1px solid #dc2626;")
+            return
+        if not isinstance(value, dict):
+            editor.setStyleSheet("border: 1px solid #dc2626;")
+            return
+        editor.setStyleSheet("")
+        self._set_failure("fallback_step", value)
 
     def _set_subflow_data(self, data: dict) -> None:
         if self._loading or not self.action:

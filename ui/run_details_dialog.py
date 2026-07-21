@@ -46,7 +46,9 @@ class RunDetailsDialog(QDialog):
         self.steps_table = self._table(["Step", "Name", "Status", "Duration", "Attempts", "Execution Result", "Error"])
         self.validation_table = self._table(["Level", "Step", "Step name", "Reason"])
         self.inputs_table = self._table(["Runtime input", "Value"])
+        self.diagnostics_table = self._table(["Diagnostic", "Value"])
         tabs.addTab(self.steps_table, "Step Results")
+        tabs.addTab(self.diagnostics_table, "Diagnostics")
         tabs.addTab(self.validation_table, "Validation")
         tabs.addTab(self.inputs_table, "Runtime Inputs")
         layout.addWidget(tabs, 1)
@@ -116,6 +118,29 @@ class RunDetailsDialog(QDialog):
         for row, (name, value) in enumerate(sorted(inputs.items())):
             self.inputs_table.setItem(row, 0, QTableWidgetItem(str(name)))
             self.inputs_table.setItem(row, 1, QTableWidgetItem(str(value)))
+        diagnostics = self.summary.get("diagnostics") or {}
+        rows = [
+            ("Retry count", diagnostics.get("retry_count", 0)),
+            ("Fallback executed", "Yes" if diagnostics.get("fallback_executed") else "No"),
+            ("Step verification", self._diagnostic_text(diagnostics.get("verification_result"))),
+            ("Completion criteria", self._diagnostic_text(diagnostics.get("completion_criteria_result"))),
+            ("User intervention", self._diagnostic_text(diagnostics.get("user_intervention"))),
+            ("Errors", self._diagnostic_text(diagnostics.get("error_messages"))),
+        ]
+        self.diagnostics_table.setRowCount(len(rows))
+        for row, (label, value) in enumerate(rows):
+            self.diagnostics_table.setItem(row, 0, QTableWidgetItem(label))
+            self.diagnostics_table.setItem(row, 1, QTableWidgetItem(str(value)))
+
+    @staticmethod
+    def _diagnostic_text(value) -> str:
+        if value in (None, [], {}):
+            return "—"
+        if isinstance(value, dict) and "passed" in value:
+            return "Passed" if value.get("passed") else "Failed"
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
 
     @staticmethod
     def _execution_result_text(step: dict) -> str:

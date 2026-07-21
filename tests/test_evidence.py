@@ -105,12 +105,19 @@ def test_run_details_view_handles_present_and_deleted_evidence(tmp_path: Path) -
 
     app = QApplication.instance() or QApplication([])
     session = RunEvidenceSession(tmp_path, "Flow", "Scheduled")
-    session.finalize("Success", [{
+    session.finalize("COMPLETED_VERIFIED", [{
         "step_number": 1, "step_name": "Wait", "status": "Success",
         "duration_seconds": 0.1, "attempts": 1,
-    }], attempts=1)
+    }], attempts=1, diagnostics={
+        "retry_count": 1,
+        "fallback_executed": True,
+        "completion_criteria_result": {"passed": True},
+    })
     dialog = RunDetailsDialog(session.folder)
     assert dialog.steps_table.rowCount() == 1
+    assert dialog.diagnostics_table.item(0, 1).text() == "1"
+    assert dialog.diagnostics_table.item(1, 1).text() == "Yes"
+    assert dialog.diagnostics_table.item(3, 1).text() == "Passed"
     assert dialog.open_folder_btn.isEnabled()
     assert dialog.open_log_btn.isEnabled()
     dialog.close()

@@ -120,6 +120,22 @@ class ActionTable(QTableWidget):
         group = row in self._flow.group_ends
         expanded = action.id not in self._collapsed_action_ids
         step_text = f"{'▾' if expanded else '▸'} {row + 1}" if group else str(row + 1)
+        indicators = []
+        if action.expect:
+            indicators.append("✓")
+        recovery = action.on_failure or {}
+        try:
+            has_retry = int(recovery.get("retry_count", action.data.get("retry_count", 0)) or 0) > 0
+        except (TypeError, ValueError):
+            has_retry = bool(recovery.get("retry_count", action.data.get("retry_count")))
+        if (
+            has_retry
+            or recovery.get("fallback_step")
+            or recovery.get("ask_user")
+        ):
+            indicators.append("↻")
+        if indicators:
+            step_text = f"{' '.join(indicators)} {step_text}"
         if action.breakpoint and action.action not in NON_EXECUTABLE_TYPES:
             step_text = f"● {step_text}"
         indent = "    " * depth
@@ -155,6 +171,13 @@ class ActionTable(QTableWidget):
             if action.breakpoint and action.action not in NON_EXECUTABLE_TYPES and col == 0:
                 item.setForeground(QColor("#dc2626"))
                 item.setToolTip("Breakpoint: execution pauses before this step. Press F9 to toggle.")
+            elif col == 0 and indicators:
+                labels = []
+                if action.expect:
+                    labels.append("Expected-result verification")
+                if "↻" in indicators:
+                    labels.append("Retry, fallback, or human escalation")
+                item.setToolTip("; ".join(labels))
             if not action.enabled and col != 5:
                 item.setForeground(QColor("#94a3b8"))
             if col in (0, 5):

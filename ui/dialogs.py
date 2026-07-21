@@ -1538,10 +1538,11 @@ class VariablesDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: ProjectSettings, parent=None) -> None:
+    def __init__(self, settings: ProjectSettings, parent=None, project: RpaProject | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Settings")
+        self.setWindowTitle("Flow Settings")
         self.settings = settings
+        self.project = project
         self.timing_mode = QComboBox()
         self.timing_mode.addItems(["recorded", "none"])
         self.timing_mode.setCurrentText(settings.timing_mode)
@@ -1568,6 +1569,25 @@ class SettingsDialog(QDialog):
         self.hide_during_replay.setToolTip("Keeps the recorder out of the way while a floating Stop Run control remains available.")
         self.evidence_retention = self._spin(settings.evidence_retention_runs, 10, 1000)
         self.evidence_retention.setToolTip("Maximum timestamped run-evidence folders retained for this flow.")
+        self.completion_enabled = QCheckBox("Verify explicit completion criteria")
+        self.completion_enabled.setChecked(bool(project and project.success_when))
+        self.completion_mode = QComboBox()
+        self.completion_mode.addItem("All conditions must pass", "all")
+        self.completion_mode.addItem("Any condition may pass", "any")
+        if project and project.success_when:
+            self.completion_mode.setCurrentIndex(max(0, self.completion_mode.findData(project.success_when.get("mode", "all"))))
+        self.completion_conditions = QPlainTextEdit()
+        self.completion_conditions.setMinimumHeight(110)
+        self.completion_conditions.setPlaceholderText(
+            '[{"type": "file_exists", "value": "${output_file}"}]'
+        )
+        conditions = project.success_when.get("conditions", []) if project and project.success_when else []
+        self.completion_conditions.setPlainText(json.dumps(conditions, indent=2, ensure_ascii=False))
+        completion_note = QLabel(
+            "Optional. Uses the same condition types as Expected Result. Without criteria, completed runs are marked COMPLETED_UNVERIFIED."
+        )
+        completion_note.setWordWrap(True)
+        completion_note.setStyleSheet("color: #64748b;")
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -1588,6 +1608,11 @@ class SettingsDialog(QDialog):
         layout.addRow("Hide recorder while running", self.hide_during_replay)
         layout.addRow("Run evidence retention", self.evidence_retention)
         layout.addRow("PyAutoGUI failsafe", self.failsafe)
+        layout.addRow(QLabel("Completion Criteria"))
+        layout.addRow("", self.completion_enabled)
+        layout.addRow("Mode", self.completion_mode)
+        layout.addRow("Conditions (JSON)", self.completion_conditions)
+        layout.addRow(completion_note)
         layout.addWidget(buttons)
 
     def _spin(self, value, minimum, maximum):
@@ -1604,6 +1629,17 @@ class SettingsDialog(QDialog):
         return widget
 
     def accept(self) -> None:
+        completion: dict | None = None
+        if self.completion_enabled.isChecked():
+            try:
+                conditions = json.loads(self.completion_conditions.toPlainText() or "[]")
+            except json.JSONDecodeError as exc:
+                QMessageBox.warning(self, "Invalid Completion Criteria", f"Conditions are not valid JSON: {exc}")
+                return
+            if not isinstance(conditions, list) or not conditions or any(not isinstance(item, dict) for item in conditions):
+                QMessageBox.warning(self, "Invalid Completion Criteria", "Add one or more JSON condition objects.")
+                return
+            completion = {"mode": str(self.completion_mode.currentData()), "conditions": conditions}
         self.settings.timing_mode = self.timing_mode.currentText()
         self.settings.crop_width = self.crop_width.value()
         self.settings.crop_height = self.crop_height.value()
@@ -1620,6 +1656,8 @@ class SettingsDialog(QDialog):
         self.settings.hide_window_during_replay = self.hide_during_replay.isChecked()
         self.settings.evidence_retention_runs = self.evidence_retention.value()
         self.settings.pyautogui_failsafe = self.failsafe.isChecked()
+        if self.project is not None:
+            self.project.success_when = completion
         qsettings = QSettings("PythonRPARecorder", "PythonRPARecorder")
         for key, value in self.settings.__dict__.items():
             qsettings.setValue(key, value)

@@ -124,15 +124,15 @@ def test_full_scheduled_run_completes_without_thread_self_wait(tmp_path, monkeyp
         QThread.msleep(5)
 
     assert "flow_a" not in window._scheduled_runs
-    from rpa.scheduler import STATUS_SUCCESS
+    from rpa.execution import COMPLETED_UNVERIFIED
     schedule = window.schedule_store.get("flow_a")
-    assert schedule.last_status == STATUS_SUCCESS
+    assert schedule.last_status == COMPLETED_UNVERIFIED
     entry = schedule.history[-1]
     assert entry.source == "Scheduled"
     assert entry.evidence_path
     summary_path = tmp_path / "flow_a" / entry.evidence_path / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    assert summary["status"] == "Success"
+    assert summary["status"] == COMPLETED_UNVERIFIED
     assert summary["source"] == "Scheduled"
     window.close()
 
@@ -195,7 +195,7 @@ def test_failed_scheduled_run_persists_one_based_failed_step(tmp_path, monkeypat
 def test_scheduled_execution_is_blocked_by_validation_errors(tmp_path, monkeypatch) -> None:
     from rpa.models import ActionType, RpaAction, RpaProject
     from rpa.project_manager import ProjectManager
-    from rpa.scheduler import STATUS_FAILED
+    from rpa.execution import FAILED
 
     window = make_window(tmp_path, monkeypatch)
     flow_dir = tmp_path / "invalid_flow"
@@ -207,7 +207,7 @@ def test_scheduled_execution_is_blocked_by_validation_errors(tmp_path, monkeypat
     window._run_flow_now("invalid_flow", scheduled=True)
     assert "invalid_flow" not in window._scheduled_runs
     schedule = window.schedule_store.get("invalid_flow")
-    assert schedule.last_status == STATUS_FAILED
+    assert schedule.last_status == FAILED
     assert schedule.history[-1].failed_step == 1
     assert schedule.history[-1].attempts == 0
     assert "undefined variable" in (schedule.history[-1].error or "")
@@ -215,7 +215,7 @@ def test_scheduled_execution_is_blocked_by_validation_errors(tmp_path, monkeypat
     validation_summary = json.loads(
         (flow_dir / schedule.history[-1].evidence_path / "summary.json").read_text(encoding="utf-8")
     )
-    assert validation_summary["status"] == "Failed"
+    assert validation_summary["status"] == FAILED
     assert validation_summary["validation_results"][0]["level"] == "Error"
     assert prepared == []
     window.close()
@@ -224,7 +224,7 @@ def test_scheduled_execution_is_blocked_by_validation_errors(tmp_path, monkeypat
 def test_scheduled_run_requires_configured_runtime_inputs(tmp_path, monkeypatch) -> None:
     from rpa.models import ActionType, RpaAction, RpaProject, RuntimeInputDefinition
     from rpa.project_manager import ProjectManager
-    from rpa.scheduler import STATUS_FAILED
+    from rpa.execution import FAILED
 
     window = make_window(tmp_path, monkeypatch)
     flow_dir = tmp_path / "runtime_flow"
@@ -237,7 +237,7 @@ def test_scheduled_run_requires_configured_runtime_inputs(tmp_path, monkeypatch)
     monkeypatch.setattr(window, "_prepare_run_environment", lambda settings, label: prepared.append(label))
     window._run_flow_now("runtime_flow", scheduled=True)
     schedule = window.schedule_store.get("runtime_flow")
-    assert schedule.last_status == STATUS_FAILED
+    assert schedule.last_status == FAILED
     assert "value is required" in (schedule.last_error or "")
     assert prepared == []
     window.close()
@@ -246,7 +246,7 @@ def test_scheduled_run_requires_configured_runtime_inputs(tmp_path, monkeypatch)
 def test_scheduled_secret_is_used_but_masked_in_history_and_evidence(tmp_path, monkeypatch) -> None:
     from rpa.models import ActionType, RpaAction, RpaProject, RuntimeInputDefinition
     from rpa.project_manager import ProjectManager
-    from rpa.scheduler import STATUS_FAILED
+    from rpa.execution import FAILED
 
     window = make_window(tmp_path, monkeypatch)
     flow_dir = tmp_path / "secret_flow"
@@ -270,7 +270,7 @@ def test_scheduled_secret_is_used_but_masked_in_history_and_evidence(tmp_path, m
             break
         QThread.msleep(5)
     schedule = window.schedule_store.get("secret_flow")
-    assert schedule.last_status == STATUS_FAILED
+    assert schedule.last_status == FAILED
     assert "top-secret-value" not in (schedule.last_error or "")
     assert "[REDACTED]" in (schedule.last_error or "")
     summary_path = flow_dir / schedule.history[-1].evidence_path / "summary.json"
@@ -287,7 +287,7 @@ def test_real_scheduled_run_retries_and_records_success_attempts(tmp_path, monke
     import rpa.runner as runner_module
     from rpa.models import ActionType, RpaAction, RpaProject
     from rpa.project_manager import ProjectManager
-    from rpa.scheduler import STATUS_SUCCESS
+    from rpa.execution import COMPLETED_UNVERIFIED
 
     window = make_window(tmp_path, monkeypatch)
     flow_dir = tmp_path / "retry_flow"
@@ -310,8 +310,10 @@ def test_real_scheduled_run_retries_and_records_success_attempts(tmp_path, monke
             break
         QThread.msleep(5)
     entry = window.schedule_store.get("retry_flow").history[-1]
-    assert entry.status == STATUS_SUCCESS
+    assert entry.status == COMPLETED_UNVERIFIED
     assert entry.attempts == 2
+    assert entry.retry_count == 1
+    assert entry.fallback_executed is False
     assert lifecycle == ["prepare", "restore"]
     window.close()
 
@@ -321,7 +323,7 @@ def test_real_scheduled_run_failure_records_step_error_and_cleanup(tmp_path, mon
     import rpa.runner as runner_module
     from rpa.models import ActionType, RpaAction, RpaProject
     from rpa.project_manager import ProjectManager
-    from rpa.scheduler import STATUS_FAILED
+    from rpa.execution import FAILED
 
     window = make_window(tmp_path, monkeypatch)
     flow_dir = tmp_path / "failed_flow"
@@ -340,7 +342,7 @@ def test_real_scheduled_run_failure_records_step_error_and_cleanup(tmp_path, mon
             break
         QThread.msleep(5)
     entry = window.schedule_store.get("failed_flow").history[-1]
-    assert entry.status == STATUS_FAILED
+    assert entry.status == FAILED
     assert entry.failed_step == 1
     assert entry.attempts == 1
     assert "boom" in (entry.error or "")
@@ -353,7 +355,7 @@ def test_real_scheduled_run_stop_interrupts_wait_and_restores(tmp_path, monkeypa
     import rpa.runner as runner_module
     from rpa.models import ActionType, RpaAction, RpaProject
     from rpa.project_manager import ProjectManager
-    from rpa.scheduler import STATUS_STOPPED
+    from rpa.execution import STOPPED_BY_USER
 
     window = make_window(tmp_path, monkeypatch)
     flow_dir = tmp_path / "stopped_flow"
@@ -379,7 +381,7 @@ def test_real_scheduled_run_stop_interrupts_wait_and_restores(tmp_path, monkeypa
             break
         QThread.msleep(5)
     entry = window.schedule_store.get("stopped_flow").history[-1]
-    assert entry.status == STATUS_STOPPED
+    assert entry.status == STOPPED_BY_USER
     assert entry.failed_step == 1
     assert entry.attempts == 1
     assert lifecycle == ["prepare", "restore"]
