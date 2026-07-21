@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from rpa.models import ActionType, ProjectSettings, RpaAction, RpaProject
+from ui.action_editor import ActionEditor
 from ui.dialogs import ManualActionDialog
 from ui.main_window import MainWindow
 
@@ -26,6 +27,10 @@ def test_builder_starts_with_plain_language_intents() -> None:
         "Run another flow", "Work with a variable", "Run a script or command",
     ]
     assert dialog.type_selector_widget.isHidden()
+    assert any(
+        button.text() == "Use the full step editor"
+        for button in dialog.intent_page.findChildren(QPushButton)
+    )
     dialog.close()
 
 
@@ -53,26 +58,80 @@ def test_guided_type_text_validates_each_stage_and_builds_existing_action() -> N
     dialog.close()
 
 
-def test_guided_utility_hides_optional_fields_and_full_editor_remains_available() -> None:
+def test_guided_screens_have_no_advanced_section_for_any_action_type() -> None:
+    app()
+    dialog = ManualActionDialog(ProjectSettings(), {})
+    assert any(
+        button.text() == "Use the full step editor"
+        for button in dialog.intent_page.findChildren(QPushButton)
+    )
+    for intent, _label, _help, choices in dialog.GUIDED_INTENTS:
+        for _choice_label, action_type in choices:
+            dialog.select_intent(intent, action_type)
+            assert any(
+                button.text() == "Use the full step editor"
+                for button in dialog.choice_page.findChildren(QPushButton)
+            )
+            dialog._show_guided_details()
+            assert not any(
+                button.text().startswith("Advanced")
+                for button in dialog.details_page.findChildren(QPushButton)
+            ), action_type
+    dialog.close()
+
+
+def test_guided_utility_hides_optional_fields_and_full_editor_preserves_values() -> None:
     app()
     dialog = ManualActionDialog(ProjectSettings(), {})
     dialog.select_intent("open", ActionType.LAUNCH_APPLICATION.value)
     dialog._show_guided_details()
 
     utility = dialog.utility_editor
+    utility.controls["path"].setText(r"C:\Tools\worker.exe")
     assert utility.controls["path"].isVisibleTo(utility)
     assert not utility.controls["arguments"].isVisibleTo(utility)
-    advanced = next(
-        button for button in utility.findChildren(QPushButton)
-        if button.text().startswith("Advanced")
+    assert not any(
+        button.text().startswith("Advanced")
+        for button in utility.findChildren(QPushButton)
     )
-    advanced.click()
-    assert utility.controls["arguments"].isVisibleTo(utility)
 
     dialog._use_full_editor()
     assert not dialog.type_selector_widget.isHidden()
     assert dialog.type_box.count() > dialog.guided_type_box.count()
+    assert utility.controls["arguments"].isVisibleTo(utility)
+    assert utility.controls["path"].text() == r"C:\Tools\worker.exe"
+    assert dialog.action().data["path"] == r"C:\Tools\worker.exe"
     dialog.close()
+
+
+def test_full_editor_handoff_preserves_subtype_and_guided_field_values() -> None:
+    app()
+    dialog = ManualActionDialog(ProjectSettings(), {})
+    dialog.select_intent("type", ActionType.TYPE_TEXT.value)
+    full_button = next(
+        button for button in dialog.choice_page.findChildren(QPushButton)
+        if button.text() == "Use the full step editor"
+    )
+    full_button.click()
+    assert dialog.type_box.currentData() == ActionType.TYPE_TEXT.value
+
+    dialog._back_from_details()
+    dialog.select_intent("type", ActionType.TYPE_TEXT.value)
+    dialog._show_guided_details()
+    dialog.text.setPlainText("Invoice {{NUMBER}}")
+    dialog._use_full_editor()
+    assert dialog.text.toPlainText() == "Invoice {{NUMBER}}"
+    assert dialog.action().data["text"] == "Invoice {{NUMBER}}"
+    dialog.close()
+
+
+def test_actual_step_editor_still_exposes_advanced_settings() -> None:
+    app()
+    editor = ActionEditor()
+    editor.set_action(RpaAction(ActionType.WAIT.value, {"seconds": 1}), None)
+    assert editor.advanced_button.text().startswith("Advanced Settings")
+    assert not editor.advanced_button.isHidden()
+    editor.close()
 
 
 def test_relevant_test_controls_emit_the_same_rpa_action_model(tmp_path) -> None:

@@ -35,18 +35,18 @@ class UtilityActionEditor(QWidget):
         self.action_type = action_type
         self.initial = dict(data or {})
         self.variables = list(variables or [])
-        self.guided = guided
         self.controls: dict[str, QWidget] = {}
+        self._optional_rows: list[QWidget] = []
         self.form = QFormLayout(self)
         self.form.setContentsMargins(0, 0, 0, 0)
         note = QLabel("Paths, arguments, commands, and working folders support {{VARIABLE}} placeholders.")
         note.setWordWrap(True); note.setStyleSheet("color: #64748b;")
         self.form.addRow(note)
         self._build()
-        if self.guided:
-            self._hide_optional_fields()
+        if guided:
+            self._show_required_fields_only()
 
-    def _hide_optional_fields(self) -> None:
+    def _show_required_fields_only(self) -> None:
         basic = {
             ActionType.LAUNCH_APPLICATION.value: {"path"},
             ActionType.WAIT_PROCESS.value: {"process_name"},
@@ -63,27 +63,21 @@ class UtilityActionEditor(QWidget):
             ActionType.RUN_PYTHON_SCRIPT.value: {"path"},
             ActionType.SHOW_NOTIFICATION.value: {"title", "message"},
         }.get(self.action_type, set())
-        optional: list[QWidget] = []
         for key, control in self.controls.items():
             if key in basic:
                 continue
             field = control
             while field.parentWidget() is not None and field.parentWidget() is not self:
                 field = field.parentWidget()
-            optional.append(field)
+            if field not in self._optional_rows:
+                self._optional_rows.append(field)
             self.form.setRowVisible(field, False)
-        if not optional:
-            return
-        toggle = QPushButton("Advanced  ▸")
-        toggle.setCheckable(True)
 
-        def show_optional(expanded: bool) -> None:
-            toggle.setText("Advanced  ▾" if expanded else "Advanced  ▸")
-            for field in optional:
-                self.form.setRowVisible(field, expanded)
-
-        toggle.toggled.connect(show_optional)
-        self.form.insertRow(1, "", toggle)
+    def show_all_fields(self) -> None:
+        """Reveal optional fields when the guided dialog switches to its full editor."""
+        for field in self._optional_rows:
+            self.form.setRowVisible(field, True)
+        self._optional_rows.clear()
 
     def _line(self, key: str, default: str = "", placeholder: str = "") -> QLineEdit:
         field = QLineEdit(str(self.initial.get(key, default)))

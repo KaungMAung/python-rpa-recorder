@@ -263,11 +263,6 @@ class ManualActionDialog(QDialog):
         details_header.addWidget(self.details_back_button)
         details_header.addWidget(self.details_heading, 1)
         details_layout.addLayout(details_header)
-        self.advanced_toggle = QPushButton("Advanced  ▸")
-        self.advanced_toggle.setCheckable(True)
-        self.advanced_toggle.setToolTip("Show the complete action list for experienced users")
-        self.advanced_toggle.toggled.connect(self._toggle_guided_advanced)
-        details_layout.addWidget(self.advanced_toggle)
         self.type_selector_widget = QWidget()
         top = QFormLayout(self.type_selector_widget)
         top.setContentsMargins(0, 0, 0, 0)
@@ -416,24 +411,32 @@ class ManualActionDialog(QDialog):
             self._rebuild()
         else:
             self.type_box.setCurrentIndex(index)
-        self.type_selector_widget.setVisible(self.advanced_toggle.isChecked())
+        self.type_selector_widget.setVisible(False)
         self.details_heading.setText(self.guided_type_box.currentText())
         self.pages.setCurrentWidget(self.details_page)
         self._update_summary()
 
     def _use_full_editor(self) -> None:
+        guided_action_type = (
+            self.guided_type_box.currentData()
+            if self.pages.currentWidget() is self.choice_page else None
+        )
         self._guided_mode = False
         self._selected_intent = None
+        if guided_action_type is not None:
+            index = self.type_box.findData(guided_action_type)
+            if index >= 0:
+                self.type_box.setCurrentIndex(index)
+        utility_editor = getattr(self, "utility_editor", None)
+        if isinstance(utility_editor, UtilityActionEditor):
+            utility_editor.show_all_fields()
         self.details_heading.setText("Full Step Editor")
         self.type_selector_widget.setVisible(True)
-        self.advanced_toggle.setVisible(False)
         self.details_back_button.setText("← Guided choices")
-        self._rebuild()
         self.pages.setCurrentWidget(self.details_page)
         self._update_summary()
 
     def _back_from_details(self) -> None:
-        self.advanced_toggle.setVisible(True)
         self.details_back_button.setText("← Back")
         if self._guided_mode and self._selected_intent:
             self.pages.setCurrentWidget(self.choice_page)
@@ -441,11 +444,6 @@ class ManualActionDialog(QDialog):
             self._guided_mode = True
             self.type_selector_widget.setVisible(False)
             self.pages.setCurrentWidget(self.intent_page)
-
-    def _toggle_guided_advanced(self, expanded: bool) -> None:
-        self.advanced_toggle.setText("Advanced  ▾" if expanded else "Advanced  ▸")
-        if self._guided_mode:
-            self.type_selector_widget.setVisible(expanded)
 
     def select_intent(self, key: str, action_type: str | None = None) -> None:
         """Public helper used by keyboard integrations and UI regression tests."""
