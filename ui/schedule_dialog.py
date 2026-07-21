@@ -93,6 +93,11 @@ BADGE_COLORS = {
     "Success": ("#dcfce7", "#166534"),
     "Failed": ("#fee2e2", "#b91c1c"),
     "Skipped": ("#fef3c7", "#92400e"),
+    "Completed verified": ("#dcfce7", "#166534"),
+    "Completed unverified": ("#dbeafe", "#1d4ed8"),
+    "Recovered": ("#ccfbf1", "#0f766e"),
+    "Requires attention": ("#ffedd5", "#c2410c"),
+    "Stopped by user": ("#e2e8f0", "#475569"),
     TASK_REGISTERED: ("#dcfce7", "#166534"),
     TASK_DISABLED: ("#e2e8f0", "#475569"),
     TASK_RUNNING: ("#dbeafe", "#1d4ed8"),
@@ -820,7 +825,9 @@ class ScheduleFlowsDialog(QDialog):
         return item
 
     def _badge_name(self, text: str) -> str:
-        return "Skipped" if text.startswith("Skipped") else text
+        if text.startswith("Skipped"):
+            return "Skipped"
+        return text.replace("_", " ").capitalize() if text.isupper() else text
 
     def _badge_item(self, badge: str, text: str | None = None) -> QTableWidgetItem:
         item = self._readonly_item(text or badge)

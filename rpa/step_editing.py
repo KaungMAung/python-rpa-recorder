@@ -12,10 +12,11 @@ from .models import ActionType, RpaAction
 def jump_targets(actions: list[RpaAction]) -> dict[str, str]:
     targets: dict[str, str] = {}
     for action in actions:
-        if str(action.data.get("failure_action", "")).lower() != "jump":
+        settings = action.on_failure if isinstance(action.on_failure, dict) else action.data
+        if str(settings.get("failure_action", "")).lower() != "jump":
             continue
         try:
-            index = int(action.data.get("failure_jump_step")) - 1
+            index = int(settings.get("failure_jump_step")) - 1
         except (TypeError, ValueError):
             continue
         if 0 <= index < len(actions):
@@ -28,7 +29,8 @@ def restore_jump_targets(actions: list[RpaAction], targets: dict[str, str]) -> N
     for action in actions:
         target_id = targets.get(action.id)
         if target_id in positions:
-            action.data["failure_jump_step"] = positions[target_id]
+            settings = action.on_failure if isinstance(action.on_failure, dict) else action.data
+            settings["failure_jump_step"] = positions[target_id]
 
 
 def validate_structure(actions: list[RpaAction]) -> str | None:
@@ -161,7 +163,8 @@ def paste_payload(
         target = entry.get("jump_target_id")
         target = old_to_new.get(str(target), str(target) if target else "")
         if target in positions:
-            clone.data["failure_jump_step"] = positions[target]
-        elif str(clone.data.get("failure_action", "")).lower() == "jump":
+            settings = clone.on_failure if isinstance(clone.on_failure, dict) else clone.data
+            settings["failure_jump_step"] = positions[target]
+        elif str((clone.on_failure or clone.data).get("failure_action", "")).lower() == "jump":
             return None, [], "A copied failure jump points to a step that is not available in this flow."
     return prospective, list(range(insert_at, insert_at + len(clones))), None

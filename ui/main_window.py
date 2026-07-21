@@ -15,7 +15,7 @@ import threading
 from uuid import uuid4
 
 from PySide6.QtCore import QItemSelectionModel, QObject, QPoint, QRect, QSettings, QThread, QTimer, Qt, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeyEvent, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeyEvent, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -46,6 +46,8 @@ from PySide6.QtWidgets import (
 from rpa.generator import generate_python
 from rpa.control_flow import BLOCK_OPENERS, IF_TYPES, LOOP_TYPES, CONTROL_TYPES, NON_EXECUTABLE_TYPES, parse_control_flow
 from rpa.evidence import RunEvidenceSession
+from rpa.execution import COMPLETED_UNVERIFIED
+from rpa.execution import FAILED as EXECUTION_FAILED, STOPPED_BY_USER
 from rpa.image_matcher import find_image, find_reference_matches, save_crop_from_image, screenshot_image, virtual_screen_origin
 from rpa.models import ActionType, ProjectSettings, RecorderState, RpaAction, RpaProject
 from rpa.project_manager import ProjectManager
@@ -122,6 +124,7 @@ class ReplayWorker(QObject):
     failed = Signal(int, str)
     stopped = Signal()
     debug_paused = Signal(int, str, object)
+    attention_requested = Signal(object)
 
     def __init__(
         self,
@@ -143,8 +146,10 @@ class ReplayWorker(QObject):
         self.include_start_delay = include_start_delay
         self.respect_enabled = respect_enabled
         self.enable_debug = enable_debug
+        self.runner.set_attention_callback(self.attention_requested.emit)
         if runtime_variables is not None:
             self.runner.runtime_variables = dict(runtime_variables)
+            self.runner.execution_context.variables = self.runner.runtime_variables
 
     @Slot()
     def run(self) -> None:
@@ -192,6 +197,9 @@ class ReplayWorker(QObject):
 
     def debug_update_variables(self, values: dict) -> None:
         self.runner.update_debug_variables(values)
+
+    def submit_attention_decision(self, decision: str) -> None:
+        self.runner.submit_attention_decision(decision)
 
 
 class MainWindow(QMainWindow):
@@ -1165,7 +1173,7 @@ class MainWindow(QMainWindow):
             mark_started(schedule, source=evidence.source if evidence else None,
                          evidence_path=evidence.relative_folder if evidence else None,
                          run_id=evidence.run_id if evidence else None)
-            mark_finished(schedule, STATUS_FAILED, error=f"Could not load flow: {exc}", attempts=0)
+            mark_finished(schedule, EXECUTION_FAILED, error=f"Could not load flow: {exc}", attempts=0)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
             return
@@ -1181,7 +1189,7 @@ class MainWindow(QMainWindow):
             self.log(f"[{flow_name}] could not create run evidence: {exc}")
             schedule = self.schedule_store.get(flow_name)
             mark_started(schedule, source=source)
-            mark_finished(schedule, STATUS_FAILED, error=f"Could not create run evidence: {exc}", attempts=0)
+            mark_finished(schedule, EXECUTION_FAILED, error=f"Could not create run evidence: {exc}", attempts=0)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
             return
@@ -1231,10 +1239,10 @@ class MainWindow(QMainWindow):
         if configuration_errors or input_errors:
             reason = (configuration_errors + input_errors)[0]
             self.log(f"[{flow_name}] run blocked by runtime inputs: {reason}")
-            mark_finished(schedule, STATUS_FAILED, error=reason, attempts=0)
+            mark_finished(schedule, EXECUTION_FAILED, error=reason, attempts=0)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
-            self._finalize_evidence(STATUS_FAILED, error=reason)
+            self._finalize_evidence(EXECUTION_FAILED, error=reason)
             return
         if getattr(project, "runtime_inputs", {}):
             validation_issues = validate_project_detailed(
@@ -1248,10 +1256,10 @@ class MainWindow(QMainWindow):
         if errors:
             reason = errors[0].message()
             self.log(f"[{flow_name}] schedule blocked by validation: {reason}")
-            mark_finished(schedule, STATUS_FAILED, error=reason, failed_step=errors[0].step_number, attempts=0)
+            mark_finished(schedule, EXECUTION_FAILED, error=reason, failed_step=errors[0].step_number, attempts=0)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
-            self._finalize_evidence(STATUS_FAILED, failed_step=errors[0].step_number, error=reason)
+            self._finalize_evidence(EXECUTION_FAILED, failed_step=errors[0].step_number, error=reason)
             return
         for warning in warnings:
             # Scheduled flows are unattended: warnings are retained in the log,
@@ -1268,6 +1276,8 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.log.connect(self._scheduled_run_log)
+        if hasattr(worker, "attention_requested"):
+            worker.attention_requested.connect(lambda payload, active=worker: self._show_failure_attention(payload, active))
         worker.action_status.connect(self._scheduled_action_status)
         if hasattr(worker, "retry_progress"):
             worker.retry_progress.connect(self._scheduled_retry_progress)
@@ -1327,9 +1337,10 @@ class MainWindow(QMainWindow):
 
     def _scheduled_run_success(self) -> None:
         worker = self.sender()
+        runner = getattr(worker, "runner", None)
         self._scheduled_run_finished(
-            getattr(worker, "flow_name", ""), STATUS_SUCCESS,
-            attempts=getattr(getattr(worker, "runner", None), "total_attempts", None),
+            getattr(worker, "flow_name", ""), getattr(runner, "final_status", COMPLETED_UNVERIFIED),
+            attempts=getattr(runner, "total_attempts", None),
         )
 
     def _scheduled_run_stopped(self) -> None:
@@ -1337,7 +1348,7 @@ class MainWindow(QMainWindow):
         runner = getattr(worker, "runner", None)
         current_index = getattr(runner, "current_index", None)
         self._scheduled_run_finished(
-            getattr(worker, "flow_name", ""), STATUS_STOPPED,
+            getattr(worker, "flow_name", ""), STOPPED_BY_USER,
             error="Stopped by user",
             failed_step=current_index + 1 if isinstance(current_index, int) else None,
             attempts=getattr(runner, "total_attempts", None),
@@ -1347,7 +1358,7 @@ class MainWindow(QMainWindow):
         worker = self.sender()
         runner = getattr(worker, "runner", None)
         self._scheduled_run_finished(
-            getattr(worker, "flow_name", ""), STATUS_FAILED, error=message, failed_step=index + 1,
+            getattr(worker, "flow_name", ""), EXECUTION_FAILED, error=message, failed_step=index + 1,
             attempts=getattr(runner, "total_attempts", None),
         )
 
@@ -1363,11 +1374,16 @@ class MainWindow(QMainWindow):
             thread.wait()
         schedule = self.schedule_store.get(flow_name)
         safe_error = mask_sensitive_text(error, self._active_secret_values) if error else None
-        mark_finished(schedule, status, error=safe_error, failed_step=failed_step, attempts=attempts)
+        runner = getattr(worker, "runner", None)
+        diagnostics = runner.run_diagnostics() if runner else {}
+        safe_diagnostics = self._mask_evidence_value(diagnostics)
+        mark_finished(
+            schedule, status, error=safe_error, failed_step=failed_step,
+            attempts=attempts, diagnostics=safe_diagnostics,
+        )
         self.schedule_store.set(schedule)
         self.schedule_store.save()
         self.log(f"[{flow_name}] scheduled run {status}")
-        runner = getattr(worker, "runner", None)
         if runner is not None:
             self.last_runtime_variables = dict(getattr(runner, "runtime_variables", {}))
         evidence = getattr(worker, "evidence_session", None)
@@ -1379,6 +1395,7 @@ class MainWindow(QMainWindow):
             attempts=attempts or 0,
             failed_step=failed_step,
             error=safe_error,
+            diagnostics=diagnostics,
         )
         self._restore_run_environment()
         self._start_next_queued_flow()
@@ -1503,7 +1520,7 @@ class MainWindow(QMainWindow):
             ):
                 self.active_evidence.set_validation(self._last_validation_issues)
                 has_errors = any(issue.level == LEVEL_ERROR for issue in self._last_validation_issues)
-                status = STATUS_FAILED if has_errors else "Skipped"
+                status = EXECUTION_FAILED if has_errors else "Skipped"
                 error = self._last_validation_issues[0].message() if has_errors else "Run cancelled after validation warnings"
                 issue_step = self._last_validation_issues[0].step_number if has_errors else 0
                 failed_step = issue_step if issue_step > 0 else None
@@ -1522,8 +1539,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._restore_details_after_run()
             self._restore_run_environment()
-            self._finish_active_history(STATUS_FAILED, str(exc), None, 0)
-            self._finalize_evidence(STATUS_FAILED, error=f"Desktop preparation failed: {exc}")
+            self._finish_active_history(EXECUTION_FAILED, str(exc), None, 0)
+            self._finalize_evidence(EXECUTION_FAILED, error=f"Desktop preparation failed: {exc}")
             show_error(self, "Could not prepare desktop", str(exc))
             return
         self.replay_thread = QThread()
@@ -1548,6 +1565,9 @@ class MainWindow(QMainWindow):
         self.replay_worker.retry_progress.connect(self._retry_progress)
         self.replay_worker.control_progress.connect(self._control_progress)
         self.replay_worker.debug_paused.connect(self._debug_paused)
+        self.replay_worker.attention_requested.connect(
+            lambda payload, active=self.replay_worker: self._show_failure_attention(payload, active)
+        )
         self.replay_worker.log.connect(self.log)
         self.replay_worker.finished.connect(self.run_completed)
         self.replay_worker.stopped.connect(self.run_stopped)
@@ -1695,6 +1715,43 @@ class MainWindow(QMainWindow):
             self.execution_floating.set_status(f"Step {index + 1} · Retry {attempt}/{total}")
             self._position_execution_toolbar()
 
+    def _show_failure_attention(self, payload: dict, worker: ReplayWorker) -> None:
+        if worker is None:
+            return
+        was_hidden = not self.isVisible()
+        if was_hidden:
+            self.showMaximized() if self.replay_was_maximized else self.showNormal()
+            self.raise_()
+            self.activateWindow()
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Flow requires attention")
+        box.setText(
+            f"Flow: {payload.get('flow_name') or self.project.project.name}\n"
+            f"Failed step: {payload.get('step_number')} - {payload.get('step_name')}"
+        )
+        box.setInformativeText(str(payload.get("error") or "The step failed."))
+        screenshot = str(payload.get("screenshot") or "")
+        if screenshot:
+            path = Path(screenshot)
+            if not path.is_absolute() and self.active_evidence is not None:
+                path = self.active_evidence.folder / path
+            if path.is_file():
+                pixmap = QPixmap(str(path))
+                if not pixmap.isNull():
+                    box.setIconPixmap(pixmap.scaled(420, 240, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        retry = box.addButton("Retry", QMessageBox.AcceptRole)
+        skip = box.addButton("Skip", QMessageBox.DestructiveRole)
+        stop = box.addButton("Stop", QMessageBox.RejectRole)
+        box.setDefaultButton(stop)
+        box.exec()
+        clicked = box.clickedButton()
+        decision = "retry" if clicked is retry else "skip" if clicked is skip else "stop"
+        self.log(f"Human escalation decision: {decision}")
+        worker.submit_attention_decision(decision)
+        if was_hidden and decision != "stop" and self._active_run_settings and self._active_run_settings.hide_window_during_replay:
+            self.hide()
+
     def _control_progress(self, index: int, message: str) -> None:
         if self.execution_floating:
             self.execution_floating.set_status(f"Step {index + 1} · {message}")
@@ -1835,9 +1892,14 @@ class MainWindow(QMainWindow):
             except (OSError, TypeError, ValueError) as exc:
                 self.log(f"Variable persistence warning: {exc}")
         self.log("step test completed" if mode == "test" else "automation completed")
-        self._finish_active_history(STATUS_SUCCESS, None, None, getattr(runner, "total_attempts", 0))
+        final_status = getattr(runner, "final_status", COMPLETED_UNVERIFIED)
+        diagnostics = runner.run_diagnostics() if runner else {}
+        self._finish_active_history(
+            final_status, None, None, getattr(runner, "total_attempts", 0), diagnostics,
+        )
         self._finalize_evidence(
-            STATUS_SUCCESS, getattr(runner, "step_results", None), getattr(runner, "total_attempts", 0),
+            final_status, getattr(runner, "step_results", None), getattr(runner, "total_attempts", 0),
+            diagnostics=diagnostics,
         )
         self.run_finished()
         if mode == "test":
@@ -1847,7 +1909,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Automation Completed",
-            f"Automation completed\n\n{completed} completed\n{skipped} skipped\n0 failed\nDuration: {elapsed:.2f} seconds",
+            f"Automation completed ({final_status})\n\n{completed} completed\n{skipped} skipped\n0 failed\nDuration: {elapsed:.2f} seconds",
         )
         self._start_next_queued_flow()
 
@@ -1861,9 +1923,11 @@ class MainWindow(QMainWindow):
         runner = self.replay_worker.runner if self.replay_worker else None
         self.last_runtime_variables = dict(getattr(runner, "runtime_variables", {}))
         attempts = getattr(runner, "total_attempts", 0)
-        self._finish_active_history(STATUS_STOPPED, "Stopped by user", last_step, attempts)
+        diagnostics = runner.run_diagnostics() if runner else {}
+        self._finish_active_history(STOPPED_BY_USER, "Stopped by user", last_step, attempts, diagnostics)
         self._finalize_evidence(
-            STATUS_STOPPED, getattr(runner, "step_results", None), attempts, last_step, "Stopped by user",
+            STOPPED_BY_USER, getattr(runner, "step_results", None), attempts, last_step, "Stopped by user",
+            diagnostics,
         )
         self.run_finished()
         QMessageBox.information(self, "Automation Stopped", f"Execution stopped at step {last_step}.\nDuration: {elapsed:.2f} seconds")
@@ -1879,9 +1943,11 @@ class MainWindow(QMainWindow):
         runner = self.replay_worker.runner if self.replay_worker else None
         failed_step = index + 1 if index >= 0 else None
         attempts = getattr(runner, "total_attempts", 0)
-        self._finish_active_history(STATUS_FAILED, message, failed_step, attempts)
+        diagnostics = runner.run_diagnostics() if runner else {}
+        self._finish_active_history(EXECUTION_FAILED, message, failed_step, attempts, diagnostics)
         self._finalize_evidence(
-            STATUS_FAILED, getattr(runner, "step_results", None), attempts, failed_step, message,
+            EXECUTION_FAILED, getattr(runner, "step_results", None), attempts, failed_step, message,
+            diagnostics,
         )
         self.run_finished()
         if index < 0 or index >= len(self.project.actions):
@@ -2776,7 +2842,7 @@ class MainWindow(QMainWindow):
             self.mark_dirty()
 
     def settings_dialog(self) -> None:
-        dialog = SettingsDialog(self.project.settings, self)
+        dialog = SettingsDialog(self.project.settings, self, self.project)
         if dialog.exec() == QDialog.Accepted:
             self.mark_dirty()
 
@@ -3135,6 +3201,7 @@ class MainWindow(QMainWindow):
 
     def _finish_active_history(
         self, status: str, error: str | None, failed_step: int | None, attempts: int,
+        diagnostics: dict | None = None,
     ) -> None:
         flow_name = self._active_history_flow
         self._active_history_flow = None
@@ -3142,8 +3209,10 @@ class MainWindow(QMainWindow):
             return
         schedule = self.schedule_store.get(flow_name)
         safe_error = mask_sensitive_text(error, self._active_secret_values) if error else None
+        safe_diagnostics = self._mask_evidence_value(diagnostics or {})
         mark_finished(
             schedule, status, error=safe_error, failed_step=failed_step, attempts=attempts,
+            diagnostics=safe_diagnostics,
         )
         self.schedule_store.set(schedule)
         self.schedule_store.save()
@@ -3155,6 +3224,7 @@ class MainWindow(QMainWindow):
         attempts: int = 0,
         failed_step: int | None = None,
         error: str | None = None,
+        diagnostics: dict | None = None,
     ) -> None:
         evidence = self.active_evidence
         if evidence is None:
@@ -3162,7 +3232,8 @@ class MainWindow(QMainWindow):
         try:
             safe_error = mask_sensitive_text(error, self._active_secret_values) if error else None
             safe_steps = self._mask_evidence_value(step_results) if step_results else step_results
-            evidence.finalize(status, safe_steps, attempts, failed_step, safe_error)
+            safe_diagnostics = self._mask_evidence_value(diagnostics or {})
+            evidence.finalize(status, safe_steps, attempts, failed_step, safe_error, safe_diagnostics)
         except Exception as exc:
             # The UI and persisted scheduler result must survive a report write
             # failure (for example, a deleted or read-only runs folder).

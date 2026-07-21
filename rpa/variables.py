@@ -42,7 +42,8 @@ def prepare_runtime_variables(
         for name, definition in definitions.items()
     }
     values.update(deepcopy(dict(getattr(project, "variables", {}) or {})))
-    if getattr(project.settings, "persist_variable_values", False):
+    settings = getattr(project, "settings", None)
+    if getattr(settings, "persist_variable_values", False):
         known = set(values)
         values.update({
             name: deepcopy(value)

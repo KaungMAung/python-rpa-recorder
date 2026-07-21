@@ -31,6 +31,13 @@ from .native_utilities import (
     read_clipboard_text, run_command_interruptible, show_notification,
     wait_for_process, write_clipboard_text,
 )
+from .builtin_tools import create_builtin_registry
+from .execution import (
+    COMPLETED_UNVERIFIED, COMPLETED_VERIFIED, FAILED, RECOVERED,
+    REQUIRES_ATTENTION, STOPPED_BY_USER, ExecutionContext,
+)
+from .tools import ToolRegistry
+from .verification import VerificationEngine, VerificationResult
 
 pyautogui = None
 
@@ -55,6 +62,8 @@ class ReplayRunner:
         log: Callable[[str], None],
         excluded_regions: list[tuple[int, int, int, int]] | None = None,
         evidence_dir: Path | None = None,
+        tool_registry: ToolRegistry | None = None,
+        verification_engine: VerificationEngine | None = None,
     ) -> None:
         self.project = project
         self.project_dir = Path(project_dir)
@@ -86,6 +95,38 @@ class ReplayRunner:
         self._debug_pause_next = False
         self._debug_paused_index: int | None = None
         self._debug_events: dict[int, list[dict[str, Any]]] = {}
+        self.tool_registry = tool_registry or create_builtin_registry()
+        self.verification_engine = verification_engine or VerificationEngine()
+        self.execution_context = ExecutionContext(
+            project=self.project,
+            project_dir=self.project_dir,
+            variables=self.runtime_variables,
+            log=self.log,
+            flow_metadata={"flow_id": self.project.project.id, "flow_name": self.project.project.name},
+            helpers={
+                "get_gui": get_pyautogui,
+                "click_image": self._click_image,
+                "sleep": self.sleep_checked,
+                "check_stop": self._check_stop_for_code,
+                "set_last_click": self._set_last_click,
+                "store_output": self._store_output,
+                "window_action": self._run_window_action,
+                "python": self.run_python_code,
+                "variable_action": self._run_variable_action,
+                "subflow": self._run_subflow,
+                "native_utility": self._run_native_utility,
+                "window_titles": lambda: get_pyautogui().getAllTitles(),
+            },
+        )
+        self.final_status = COMPLETED_UNVERIFIED
+        self.completion_result: dict[str, Any] | None = None
+        self.recovered = False
+        self.requires_attention = False
+        self.fallback_count = 0
+        self.user_interventions: list[dict[str, Any]] = []
+        self._attention_condition = threading.Condition()
+        self._attention_callback: Callable[[dict[str, Any]], None] | None = None
+        self._attention_decision: str | None = None
 
     def _safe_log(self, message: str) -> None:
         names = sensitive_variable_names(self.project)
@@ -97,10 +138,13 @@ class ReplayRunner:
 
     def request_stop(self) -> None:
         self._stop_event.set()
+        self.final_status = STOPPED_BY_USER
         if self._active_subrunner is not None:
             self._active_subrunner.request_stop()
         with self._debug_condition:
             self._debug_condition.notify_all()
+        with self._attention_condition:
+            self._attention_condition.notify_all()
 
     def resume_debug(self) -> None:
         self._send_debug_command("resume")
@@ -267,8 +311,9 @@ class ReplayRunner:
                 control_data = resolve_placeholders_strict(action.data, self.runtime_variables)
             except MissingPlaceholderError:
                 control_data = action.data
-            retry_count = max(0, self._safe_int(control_data.get("retry_count", 0), 0))
-            retry_delay = max(0.0, self._safe_float(control_data.get("retry_delay", 1.0), 1.0))
+            failure_settings = self._failure_settings(action, control_data)
+            retry_count = max(0, self._safe_int(failure_settings.get("retry_count", 0), 0))
+            retry_delay = max(0.0, self._safe_float(failure_settings.get("retry_delay_seconds", 1.0), 1.0))
             step_timeout = max(0.0, self._safe_float(control_data.get("step_timeout", 0.0), 0.0))
             max_attempts = retry_count + 1
             final_error: Exception | None = None
@@ -277,12 +322,17 @@ class ReplayRunner:
                 self.total_attempts += 1
                 record["attempts"] = attempt
                 self.log(f"[Step {index + 1}] Attempt {attempt}/{max_attempts}")
+                self.execution_context.log_event(
+                    "tool_attempt", step=index + 1, action=action.action,
+                    attempt=attempt, total=max_attempts,
+                )
                 self._step_deadline = time.monotonic() + step_timeout if step_timeout > 0 else None
                 try:
                     self.run_action(
                         action, self.runtime_variables, index + 1,
                         allow_coordinate_fallback=(attempt == max_attempts),
                     )
+                    self._verify_action(action, record)
                     if self._step_timed_out():
                         raise TimeoutError("step timed out")
                     final_error = None
@@ -306,9 +356,30 @@ class ReplayRunner:
                     self.log(
                         f"[Step {index + 1}] Retry {attempt + 1}/{max_attempts} in {retry_delay:.2f}s: {reason}"
                     )
+                    self.execution_context.log_event(
+                        "tool_retry", step=index + 1, next_attempt=attempt + 1,
+                        total=max_attempts, delay_seconds=retry_delay, error=reason,
+                    )
                     if retry_callback:
                         retry_callback(index, attempt + 1, max_attempts, reason)
                     self.sleep_checked(retry_delay)
+            recovery_resolution: str | None = None
+            if final_error is not None:
+                final_error, recovery_resolution = self._recover_step_failure(
+                    action, failure_settings, record, final_error, index,
+                )
+            if recovery_resolution == "skip":
+                self._finish_step_record(record, "Skipped", "Skipped after explicit user decision")
+                if action_callback:
+                    action_callback(index, "skipped")
+                index += 1
+                continue
+            if recovery_resolution == "stop":
+                self._finish_step_record(record, "Stopped", str(final_error or "Stopped by user"))
+                if action_callback:
+                    action_callback(index, "stopped")
+                self.final_status = STOPPED_BY_USER
+                raise StopReplay()
             if final_error is not None:
                 if self._last_window_result:
                     record["window_result"] = dict(self._last_window_result)
@@ -328,7 +399,9 @@ class ReplayRunner:
                 self._finish_step_record(record, "Failed", failure_message)
                 if screenshot_path:
                     failure_message = f"{failure_message} (failure screenshot: {screenshot_path})"
-                failure_action = str(control_data.get("failure_action", "stop")).strip().lower()
+                failure_action = str(failure_settings.get("failure_action", "stop")).strip().lower()
+                if not bool(failure_settings.get("stop_flow", True)) and failure_action == "stop":
+                    failure_action = "continue"
                 if failure_action in {"continue", "jump"}:
                     self.had_continued_failures = True
                     if self.first_failed_index is None:
@@ -336,7 +409,7 @@ class ReplayRunner:
                         self.first_failure_error = failure_message
                     self.log(f"[Step {index + 1}] Final failure: {failure_message}")
                     if failure_action == "jump":
-                        jump_step = self._safe_int(control_data.get("failure_jump_step", 0), 0)
+                        jump_step = self._safe_int(failure_settings.get("failure_jump_step", 0), 0)
                         jump_index = jump_step - 1
                         if not start_index <= jump_index <= end_index:
                             raise ReplayActionError(
@@ -347,6 +420,7 @@ class ReplayRunner:
                         continue
                     index += 1
                     continue
+                self.final_status = FAILED
                 raise ReplayActionError(index, action, RuntimeError(failure_message))
             if action_callback:
                 action_callback(index, "completed")
@@ -359,10 +433,40 @@ class ReplayRunner:
             if self._last_utility_result:
                 record["utility_result"] = dict(self._last_utility_result)
             self._capture_step_screenshot(record, index, "after", bool(action.data.get("capture_after")))
-            self._finish_step_record(record, "Success")
+            self._finish_step_record(record, "Recovered" if recovery_resolution == "recovered" else "Success")
             self._log_variable_changes(variables_before, self.runtime_variables)
             self.log(f"action completed: {index + 1} {action.action}")
             index += 1
+        full_flow = start_index == 0 and end_index == total - 1
+        if self.had_continued_failures:
+            self.final_status = FAILED
+        elif self.requires_attention:
+            self.final_status = REQUIRES_ATTENTION
+        elif full_flow and self.project.success_when:
+            passed, results = self.verification_engine.verify_completion(
+                resolve_placeholders_strict(self.project.success_when, self.runtime_variables),
+                self.execution_context,
+            )
+            self.completion_result = {
+                "passed": passed,
+                "mode": str(self.project.success_when.get("mode") or "all"),
+                "conditions": [result.to_dict() for result in results],
+            }
+            self.log(
+                f"Flow completion verification {'passed' if passed else 'failed'}: "
+                f"mode={self.completion_result['mode']} conditions={len(results)}"
+            )
+            if not passed:
+                self.final_status = FAILED
+                if total:
+                    raise ReplayActionError(
+                        total - 1, self.project.actions[-1], RuntimeError("flow completion criteria were not met"),
+                    )
+                raise RuntimeError("flow completion criteria were not met")
+            self.final_status = RECOVERED if self.recovered else COMPLETED_VERIFIED
+        else:
+            self.completion_result = None
+            self.final_status = RECOVERED if self.recovered else COMPLETED_UNVERIFIED
         if self.project.settings.persist_variable_values:
             candidates = {
                 name: self.runtime_variables[name]
@@ -654,76 +758,14 @@ class ReplayRunner:
     ) -> None:
         variables = self.runtime_variables if variables is None else variables
         data = resolve_placeholders_strict(action.data, variables)
-        if action.action in (ActionType.CLICK_IMAGE.value, ActionType.DOUBLE_CLICK_IMAGE.value):
-            self._click_image(action, data, allow_coordinate_fallback)
-        elif action.action == ActionType.TYPE_TEXT.value:
-            gui = get_pyautogui()
-            if data.get("clear_first"):
-                gui.hotkey("ctrl", "a")
-                gui.press("backspace")
-            typed_text = str(data.get("text", ""))
-            gui.write(typed_text, interval=float(data.get("interval", self.project.settings.typing_interval)))
-            self._store_output(data, variables, typed_text)
-        elif action.action == ActionType.PRESS_KEY.value:
-            gui = get_pyautogui()
-            gui.press(str(data.get("key")), presses=int(data.get("count", 1)), interval=float(data.get("interval", 0.0)))
-        elif action.action == ActionType.HOTKEY.value:
-            gui = get_pyautogui()
-            gui.hotkey(*[str(key) for key in data.get("keys", [])])
-        elif action.action == ActionType.SCROLL.value:
-            gui = get_pyautogui()
-            if data.get("move_to"):
-                gui.moveTo(int(data.get("x", 0)), int(data.get("y", 0)))
-            gui.scroll(int(data.get("amount", 0)))
-        elif action.action == ActionType.WAIT.value:
-            self.sleep_checked(float(data.get("seconds", action.delay_before)))
-        elif action.action == ActionType.CLICK_COORDINATE.value:
-            gui = get_pyautogui()
-            self.sleep_checked(float(data.get("pre_click_pause", self.project.settings.pre_click_pause)))
-            gui.click(int(data.get("x", 0)), int(data.get("y", 0)), button=str(data.get("button", "left")))
-            self._set_last_click(variables, int(data.get("x", 0)), int(data.get("y", 0)))
-        elif action.action == ActionType.MOUSE_MOVE.value:
-            get_pyautogui().moveTo(int(data.get("x", 0)), int(data.get("y", 0)), duration=float(data.get("duration", 0.2)))
-        elif action.action == ActionType.DRAG.value:
-            gui = get_pyautogui()
-            gui.moveTo(int(data.get("start_x", 0)), int(data.get("start_y", 0)), duration=float(data.get("move_duration", 0.2)))
-            gui.dragTo(int(data.get("end_x", 0)), int(data.get("end_y", 0)), duration=float(data.get("duration", 0.5)), button=str(data.get("button", "left")))
-            self._set_last_click(variables, int(data.get("end_x", 0)), int(data.get("end_y", 0)))
-        elif action.action in {
-            ActionType.SELECT_WINDOW.value, ActionType.WAIT_WINDOW.value,
-            ActionType.ACTIVATE_WINDOW.value, ActionType.MAXIMIZE_WINDOW.value,
-            ActionType.MINIMIZE_WINDOW.value, ActionType.RESTORE_WINDOW.value,
-            ActionType.CLOSE_WINDOW.value, ActionType.CLICK_WINDOW_RELATIVE.value,
-            ActionType.MOVE_WINDOW_RELATIVE.value,
-        }:
-            self._run_window_action(action, data, variables)
-        elif action.action == ActionType.OPEN_FILE.value:
-            opened_path = str(data.get("path", ""))
-            subprocess.Popen([opened_path], shell=True)
-            self.sleep_checked(float(data.get("wait_after", 1.0)))
-            self._store_output(data, variables, opened_path)
-        elif action.action in (ActionType.RUN_PYTHON.value, ActionType.PYTHON_CODE.value):
-            self.run_python_code(action, data, variables, step_number)
-        elif action.action in {
-            ActionType.SET_VARIABLE.value, ActionType.GET_VARIABLE.value,
-            ActionType.INCREMENT_VARIABLE.value, ActionType.APPEND_VARIABLE.value,
-            ActionType.SET_OBJECT_PROPERTY.value, ActionType.DELETE_VARIABLE.value,
-        }:
-            self._run_variable_action(action.action, data, variables)
-        elif action.action == ActionType.RUN_SUBFLOW.value:
-            self._run_subflow(action, data, variables, step_number)
-        elif action.action in {
-            ActionType.LAUNCH_APPLICATION.value, ActionType.WAIT_PROCESS.value,
-            ActionType.ACTIVATE_PROCESS.value, ActionType.CLOSE_PROCESS.value,
-            ActionType.READ_CLIPBOARD.value, ActionType.WRITE_CLIPBOARD.value,
-            ActionType.COPY_PATH.value, ActionType.MOVE_PATH.value, ActionType.RENAME_PATH.value,
-            ActionType.DELETE_PATH.value, ActionType.WAIT_PATH.value,
-            ActionType.RUN_POWERSHELL.value, ActionType.RUN_PYTHON_SCRIPT.value,
-            ActionType.SHOW_NOTIFICATION.value,
-        }:
-            self._run_native_utility(action, data, variables)
-        else:
-            raise ValueError(f"Unsupported action: {action.action}")
+        self.execution_context.variables = variables
+        self.execution_context.current_step = step_number
+        self.execution_context.current_action = action
+        self.execution_context.execution_state["allow_coordinate_fallback"] = allow_coordinate_fallback
+        try:
+            self.tool_registry.execute(action.action, data, self.execution_context)
+        except KeyError as exc:
+            raise ValueError(f"Unsupported action: {action.action}") from exc
 
     def _get_window_resolver(self) -> WindowResolver:
         if self.window_resolver is None:
@@ -882,6 +924,7 @@ class ReplayRunner:
         evidence_dir = self.evidence_dir / "subflows" / f"step_{step_number}_{action.id[:8]}" if self.evidence_dir else None
         nested = ReplayRunner(child, target.parent, lambda message: self.log(f"[Subflow {flow_name}] {message}"), evidence_dir=evidence_dir)
         nested.runtime_variables = child_variables
+        nested.execution_context.variables = child_variables
         nested._stop_event = self._stop_event
         nested._external_deadline = self._step_deadline or self._external_deadline
         nested.subflow_stack = [*self.subflow_stack, target]
@@ -1202,6 +1245,9 @@ class ReplayRunner:
             "status": "Running",
             "attempts": 0,
             "retry_attempts": [],
+            "fallback_executed": False,
+            "verification_result": None,
+            "user_intervention": [],
             "error": None,
             "screenshots": {},
         }
@@ -1311,6 +1357,149 @@ class ReplayRunner:
         variables["LAST_CLICK_X"] = x
         variables["LAST_CLICK_Y"] = y
 
+    def _verify_action(self, action: RpaAction, record: dict[str, Any]) -> VerificationResult | None:
+        if not action.expect:
+            return None
+        condition = resolve_placeholders_strict(action.expect, self.runtime_variables)
+        self.log(f"[Step {self.current_index + 1 if self.current_index is not None else '?'}] Verification started: {condition.get('type')}")
+        result = self.verification_engine.verify(condition, self.execution_context)
+        record["verification_result"] = result.to_dict()
+        self.log(
+            f"[Step {self.current_index + 1 if self.current_index is not None else '?'}] "
+            f"Verification {'passed' if result.passed else 'failed'}: {result.message} "
+            f"(attempts={result.attempts}, duration={result.duration_seconds:.2f}s)"
+        )
+        self.execution_context.log_event(
+            "verification_result", step=self.current_index + 1 if self.current_index is not None else None,
+            type=result.condition_type, passed=result.passed, attempts=result.attempts,
+            duration_seconds=round(result.duration_seconds, 4),
+        )
+        if not result.passed:
+            raise RuntimeError(result.message)
+        return result
+
+    def _failure_settings(self, action: RpaAction, data: dict[str, Any]) -> dict[str, Any]:
+        configured = resolve_placeholders_strict(action.on_failure or {}, self.runtime_variables)
+        return {
+            "retry_count": configured.get("retry_count", data.get("retry_count", 0)),
+            "retry_delay_seconds": configured.get(
+                "retry_delay_seconds", configured.get("retry_delay", data.get("retry_delay", 1.0)),
+            ),
+            "fallback_step": configured.get("fallback_step"),
+            "ask_user": bool(configured.get("ask_user", False)),
+            "stop_flow": bool(configured.get("stop_flow", True)),
+            "failure_action": configured.get("failure_action", data.get("failure_action", "stop")),
+            "failure_jump_step": configured.get("failure_jump_step", data.get("failure_jump_step", 0)),
+        }
+
+    @staticmethod
+    def _fallback_action(raw: Any) -> RpaAction | None:
+        if not isinstance(raw, dict) or not str(raw.get("action", "")).strip():
+            return None
+        payload = dict(raw)
+        action_type = str(payload.pop("action"))
+        data = payload.pop("data", None)
+        return RpaAction(action_type, dict(data) if isinstance(data, dict) else payload)
+
+    def set_attention_callback(self, callback: Callable[[dict[str, Any]], None] | None) -> None:
+        self._attention_callback = callback
+
+    def submit_attention_decision(self, decision: str) -> None:
+        normalized = str(decision).strip().casefold()
+        if normalized not in {"retry", "skip", "stop"}:
+            raise ValueError("attention decision must be retry, skip, or stop")
+        with self._attention_condition:
+            self._attention_decision = normalized
+            self._attention_condition.notify_all()
+
+    def _request_attention(self, payload: dict[str, Any]) -> str:
+        if self._attention_callback is None:
+            self.requires_attention = True
+            self.log("Human escalation requested but no interactive handler is available")
+            return "stop"
+        with self._attention_condition:
+            self._attention_decision = None
+        self._attention_callback(payload)
+        with self._attention_condition:
+            while self._attention_decision is None and not self.stop_requested():
+                self._attention_condition.wait(timeout=0.1)
+            if self.stop_requested():
+                return "stop"
+            return self._attention_decision or "stop"
+
+    def _recover_step_failure(
+        self,
+        action: RpaAction,
+        settings: dict[str, Any],
+        record: dict[str, Any],
+        error: Exception,
+        index: int,
+    ) -> tuple[Exception | None, str | None]:
+        fallback = self._fallback_action(settings.get("fallback_step"))
+        if fallback is not None:
+            self.fallback_count += 1
+            record["fallback_executed"] = True
+            record["fallback_action"] = fallback.to_dict()
+            self.log(f"[Step {index + 1}] Fallback started: {fallback.action}")
+            self.execution_context.log_event(
+                "fallback_started", step=index + 1, action=fallback.action,
+            )
+            try:
+                self.total_attempts += 1
+                self.run_action(fallback, self.runtime_variables, index + 1, False)
+                self._verify_action(action, record)
+            except StopReplay:
+                raise
+            except Exception as fallback_error:
+                error = self._friendly_runtime_error(fallback_error)
+                record["fallback_error"] = str(error)
+                self.log(f"[Step {index + 1}] Fallback failed: {error}")
+            else:
+                self.recovered = True
+                self.log(f"[Step {index + 1}] Fallback recovered the step")
+                return None, "recovered"
+
+        if not settings.get("ask_user"):
+            return error, None
+        while True:
+            screenshot_path = self._capture_failure_screenshot(action, index)
+            if screenshot_path:
+                record["screenshots"]["attention"] = screenshot_path
+            payload = {
+                "flow_name": self.project.project.name,
+                "step_number": index + 1,
+                "step_name": action.summary(),
+                "error": str(error),
+                "screenshot": screenshot_path,
+            }
+            decision = self._request_attention(payload)
+            intervention = {"decision": decision, "error": str(error)}
+            self.user_interventions.append({"step_number": index + 1, **intervention})
+            record["user_intervention"].append(intervention)
+            self.log(f"[Step {index + 1}] User decision: {decision}")
+            self.execution_context.log_event(
+                "human_decision", step=index + 1, decision=decision,
+            )
+            if decision == "skip":
+                self.requires_attention = True
+                return None, "skip"
+            if decision == "stop":
+                return error, "stop"
+            try:
+                self.total_attempts += 1
+                record["attempts"] = int(record.get("attempts", 0)) + 1
+                self.log(f"[Step {index + 1}] User-requested retry started")
+                self.run_action(action, self.runtime_variables, index + 1, True)
+                self._verify_action(action, record)
+            except StopReplay:
+                raise
+            except Exception as retry_error:
+                error = self._friendly_runtime_error(retry_error)
+                self.log(f"[Step {index + 1}] User-requested retry failed: {error}")
+                continue
+            self.recovered = True
+            return None, "recovered"
+
     def _safe_int(self, value: Any, default: int) -> int:
         try:
             return int(value)
@@ -1322,6 +1511,27 @@ class ReplayRunner:
             return float(value)
         except (TypeError, ValueError, OverflowError):
             return default
+
+    def run_diagnostics(self) -> dict[str, Any]:
+        verification_results = [
+            record.get("verification_result") for record in self.step_results
+            if isinstance(record.get("verification_result"), dict)
+        ]
+        error_messages = [
+            str(record.get("error")) for record in self.step_results if record.get("error")
+        ]
+        retry_count = sum(max(0, int(record.get("attempts", 0)) - 1) for record in self.step_results)
+        return {
+            "retry_count": retry_count,
+            "fallback_executed": self.fallback_count > 0,
+            "verification_result": {
+                "passed": all(item.get("passed", False) for item in verification_results),
+                "steps": verification_results,
+            } if verification_results else None,
+            "completion_criteria_result": self.completion_result,
+            "user_intervention": list(self.user_interventions),
+            "error_messages": error_messages,
+        }
 
 
 def get_pyautogui():

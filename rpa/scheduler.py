@@ -24,6 +24,11 @@ STATUS_RUNNING = "Running"
 STATUS_STOPPED = "Stopped"
 STATUS_SKIPPED_RUNNING = "Skipped (Already Running)"
 STATUS_SKIPPED_BUSY = "Skipped (Flow Open In Editor)"
+STATUS_COMPLETED_VERIFIED = "COMPLETED_VERIFIED"
+STATUS_COMPLETED_UNVERIFIED = "COMPLETED_UNVERIFIED"
+STATUS_RECOVERED = "RECOVERED"
+STATUS_REQUIRES_ATTENTION = "REQUIRES_ATTENTION"
+STATUS_STOPPED_BY_USER = "STOPPED_BY_USER"
 DEFAULT_HISTORY_LIMIT = 100
 TASK_REGISTERED = "Registered"
 TASK_DISABLED = "Disabled"
@@ -51,6 +56,12 @@ class RunHistoryEntry:
     source: str | None = None
     evidence_path: str | None = None
     run_id: str | None = None
+    retry_count: int = 0
+    fallback_executed: bool = False
+    verification_result: dict[str, Any] | None = None
+    completion_criteria_result: dict[str, Any] | None = None
+    user_intervention: list[dict[str, Any]] = field(default_factory=list)
+    error_messages: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RunHistoryEntry | None":
@@ -78,6 +89,12 @@ class RunHistoryEntry:
             source=data.get("source"),
             evidence_path=data.get("evidence_path"),
             run_id=data.get("run_id"),
+            retry_count=_optional_int(data.get("retry_count")) or 0,
+            fallback_executed=bool(data.get("fallback_executed", False)),
+            verification_result=(dict(data["verification_result"]) if isinstance(data.get("verification_result"), dict) else None),
+            completion_criteria_result=(dict(data["completion_criteria_result"]) if isinstance(data.get("completion_criteria_result"), dict) else None),
+            user_intervention=[dict(item) for item in data.get("user_intervention", []) if isinstance(item, dict)],
+            error_messages=[str(item) for item in data.get("error_messages", []) if str(item)],
         )
 
 
@@ -199,6 +216,7 @@ def mark_finished(
     error: str | None = None,
     failed_step: int | None = None,
     attempts: int | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> None:
     now = now or utc_now()
     was_running = schedule.last_status == STATUS_RUNNING
@@ -223,6 +241,21 @@ def mark_finished(
     entry.error = error
     if attempts is not None:
         entry.attempts = attempts
+    diagnostics = diagnostics or {}
+    entry.retry_count = int(diagnostics.get("retry_count") or 0)
+    entry.fallback_executed = bool(diagnostics.get("fallback_executed", False))
+    entry.verification_result = (
+        dict(diagnostics["verification_result"])
+        if isinstance(diagnostics.get("verification_result"), dict) else None
+    )
+    entry.completion_criteria_result = (
+        dict(diagnostics["completion_criteria_result"])
+        if isinstance(diagnostics.get("completion_criteria_result"), dict) else None
+    )
+    entry.user_intervention = [
+        dict(item) for item in diagnostics.get("user_intervention", []) if isinstance(item, dict)
+    ]
+    entry.error_messages = [str(item) for item in diagnostics.get("error_messages", []) if str(item)]
     schedule_next_run(schedule, now)
 
 

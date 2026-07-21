@@ -80,6 +80,7 @@ class RunEvidenceSession:
         attempts: int = 0,
         failed_step: int | None = None,
         error: str | None = None,
+        diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         ended = datetime.now(timezone.utc)
         normalized_steps = []
@@ -117,6 +118,7 @@ class RunEvidenceSession:
             "step_results": normalized_steps,
             "screenshots": screenshots,
             "log": self.log_path.name,
+            "diagnostics": dict(diagnostics or {}),
         }
         self.logger.info(
             "run evidence completed: status=%s attempts=%s failed_step=%s error=%s",

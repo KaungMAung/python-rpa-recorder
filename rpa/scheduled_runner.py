@@ -5,20 +5,22 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QPoint, QRect, QSettings, QTimer, Signal
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QObject, QPoint, QRect, QSettings, QTimer, Qt, Signal
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .evidence import RunEvidenceSession
+from .execution import (
+    COMPLETED_UNVERIFIED, COMPLETED_VERIFIED, FAILED, RECOVERED,
+    STOPPED_BY_USER,
+)
 from .desktop_lifecycle import (
     recorder_window_handles, restore_recorder_windows, show_windows_desktop,
 )
 from .models import RpaProject
 from .project_manager import ProjectManager
 from .runner import ReplayActionError, ReplayRunner, StopReplay
-from .scheduler import (
-    STATUS_FAILED, STATUS_STOPPED, STATUS_SUCCESS, ScheduleStore,
-    mark_finished, mark_started,
-)
+from .scheduler import ScheduleStore, mark_finished, mark_started
 from .validator import LEVEL_ERROR, validate_project_detailed
 from .variables import (
     mask_sensitive_text, prepare_runtime_variables, sensitive_variable_names,
@@ -30,6 +32,7 @@ from ui.recorder_toolbar import FloatingExecutionToolbar
 class ScheduledRunController(QObject):
     completed = Signal(object)
     action_progress = Signal(int, str)
+    attention_requested = Signal(object)
 
     def __init__(
         self, app: QApplication, project_json: Path, schedule_id: str,
@@ -50,18 +53,19 @@ class ScheduledRunController(QObject):
         self.exit_code = 1
         self.completed.connect(self._finish)
         self.action_progress.connect(self._update_toolbar)
+        self.attention_requested.connect(self._show_attention)
 
     def start(self) -> None:
         error = self._prepare()
         if error:
-            self._finish({"status": STATUS_FAILED, "error": error, "failed_step": None, "attempts": 0, "steps": []})
+            self._finish({"status": FAILED, "error": error, "failed_step": None, "attempts": 0, "steps": []})
             return
         if self.project is not None and self.project.settings.hide_window_during_replay:
             try:
                 self._prepare_desktop()
             except Exception as exc:
                 self._finish({
-                    "status": STATUS_FAILED,
+                    "status": FAILED,
                     "error": f"Could not prepare the Windows desktop: {exc}",
                     "failed_step": None,
                     "attempts": 0,
@@ -120,8 +124,38 @@ class ScheduledRunController(QObject):
             self.project, self.flow_dir, self._log,
             evidence_dir=self.evidence.folder,
         )
+        self.runner.set_attention_callback(self.attention_requested.emit)
         self.runner.runtime_variables = runtime_variables
+        self.runner.execution_context.variables = runtime_variables
         return None
+
+    def _show_attention(self, payload: dict[str, Any]) -> None:
+        if self.runner is None:
+            return
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Scheduled flow requires attention")
+        box.setText(
+            f"Flow: {payload.get('flow_name') or (self.schedule.flow_name if self.schedule else '')}\n"
+            f"Failed step: {payload.get('step_number')} - {payload.get('step_name')}"
+        )
+        box.setInformativeText(str(payload.get("error") or "The step failed."))
+        screenshot = str(payload.get("screenshot") or "")
+        if screenshot and self.evidence is not None:
+            path = Path(screenshot)
+            path = path if path.is_absolute() else self.evidence.folder / path
+            pixmap = QPixmap(str(path)) if path.is_file() else QPixmap()
+            if not pixmap.isNull():
+                box.setIconPixmap(pixmap.scaled(420, 240, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        retry = box.addButton("Retry", QMessageBox.AcceptRole)
+        skip = box.addButton("Skip", QMessageBox.DestructiveRole)
+        stop = box.addButton("Stop", QMessageBox.RejectRole)
+        box.setDefaultButton(stop)
+        box.exec()
+        clicked = box.clickedButton()
+        decision = "retry" if clicked is retry else "skip" if clicked is skip else "stop"
+        self._log(f"human escalation decision: {decision}")
+        self.runner.submit_attention_decision(decision)
 
     def _start_thread(self) -> None:
         if self.runner is None or self.project is None:
@@ -134,28 +168,30 @@ class ScheduledRunController(QObject):
         threading.Thread(target=self._run, name="scheduled-rpa-run", daemon=True).start()
 
     def _run(self) -> None:
-        status, error, failed_step = STATUS_SUCCESS, None, None
+        status, error, failed_step = COMPLETED_UNVERIFIED, None, None
         try:
             self.runner.run(
                 action_callback=self._action_status,
                 include_start_delay=True,
                 enable_debug=False,
             )
+            status = self.runner.final_status
             if self.runner.had_continued_failures:
-                status = STATUS_FAILED
+                status = FAILED
                 failed_step = (self.runner.first_failed_index + 1) if self.runner.first_failed_index is not None else None
                 error = self.runner.first_failure_error
         except StopReplay:
-            status, error = STATUS_STOPPED, "Stopped by user or execution timeout"
+            status, error = STOPPED_BY_USER, "Stopped by user or execution timeout"
             failed_step = (self.runner.current_index + 1) if self.runner.current_index is not None else None
         except ReplayActionError as exc:
-            status, error, failed_step = STATUS_FAILED, str(exc), exc.index + 1
+            status, error, failed_step = FAILED, str(exc), exc.index + 1
         except Exception as exc:
-            status, error = STATUS_FAILED, str(exc)
+            status, error = FAILED, str(exc)
         self.completed.emit({
             "status": status, "error": error, "failed_step": failed_step,
             "attempts": self.runner.total_attempts,
             "steps": self.runner.step_results,
+            "diagnostics": self.runner.run_diagnostics(),
         })
 
     def stop(self) -> None:
@@ -179,7 +215,7 @@ class ScheduledRunController(QObject):
         if self._timeout_timer:
             self._timeout_timer.cancel()
             self._timeout_timer = None
-        status = str(result.get("status") or STATUS_FAILED)
+        status = str(result.get("status") or FAILED)
         error = str(result.get("error") or "") or None
         failed_step = result.get("failed_step")
         attempts = int(result.get("attempts") or 0)
@@ -196,11 +232,13 @@ class ScheduledRunController(QObject):
             mark_finished(
                 self.schedule, status, error=safe_error,
                 failed_step=failed_step, attempts=attempts,
+                diagnostics=_mask(dict(result.get("diagnostics") or {}), self.secret_values),
             )
             self.store.set(self.schedule)
             self.store.save()
         if (
-            status == STATUS_SUCCESS and self.project is not None
+            status in {COMPLETED_VERIFIED, COMPLETED_UNVERIFIED, RECOVERED}
+            and self.project is not None
             and self.project.settings.persist_variable_values
         ):
             try:
@@ -216,10 +254,13 @@ class ScheduledRunController(QObject):
                 self.evidence.finalize(
                     status, _mask(result.get("steps") or [], self.secret_values),
                     attempts, failed_step, safe_error,
+                    _mask(dict(result.get("diagnostics") or {}), self.secret_values),
                 )
             except Exception:
                 self.evidence.close()
-        self.exit_code = 0 if status == STATUS_SUCCESS else 2
+        self.exit_code = 0 if status in {
+            COMPLETED_VERIFIED, COMPLETED_UNVERIFIED, RECOVERED,
+        } else 2
         self.app.exit(self.exit_code)
 
     def _log(self, message: str) -> None:

@@ -15,6 +15,7 @@ from .variables import VARIABLE_NAME_PATTERN, built_in_variables
 from .windowing import normalize_window_target
 from .project_manager import ProjectManager
 from .subflows import mapping_dict, resolve_subflow_project, validate_subflow_dependencies
+from .verification import SUPPORTED_VERIFICATIONS
 
 LEVEL_ERROR = "Error"
 LEVEL_WARNING = "Warning"
@@ -77,6 +78,18 @@ def validate_project_detailed(
     except (TypeError, ValueError):
         variables = {}
     supported = {action.value for action in ActionType}
+    if project.success_when:
+        mode = str(project.success_when.get("mode") or "all").casefold()
+        conditions = project.success_when.get("conditions")
+        if mode not in {"all", "any"}:
+            issues.append(ValidationIssue(LEVEL_ERROR, 0, "Flow Completion", "mode must be All or Any"))
+        if not isinstance(conditions, list) or not conditions:
+            issues.append(ValidationIssue(LEVEL_ERROR, 0, "Flow Completion", "add at least one completion condition"))
+        else:
+            for condition in conditions:
+                _validate_verification_condition(
+                    condition, variables, project_dir, 0, "Flow Completion", issues,
+                )
     end_index = len(project.actions) - 1 if end_index is None else min(end_index, len(project.actions) - 1)
     flow = parse_control_flow(project.actions)
     for issue in flow.issues + range_structure_issues(flow, start_index, end_index):
@@ -96,8 +109,9 @@ def validate_project_detailed(
                 LEVEL_ERROR, index + 1, _step_name(action),
                 "control steps cannot be disabled; remove the block or keep its structure enabled",
             ))
-        if isinstance(action.data, dict) and str(action.data.get("failure_action", "")).lower() == "jump":
-            target = _integer(action.data.get("failure_jump_step"))
+        failure_settings = action.on_failure if isinstance(action.on_failure, dict) else action.data
+        if isinstance(failure_settings, dict) and str(failure_settings.get("failure_action", "")).lower() == "jump":
+            target = _integer(failure_settings.get("failure_jump_step"))
             if target and 1 <= target <= len(project.actions):
                 target_index = target - 1
                 if flow.execution_depths[index] != flow.execution_depths[target_index] or project.actions[target_index].action in CONTROL_TYPES:
@@ -131,6 +145,10 @@ def validate_project_detailed(
         if not isinstance(action.data, dict):
             issues.append(ValidationIssue(LEVEL_ERROR, step_number, name, "action data is corrupted; expected an object"))
             continue
+        if action.expect:
+            _validate_verification_condition(action.expect, variables, project_dir, step_number, name, issues)
+        if action.on_failure:
+            _validate_phase_one_failure(action.on_failure, supported, step_number, name, issues)
         if action.action == ActionType.COMMENT.value and not str(action.data.get("text", "")).strip():
             issues.append(ValidationIssue(LEVEL_WARNING, step_number, name, "comment is empty"))
             continue
@@ -200,6 +218,75 @@ def _step_name(action: RpaAction) -> str:
 
 def _add(issues: list[ValidationIssue], level: str, number: int, name: str, reason: str) -> None:
     issues.append(ValidationIssue(level, number, name, reason))
+
+
+def _validate_verification_condition(
+    condition: Any,
+    variables: dict[str, Any],
+    project_dir: Path | None,
+    number: int,
+    name: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if not isinstance(condition, dict):
+        _add(issues, LEVEL_ERROR, number, name, "verification condition must be an object")
+        return
+    kind = str(condition.get("type") or "").casefold()
+    if kind not in SUPPORTED_VERIFICATIONS:
+        _add(issues, LEVEL_ERROR, number, name, f"unsupported verification type: {kind or '(blank)'}")
+        return
+    for field in ("timeout_seconds", "poll_interval_seconds"):
+        if field in condition:
+            value = _finite_number(condition.get(field))
+            minimum = 0.05 if field == "poll_interval_seconds" else 0.0
+            if value is None or value < minimum:
+                _add(issues, LEVEL_ERROR, number, name, f"{field.replace('_', ' ')} must be at least {minimum:g}")
+    if kind == "variable_equals":
+        variable = str(condition.get("variable") or condition.get("name") or "")
+        if not variable:
+            _add(issues, LEVEL_ERROR, number, name, "variable_equals requires a variable name")
+    elif kind == "variable_not_empty":
+        variable = str(condition.get("variable") or condition.get("value") or "")
+        if not variable:
+            _add(issues, LEVEL_ERROR, number, name, "variable_not_empty requires a variable name")
+    else:
+        value = str(condition.get("value") or "").strip()
+        if not value:
+            _add(issues, LEVEL_ERROR, number, name, f"{kind} requires a value")
+        elif kind in {"image_visible", "image_not_visible"} and project_dir and "${" not in value and "{{" not in value:
+            path = Path(value)
+            path = path if path.is_absolute() else project_dir / path
+            if not path.is_file():
+                _add(issues, LEVEL_ERROR, number, name, f"verification image is missing: {value}")
+
+
+def _validate_phase_one_failure(
+    settings: Any,
+    supported: set[str],
+    number: int,
+    name: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if not isinstance(settings, dict):
+        _add(issues, LEVEL_ERROR, number, name, "failure handling must be an object")
+        return
+    count = _integer(settings.get("retry_count", 0))
+    if count is None or not 0 <= count <= 100:
+        _add(issues, LEVEL_ERROR, number, name, "failure retry count must be from 0 to 100")
+    delay = _finite_number(settings.get("retry_delay_seconds", settings.get("retry_delay", 1)))
+    if delay is None or delay < 0:
+        _add(issues, LEVEL_ERROR, number, name, "failure retry delay must be non-negative")
+    for field in ("ask_user", "stop_flow"):
+        if field in settings and not isinstance(settings[field], bool):
+            _add(issues, LEVEL_ERROR, number, name, f"{field.replace('_', ' ')} must be true or false")
+    fallback = settings.get("fallback_step")
+    if fallback is not None:
+        if not isinstance(fallback, dict) or not str(fallback.get("action", "")).strip():
+            _add(issues, LEVEL_ERROR, number, name, "fallback step must contain an action")
+        else:
+            action_type = str(fallback.get("action"))
+            if action_type not in supported or action_type in CONTROL_TYPES | METADATA_TYPES:
+                _add(issues, LEVEL_ERROR, number, name, f"unsupported fallback action: {action_type}")
 
 
 def _validate_common(
