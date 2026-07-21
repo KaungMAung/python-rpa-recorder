@@ -153,7 +153,12 @@ class RpaAction:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        if self.expect is None:
+            payload.pop("expect")
+        if self.on_failure is None:
+            payload.pop("on_failure")
+        return payload
 
     def summary(self, mask_secrets: bool = True) -> str:
         data = self.data

@@ -374,6 +374,14 @@ class ReplayRunner:
                     action_callback(index, "skipped")
                 index += 1
                 continue
+            if recovery_resolution == "attention":
+                self._finish_step_record(record, "Requires Attention", str(final_error))
+                if action_callback:
+                    action_callback(index, "failed")
+                self.final_status = REQUIRES_ATTENTION
+                raise ReplayActionError(
+                    index, action, RuntimeError(str(final_error or "human intervention required")),
+                )
             if recovery_resolution == "stop":
                 self._finish_step_record(record, "Stopped", str(final_error or "Stopped by user"))
                 if action_callback:
@@ -1416,7 +1424,7 @@ class ReplayRunner:
         if self._attention_callback is None:
             self.requires_attention = True
             self.log("Human escalation requested but no interactive handler is available")
-            return "stop"
+            return "attention"
         with self._attention_condition:
             self._attention_decision = None
         self._attention_callback(payload)
@@ -1483,6 +1491,8 @@ class ReplayRunner:
             if decision == "skip":
                 self.requires_attention = True
                 return None, "skip"
+            if decision == "attention":
+                return error, "attention"
             if decision == "stop":
                 return error, "stop"
             try:
