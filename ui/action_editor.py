@@ -6,7 +6,7 @@ from uuid import uuid4
 import shiboken6
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QPixmap
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -31,6 +31,7 @@ from ui.condition_editor import ConditionEditor
 from ui.window_target_editor import WindowTargetEditor
 from ui.subflow_editor import SubflowEditor
 from ui.utility_action_editor import UTILITY_ACTIONS, UtilityActionEditor
+from ui.target_preview import TargetPreviewWidget
 
 
 WINDOW_ACTIONS = {
@@ -82,11 +83,7 @@ class ActionEditor(QWidget):
 
         self.preview_heading = QLabel("Target Preview")
         self.preview_heading.setStyleSheet("font-weight: 600; margin-top: 6px;")
-        self.preview = QLabel("No target image")
-        self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setMinimumSize(260, 140)
-        self.preview.setMaximumHeight(220)
-        self.preview.setStyleSheet("background: #f8fafc; border: 1px solid #d8dee8; color: #64748b; padding: 4px;")
+        self.preview = TargetPreviewWidget()
 
         # Image matching fields intentionally live after the test controls and
         # preview. Keeping them in their own form preserves the existing widgets
@@ -501,8 +498,10 @@ class ActionEditor(QWidget):
         if self.project_dir and data.get("image"):
             image = self.project_dir / str(data["image"])
             if image.exists():
-                pixmap = QPixmap(str(image))
-                self.preview.setPixmap(pixmap.scaled(self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                click_point = None
+                if "click_offset_x" in data and "click_offset_y" in data:
+                    click_point = (int(data["click_offset_x"]), int(data["click_offset_y"]))
+                self.preview.load_image(image, click_point)
             else:
                 self.preview.setText("Target image is missing. Capture it again or add a replacement image.")
 
