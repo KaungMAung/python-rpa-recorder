@@ -31,6 +31,15 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
     runner_exe = _runner_exe_reference(out_dir, _main_exe_path())
     _write_generated_runner(out_dir, runner_python, runner_exe)
     function_lines: list[str] = []
+    all_variable_names = set(project.variables) | set(project.variable_definitions)
+    generated_variables = {}
+    for name in sorted(all_variable_names):
+        definition = project.variable_definitions.get(name)
+        value = project.variables.get(name, getattr(definition, "default", None))
+        generated_variables[name] = None if (
+            getattr(definition, "secret", False)
+            or getattr(definition, "type", "") == "secret_text"
+        ) else value
     runtime_input_data = project.to_dict().get("runtime_inputs", {})
     for index, action in enumerate(project.actions, start=1):
         if action.action == ActionType.PYTHON_CODE.value:
@@ -58,7 +67,7 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
         "",
         "PROJECT_DIR = Path(__file__).resolve().parent.parent",
         "SCREENSHOT_DIR = PROJECT_DIR / 'screenshots'",
-        f"VARIABLES = {json.dumps(project.variables, indent=4)}",
+        f"VARIABLES = {json.dumps(generated_variables, indent=4)}",
         f"RUNTIME_INPUTS = {runtime_input_data!r}",
         "RUNTIME_VARIABLES = dict(VARIABLES)",
         f"PRE_CLICK_PAUSE = {_delay_literal(project.settings.pre_click_pause)}",
@@ -69,12 +78,18 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
         "def resolve(value):",
         "    if not isinstance(value, str):",
         "        return value",
-        "    for key, val in RUNTIME_VARIABLES.items():",
-        "        value = value.replace('{{' + key + '}}', str(val))",
-        "    missing = re.findall(r'\\{\\{([A-Za-z_][A-Za-z0-9_]*)\\}\\}', value)",
-        "    if missing:",
-        "        raise KeyError(f'Missing variable: {missing[0]}')",
-        "    return value",
+        "    pattern = re.compile(r'\\{\\{([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\}\\}')",
+        "    def lookup(path):",
+        "        parts = path.split('.')",
+        "        if parts[0] not in RUNTIME_VARIABLES: raise KeyError(f'Missing variable: {path}')",
+        "        result = RUNTIME_VARIABLES[parts[0]]",
+        "        for part in parts[1:]:",
+        "            if not isinstance(result, dict) or part not in result: raise KeyError(f'Missing variable: {path}')",
+        "            result = result[part]",
+        "        return result",
+        "    exact = pattern.fullmatch(value)",
+        "    if exact: return lookup(exact.group(1))",
+        "    return pattern.sub(lambda match: str(lookup(match.group(1))), value)",
         "",
         "def as_int(value):",
         "    return int(float(resolve(value)))",
@@ -418,6 +433,25 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
             lines.append(f"    time.sleep(as_float({data.get('wait_after', 1.0)!r}))")
             if str(data.get("output_variable", "")).strip():
                 lines.append(f"    RUNTIME_VARIABLES[{str(data.get('output_variable')).strip()!r}] = opened_path")
+        elif action.action == ActionType.SET_VARIABLE.value:
+            lines.append(f"    RUNTIME_VARIABLES[{str(data.get('variable', '')).strip()!r}] = resolve({data.get('value')!r})")
+        elif action.action == ActionType.GET_VARIABLE.value:
+            output = str(data.get("output_variable", "")).strip()
+            if output:
+                lines.append(f"    RUNTIME_VARIABLES[{output!r}] = RUNTIME_VARIABLES[{str(data.get('variable', '')).strip()!r}]")
+            else:
+                lines.append(f"    _ = RUNTIME_VARIABLES[{str(data.get('variable', '')).strip()!r}]")
+        elif action.action == ActionType.INCREMENT_VARIABLE.value:
+            lines.append(f"    RUNTIME_VARIABLES[{str(data.get('variable', '')).strip()!r}] += resolve({data.get('amount', 1)!r})")
+        elif action.action == ActionType.APPEND_VARIABLE.value:
+            lines.append(f"    RUNTIME_VARIABLES[{str(data.get('variable', '')).strip()!r}].append(resolve({data.get('value')!r}))")
+        elif action.action == ActionType.SET_OBJECT_PROPERTY.value:
+            variable = str(data.get("variable", "")).strip()
+            parts = str(data.get("property", "")).strip().split(".")
+            expression = f"RUNTIME_VARIABLES[{variable!r}]" + "".join(f"[{part!r}]" for part in parts)
+            lines.append(f"    {expression} = resolve({data.get('value')!r})")
+        elif action.action == ActionType.DELETE_VARIABLE.value:
+            lines.append(f"    RUNTIME_VARIABLES.pop({str(data.get('variable', '')).strip()!r}, None)")
         elif action.action == ActionType.RUN_SUBFLOW.value:
             lines.append(
                 "    run_subflow("

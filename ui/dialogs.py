@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 from PySide6.QtCore import QSettings, Signal
 from PySide6.QtWidgets import (
@@ -30,9 +31,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from rpa.models import ActionType, ProjectSettings, RpaAction, RpaProject, RuntimeInputDefinition
+from rpa.models import (
+    ActionType, ProjectSettings, RpaAction, RpaProject, RuntimeInputDefinition, VariableDefinition,
+)
 from rpa.control_flow import CONTROL_TYPES, METADATA_TYPES
-from rpa.variables import INPUT_TYPES, VARIABLE_NAME_PATTERN, validate_variable_configuration
+from rpa.variables import (
+    INPUT_TYPES, VARIABLE_NAME_PATTERN, VARIABLE_TYPES, coerce_variable_value,
+    validate_variable_configuration,
+)
 from ui.condition_editor import ConditionEditor
 from ui.window_target_editor import WindowTargetEditor
 from ui.subflow_editor import SubflowEditor
@@ -134,6 +140,14 @@ class ManualActionDialog(QDialog):
         ("subflow", "Run another flow", "Choose another saved flow and optionally map its variables.", [
             ("Run another saved flow", ActionType.RUN_SUBFLOW.value),
         ]),
+        ("variable", "Work with a variable", "Set, read, increment, append, update, or delete a shared flow value.", [
+            ("Set a variable", ActionType.SET_VARIABLE.value),
+            ("Read a variable", ActionType.GET_VARIABLE.value),
+            ("Increment a number", ActionType.INCREMENT_VARIABLE.value),
+            ("Append to a list", ActionType.APPEND_VARIABLE.value),
+            ("Set an object property", ActionType.SET_OBJECT_PROPERTY.value),
+            ("Delete a variable", ActionType.DELETE_VARIABLE.value),
+        ]),
         ("script", "Run a script or command", "Run PowerShell, a Python script, or advanced Python code.", [
             ("Run a PowerShell command", ActionType.RUN_POWERSHELL.value),
             ("Run a Python script", ActionType.RUN_PYTHON_SCRIPT.value),
@@ -206,6 +220,12 @@ class ManualActionDialog(QDialog):
             ("Close Window", ActionType.CLOSE_WINDOW.value),
             ("Click Relative to Window", ActionType.CLICK_WINDOW_RELATIVE.value),
             ("Move Mouse Relative to Window", ActionType.MOVE_WINDOW_RELATIVE.value),
+            ("Set Variable", ActionType.SET_VARIABLE.value),
+            ("Get Variable", ActionType.GET_VARIABLE.value),
+            ("Increment Variable", ActionType.INCREMENT_VARIABLE.value),
+            ("Append to List", ActionType.APPEND_VARIABLE.value),
+            ("Set Object Property", ActionType.SET_OBJECT_PROPERTY.value),
+            ("Delete Variable", ActionType.DELETE_VARIABLE.value),
         ]:
             self.type_box.addItem(label, value)
         self.form = QFormLayout()
@@ -641,6 +661,42 @@ class ManualActionDialog(QDialog):
                     self.window_move_duration = QDoubleSpinBox(); self.window_move_duration.setRange(0, 60)
                     self.window_move_duration.setDecimals(2); self.window_move_duration.setValue(0.2); self.window_move_duration.setSuffix(" s")
                     self.form.addRow("Move duration", self.window_move_duration)
+        elif kind in {
+            ActionType.SET_VARIABLE.value, ActionType.GET_VARIABLE.value,
+            ActionType.INCREMENT_VARIABLE.value, ActionType.APPEND_VARIABLE.value,
+            ActionType.SET_OBJECT_PROPERTY.value, ActionType.DELETE_VARIABLE.value,
+        }:
+            self.variable_name = QComboBox()
+            self.variable_name.setEditable(True)
+            self.variable_name.addItems(sorted(self.variables))
+            self.variable_name.setToolTip("Choose a flow variable, runtime input, or prior output.")
+            self.variable_name.currentTextChanged.connect(self._update_summary)
+            self.form.addRow("Variable", self.variable_name)
+            if kind in {ActionType.SET_VARIABLE.value, ActionType.APPEND_VARIABLE.value}:
+                self.variable_value = QPlainTextEdit()
+                self.variable_value.setMaximumHeight(100)
+                self.variable_value.setPlaceholderText("A value, JSON, or {{another_variable}}")
+                self.variable_value.textChanged.connect(self._update_summary)
+                self.form.addRow("Value", self.variable_value)
+            elif kind == ActionType.INCREMENT_VARIABLE.value:
+                self.variable_amount = QDoubleSpinBox()
+                self.variable_amount.setRange(-1_000_000_000, 1_000_000_000)
+                self.variable_amount.setValue(1)
+                self.form.addRow("Increase by", self.variable_amount)
+            elif kind == ActionType.GET_VARIABLE.value:
+                self.variable_output = QComboBox()
+                self.variable_output.setEditable(True)
+                self.variable_output.addItems(sorted(self.variables))
+                self.variable_output.setToolTip("Optional: copy the value into another named variable.")
+                self.form.addRow("Copy to", self.variable_output)
+            elif kind == ActionType.SET_OBJECT_PROPERTY.value:
+                self.variable_property = QLineEdit()
+                self.variable_property.setPlaceholderText("approved or customer.address.city")
+                self.variable_value = QPlainTextEdit()
+                self.variable_value.setMaximumHeight(100)
+                self.variable_value.setPlaceholderText("A value, JSON, or {{another_variable}}")
+                self.form.addRow("Property", self.variable_property)
+                self.form.addRow("Value", self.variable_value)
         elif kind == ActionType.RUN_SUBFLOW.value:
             self.subflow_editor = SubflowEditor(
                 self.project_dir, list(self.variables), parent=self,
@@ -805,6 +861,14 @@ class ManualActionDialog(QDialog):
                 return "Complete the Repeat Until condition."
         if action.action == ActionType.RUN_SUBFLOW.value and not str(data.get("project", "")).strip():
             return "Choose the saved flow to run."
+        if action.action in {
+            ActionType.SET_VARIABLE.value, ActionType.GET_VARIABLE.value,
+            ActionType.INCREMENT_VARIABLE.value, ActionType.APPEND_VARIABLE.value,
+            ActionType.SET_OBJECT_PROPERTY.value, ActionType.DELETE_VARIABLE.value,
+        } and not str(data.get("variable", "")).strip():
+            return "Choose or enter a variable name."
+        if action.action == ActionType.SET_OBJECT_PROPERTY.value and not str(data.get("property", "")).strip():
+            return "Enter the object property to update."
         required = {
             ActionType.LAUNCH_APPLICATION.value: ("path", "Choose an application to launch."),
             ActionType.WAIT_PROCESS.value: ("process_name", "Choose or enter a process name."),
@@ -886,6 +950,23 @@ class ManualActionDialog(QDialog):
         if kind == ActionType.HOTKEY.value:
             return RpaAction(kind, {"keys": [part.strip().lower() for part in self.keys.text().split("+") if part.strip()]})
         if kind in {
+            ActionType.SET_VARIABLE.value, ActionType.GET_VARIABLE.value,
+            ActionType.INCREMENT_VARIABLE.value, ActionType.APPEND_VARIABLE.value,
+            ActionType.SET_OBJECT_PROPERTY.value, ActionType.DELETE_VARIABLE.value,
+        }:
+            data = {"variable": self.variable_name.currentText().strip()}
+            if kind in {ActionType.SET_VARIABLE.value, ActionType.APPEND_VARIABLE.value}:
+                data["value"] = self._parse_variable_step_value(self.variable_value.toPlainText())
+            elif kind == ActionType.INCREMENT_VARIABLE.value:
+                amount = self.variable_amount.value()
+                data["amount"] = int(amount) if amount.is_integer() else amount
+            elif kind == ActionType.GET_VARIABLE.value:
+                data["output_variable"] = self.variable_output.currentText().strip()
+            elif kind == ActionType.SET_OBJECT_PROPERTY.value:
+                data["property"] = self.variable_property.text().strip()
+                data["value"] = self._parse_variable_step_value(self.variable_value.toPlainText())
+            return RpaAction(kind, data)
+        if kind in {
             ActionType.IF_IMAGE_EXISTS.value, ActionType.IF_IMAGE_NOT_EXISTS.value,
             ActionType.IF_WINDOW_EXISTS.value, ActionType.IF_PATH_EXISTS.value,
             ActionType.IF_VARIABLE.value,
@@ -933,6 +1014,18 @@ class ManualActionDialog(QDialog):
             ActionType.CLICK_COORDINATE.value: {"x": 0, "y": 0, "button": "left"},
         }
         return RpaAction(kind, defaults[kind])
+
+    @staticmethod
+    def _parse_variable_step_value(text: str):
+        value = text.strip()
+        if not value:
+            return ""
+        if value.startswith("{{") and value.endswith("}}"):
+            return value
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return text
 
 
 class RuntimeInputEditorDialog(QDialog):
@@ -994,6 +1087,98 @@ class RuntimeInputEditorDialog(QDialog):
         )
 
 
+class VariableEditorDialog(QDialog):
+    """Edit one typed flow variable without exposing Python syntax."""
+
+    def __init__(self, name: str = "", definition: VariableDefinition | None = None, parent=None) -> None:
+        super().__init__(parent)
+        definition = definition or VariableDefinition()
+        self.setWindowTitle("Flow Variable")
+        self.name_edit = QLineEdit(name)
+        self.name_edit.setPlaceholderText("Example: order_quantity")
+        self.type_combo = QComboBox()
+        labels = {
+            "text": "Text", "integer": "Integer", "decimal": "Decimal",
+            "boolean": "Boolean", "list": "List", "object": "Object / JSON",
+            "null": "Null", "secret_text": "Secret Text",
+        }
+        for kind in VARIABLE_TYPES:
+            self.type_combo.addItem(labels[kind], kind)
+        self.type_combo.setCurrentIndex(max(0, self.type_combo.findData(definition.type)))
+        self.value_edit = QLineEdit()
+        self.json_edit = QPlainTextEdit()
+        self.json_edit.setMinimumHeight(130)
+        self.json_edit.setPlaceholderText('["item"] or {"key": "value"}')
+        self.value_stack = QStackedWidget()
+        self.value_stack.addWidget(self.value_edit)
+        self.value_stack.addWidget(self.json_edit)
+        if definition.type in {"list", "object"}:
+            self.json_edit.setPlainText(json.dumps(definition.default, indent=2, ensure_ascii=False))
+        elif definition.default is not None:
+            if definition.type == "boolean":
+                self.value_edit.setText("true" if bool(definition.default) else "false")
+            else:
+                self.value_edit.setText(str(definition.default))
+        self.description_edit = QLineEdit(definition.description)
+        self.secret_check = QCheckBox("Secret (mask this value in the UI and logs)")
+        self.secret_check.setChecked(definition.secret or definition.type == "secret_text")
+        note = QLabel("Secret values are masked, but project.json is local storage—not encrypted secure storage.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #64748b;")
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+        form = QFormLayout(self)
+        form.addRow("Name", self.name_edit)
+        form.addRow("Type", self.type_combo)
+        form.addRow("Default Value", self.value_stack)
+        form.addRow("Description", self.description_edit)
+        form.addRow("", self.secret_check)
+        form.addRow(note)
+        form.addWidget(buttons)
+        self.type_combo.currentIndexChanged.connect(self._update_value_editor)
+        self.secret_check.toggled.connect(self._update_value_editor)
+        self._update_value_editor()
+
+    def _update_value_editor(self) -> None:
+        kind = str(self.type_combo.currentData())
+        is_json = kind in {"list", "object"}
+        self.value_stack.setCurrentIndex(1 if is_json else 0)
+        self.value_stack.setEnabled(kind != "null")
+        secret = self.secret_check.isChecked() or kind == "secret_text"
+        self.value_edit.setEchoMode(QLineEdit.Password if secret else QLineEdit.Normal)
+        if kind == "secret_text":
+            self.secret_check.setChecked(True)
+            self.secret_check.setEnabled(False)
+        else:
+            self.secret_check.setEnabled(True)
+
+    def _raw_value(self):
+        return self.json_edit.toPlainText() if self.type_combo.currentData() in {"list", "object"} else self.value_edit.text()
+
+    def _accept_if_valid(self) -> None:
+        name = self.name_edit.text().strip()
+        if not VARIABLE_NAME_PATTERN.fullmatch(name):
+            QMessageBox.warning(self, "Invalid Variable Name", "Use letters, numbers, and underscores, starting with a letter or underscore.")
+            return
+        _value, error = coerce_variable_value(name, str(self.type_combo.currentData()), self._raw_value())
+        if error:
+            QMessageBox.warning(self, "Invalid Default Value", error)
+            return
+        self.accept()
+
+    def result_value(self) -> tuple[str, VariableDefinition]:
+        name = self.name_edit.text().strip()
+        kind = str(self.type_combo.currentData())
+        value, error = coerce_variable_value(name, kind, self._raw_value())
+        if error:  # guarded by _accept_if_valid; useful for direct callers/tests
+            raise ValueError(error)
+        return name, VariableDefinition(
+            type=kind, default=value, description=self.description_edit.text().strip(),
+            secret=self.secret_check.isChecked() or kind == "secret_text",
+        )
+
+
 class VariablesDialog(QDialog):
     def __init__(
         self, project_or_variables: RpaProject | dict[str, str], current_values: dict | None = None, parent=None,
@@ -1002,21 +1187,43 @@ class VariablesDialog(QDialog):
             parent = current_values
             current_values = None
         super().__init__(parent)
-        self.setWindowTitle("Variables")
-        self.resize(760, 500)
+        self.setWindowTitle("Flow Variables")
+        self.resize(980, 600)
         self.project = project_or_variables if isinstance(project_or_variables, RpaProject) else None
         self.variables = dict(self.project.variables if self.project else project_or_variables)
+        self.variable_definitions = dict(self.project.variable_definitions if self.project else {})
+        for name, value in self.variables.items():
+            self.variable_definitions.setdefault(name, VariableDefinition.from_dict(value))
         self.runtime_inputs = dict(self.project.runtime_inputs if self.project else {})
         self.output_variables = list(self.project.output_variables if self.project else [])
-        self.current_values = dict(current_values or {})
-        self.list = QListWidget()
+        self.current_values = dict(
+            self.project.persisted_variable_values
+            if self.project and self.project.settings.persist_variable_values else {}
+        )
+        self.current_values.update(dict(current_values or {}))
+        self.list = QTableWidget(0, 6)
+        self.list.setHorizontalHeaderLabels([
+            "Name", "Type", "Default Value", "Current Runtime Value", "Description", "Secret",
+        ])
+        self.list.setSelectionBehavior(QTableWidget.SelectRows)
+        self.list.setSelectionMode(QTableWidget.SingleSelection)
+        self.list.setAlternatingRowColors(True)
+        self.list.doubleClicked.connect(self._edit)
         self._refresh()
-        add = QPushButton("Add")
+        add = QPushButton("Add Variable")
         edit = QPushButton("Edit")
         delete = QPushButton("Delete")
+        duplicate = QPushButton("Duplicate")
+        import_json = QPushButton("Import JSON")
+        export_json = QPushButton("Export JSON")
+        reset_runtime = QPushButton("Reset Runtime Values")
         add.clicked.connect(self._add)
         edit.clicked.connect(self._edit)
         delete.clicked.connect(self._delete)
+        duplicate.clicked.connect(self._duplicate)
+        import_json.clicked.connect(self._import_json)
+        export_json.clicked.connect(self._export_json)
+        reset_runtime.clicked.connect(self._reset_runtime_values)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -1024,11 +1231,20 @@ class VariablesDialog(QDialog):
         row.addWidget(add)
         row.addWidget(edit)
         row.addWidget(delete)
+        row.addWidget(duplicate)
+        row.addStretch(1)
+        row.addWidget(import_json)
+        row.addWidget(export_json)
+        row.addWidget(reset_runtime)
         project_tab = QWidget()
         project_layout = QVBoxLayout(project_tab)
-        project_layout.addWidget(QLabel("Saved with the flow and available to every run."))
+        project_layout.addWidget(QLabel("Typed shared values saved with this flow and available to every step during a run."))
         project_layout.addWidget(self.list)
         project_layout.addLayout(row)
+        self.persist_values = QCheckBox("Persist variable values between runs")
+        self.persist_values.setChecked(bool(self.project and self.project.settings.persist_variable_values))
+        self.persist_values.setToolTip("Off by default. When off, every run starts from a deep copy of the defaults.")
+        project_layout.addWidget(self.persist_values)
 
         runtime_tab = QWidget()
         runtime_layout = QVBoxLayout(runtime_tab)
@@ -1083,39 +1299,149 @@ class VariablesDialog(QDialog):
         buttons.accepted.connect(self._save_and_accept)
 
     def _refresh(self) -> None:
-        self.list.clear()
-        for key, value in sorted(self.variables.items()):
-            self.list.addItem(f"{key} = {value}")
+        selected = self._selected_key()
+        rows = sorted(self.variable_definitions.items())
+        self.list.setRowCount(len(rows))
+        for row, (name, definition) in enumerate(rows):
+            value = self.variables.get(name, definition.default)
+            current = self.current_values.get(name, value)
+            secret = definition.secret or definition.type == "secret_text"
+            values = (
+                name, definition.type.replace("_", " ").title(),
+                "********" if secret and value not in (None, "") else self._display_value(value),
+                "********" if secret and current not in (None, "") else self._display_value(current),
+                definition.description, "Yes" if secret else "No",
+            )
+            for column, display in enumerate(values):
+                item = QTableWidgetItem(display)
+                item.setToolTip(display)
+                self.list.setItem(row, column, item)
+            if name == selected:
+                self.list.selectRow(row)
+        self.list.resizeColumnsToContents()
+        self.list.horizontalHeader().setStretchLastSection(True)
+
+    @staticmethod
+    def _display_value(value) -> str:
+        if isinstance(value, (list, dict)):
+            return json.dumps(value, ensure_ascii=False)
+        if value is None:
+            return "null"
+        return str(value)
 
     def _selected_key(self) -> str | None:
-        item = self.list.currentItem()
-        if not item:
-            return None
-        return item.text().split(" = ", 1)[0]
+        item = self.list.item(self.list.currentRow(), 0)
+        return item.text() if item else None
 
     def _add(self) -> None:
-        key, ok = QInputDialog.getText(self, "Variable", "Name")
-        if not ok or not key:
+        dialog = VariableEditorDialog(parent=self)
+        if dialog.exec() != QDialog.Accepted:
             return
-        value, ok = QInputDialog.getText(self, "Variable", "Value")
-        if ok:
-            self.variables[key] = value
-            self._refresh()
+        name, definition = dialog.result_value()
+        if self._name_exists(name):
+            QMessageBox.warning(self, "Duplicate Variable", f"A variable named '{name}' already exists.")
+            return
+        self.variable_definitions[name] = definition
+        self.variables[name] = definition.default
+        self._refresh()
 
-    def _edit(self) -> None:
+    def _edit(self, *_args) -> None:
         key = self._selected_key()
         if not key:
             return
-        value, ok = QInputDialog.getText(self, "Variable", "Value", text=self.variables.get(key, ""))
-        if ok:
-            self.variables[key] = value
-            self._refresh()
+        dialog = VariableEditorDialog(key, self.variable_definitions[key], self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        name, definition = dialog.result_value()
+        if name != key and self._name_exists(name):
+            QMessageBox.warning(self, "Duplicate Variable", f"A variable named '{name}' already exists.")
+            return
+        self.variable_definitions.pop(key, None)
+        self.variables.pop(key, None)
+        self.variable_definitions[name] = definition
+        self.variables[name] = definition.default
+        self._refresh()
 
     def _delete(self) -> None:
         key = self._selected_key()
         if key:
             self.variables.pop(key, None)
+            self.variable_definitions.pop(key, None)
+            self.current_values.pop(key, None)
             self._refresh()
+
+    def _name_exists(self, name: str) -> bool:
+        return name in self.variable_definitions or name in self.runtime_inputs or name in self.output_variables
+
+    def _duplicate(self) -> None:
+        key = self._selected_key()
+        if not key:
+            return
+        base = f"{key}_copy"
+        name = base
+        number = 2
+        while self._name_exists(name):
+            name = f"{base}_{number}"
+            number += 1
+        original = self.variable_definitions[key]
+        definition = VariableDefinition(
+            type=original.type, default=json.loads(json.dumps(original.default)),
+            description=original.description, secret=original.secret,
+        )
+        self.variable_definitions[name] = definition
+        self.variables[name] = definition.default
+        self._refresh()
+
+    def _import_json(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Import Flow Variables", "", "JSON Files (*.json)")
+        if not path:
+            return
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            raw = payload.get("definitions", payload) if isinstance(payload, dict) else None
+            if not isinstance(raw, dict):
+                raise ValueError("The JSON root must be an object of variable names.")
+            imported: list[tuple[str, VariableDefinition]] = []
+            for name, item in raw.items():
+                if not VARIABLE_NAME_PATTERN.fullmatch(str(name)):
+                    raise ValueError(f"Invalid variable name: {name}")
+                if self._name_exists(str(name)):
+                    raise ValueError(f"Variable already exists: {name}")
+                definition = VariableDefinition.from_dict(item)
+                value, error = coerce_variable_value(str(name), definition.type, definition.default)
+                if error:
+                    raise ValueError(error)
+                definition.default = value
+                imported.append((str(name), definition))
+            for name, definition in imported:
+                self.variable_definitions[name] = definition
+                self.variables[name] = definition.default
+            self._refresh()
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            QMessageBox.warning(self, "Import Variables Failed", str(exc))
+
+    def _export_json(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export Flow Variables", "variables.json", "JSON Files (*.json)")
+        if not path:
+            return
+        try:
+            payload = {"definitions": {
+                name: {
+                    "type": definition.type, "default": definition.default,
+                    "description": definition.description, "secret": definition.secret,
+                }
+                for name, definition in sorted(self.variable_definitions.items())
+            }}
+            Path(path).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        except (OSError, TypeError, ValueError) as exc:
+            QMessageBox.warning(self, "Export Variables Failed", str(exc))
+
+    def _reset_runtime_values(self) -> None:
+        self.current_values = {name: definition.default for name, definition in self.variable_definitions.items()}
+        if self.project:
+            self.project.persisted_variable_values.clear()
+        self._refresh()
+        self._refresh_categories()
 
     def _refresh_categories(self) -> None:
         self.runtime_table.setRowCount(len(self.runtime_inputs))
@@ -1127,6 +1453,10 @@ class VariablesDialog(QDialog):
         self.output_list.clear()
         self.output_list.addItems(sorted(self.output_variables))
         sensitive = {name for name, definition in self.runtime_inputs.items() if definition.sensitive or definition.type == "password"}
+        sensitive.update(
+            name for name, definition in self.variable_definitions.items()
+            if definition.secret or definition.type == "secret_text"
+        )
         rows = []
         for name, value in sorted(self.current_values.items()):
             if name in self.variables:
@@ -1194,6 +1524,8 @@ class VariablesDialog(QDialog):
         if self.project:
             candidate = RpaProject(
                 project=self.project.project, settings=self.project.settings, variables=self.variables,
+                variable_definitions=self.variable_definitions,
+                persisted_variable_values=self.project.persisted_variable_values,
                 runtime_inputs=self.runtime_inputs, output_variables=self.output_variables,
                 actions=self.project.actions,
             )
@@ -1201,6 +1533,7 @@ class VariablesDialog(QDialog):
             if errors:
                 QMessageBox.warning(self, "Check Variables", "\n".join(f"• {error}" for error in errors))
                 return
+            self.project.settings.persist_variable_values = self.persist_values.isChecked()
         self.accept()
 
 

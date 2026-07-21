@@ -6,6 +6,7 @@ import shutil
 import sys
 import threading
 import time
+from copy import deepcopy
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from io import StringIO
@@ -18,7 +19,10 @@ from .project_manager import ProjectManager
 from .subflows import MAX_SUBFLOW_DEPTH, mapping_dict, resolve_subflow_project
 from .control_flow import CONTROL_TYPES, IF_TYPES, LOOP_TYPES, METADATA_TYPES, parse_control_flow
 from .utils import MissingPlaceholderError, foreground_elevation_mismatch, resolve_placeholders_strict
-from .variables import prepare_runtime_variables
+from .variables import (
+    json_compatible_runtime_values, mask_sensitive_text, prepare_runtime_variables,
+    sensitive_variable_names,
+)
 from .windowing import (
     WindowResolver, WindowTargetError, describe_window_target, normalize_window_target,
 )
@@ -54,9 +58,10 @@ class ReplayRunner:
     ) -> None:
         self.project = project
         self.project_dir = Path(project_dir)
-        self.log = log
+        self._log_sink = log
         self._stop_event = threading.Event()
         self.runtime_variables, _ = prepare_runtime_variables(project, validate_paths=False)
+        self.log = self._safe_log
         self.excluded_regions = list(excluded_regions or [])
         self.total_attempts = 0
         self.current_index: int | None = None
@@ -81,6 +86,14 @@ class ReplayRunner:
         self._debug_pause_next = False
         self._debug_paused_index: int | None = None
         self._debug_events: dict[int, list[dict[str, Any]]] = {}
+
+    def _safe_log(self, message: str) -> None:
+        names = sensitive_variable_names(self.project)
+        secrets = [
+            self.runtime_variables[name] for name in names
+            if name in self.runtime_variables and self.runtime_variables[name] not in (None, "")
+        ]
+        self._log_sink(mask_sensitive_text(message, secrets))
 
     def request_stop(self) -> None:
         self._stop_event.set()
@@ -234,6 +247,7 @@ class ReplayRunner:
             if action_callback:
                 action_callback(index, "running")
             record = self._start_step_record(action, index)
+            variables_before = deepcopy(self.runtime_variables)
             debug_events = self._take_debug_events(index)
             if debug_events:
                 record["debug_events"] = debug_events
@@ -346,8 +360,19 @@ class ReplayRunner:
                 record["utility_result"] = dict(self._last_utility_result)
             self._capture_step_screenshot(record, index, "after", bool(action.data.get("capture_after")))
             self._finish_step_record(record, "Success")
+            self._log_variable_changes(variables_before, self.runtime_variables)
             self.log(f"action completed: {index + 1} {action.action}")
             index += 1
+        if self.project.settings.persist_variable_values:
+            candidates = {
+                name: self.runtime_variables[name]
+                for name in (set(self.project.variables) | set(self.project.variable_definitions))
+                if name in self.runtime_variables
+            }
+            persisted, warnings = json_compatible_runtime_values(candidates)
+            self.project.persisted_variable_values = persisted
+            for warning in warnings:
+                self.log(f"Variable persistence warning: {warning}")
         self.log("replay completed")
 
     def _debug_gate(
@@ -679,6 +704,12 @@ class ReplayRunner:
             self._store_output(data, variables, opened_path)
         elif action.action in (ActionType.RUN_PYTHON.value, ActionType.PYTHON_CODE.value):
             self.run_python_code(action, data, variables, step_number)
+        elif action.action in {
+            ActionType.SET_VARIABLE.value, ActionType.GET_VARIABLE.value,
+            ActionType.INCREMENT_VARIABLE.value, ActionType.APPEND_VARIABLE.value,
+            ActionType.SET_OBJECT_PROPERTY.value, ActionType.DELETE_VARIABLE.value,
+        }:
+            self._run_variable_action(action.action, data, variables)
         elif action.action == ActionType.RUN_SUBFLOW.value:
             self._run_subflow(action, data, variables, step_number)
         elif action.action in {
@@ -1218,6 +1249,63 @@ class ReplayRunner:
         name = str(data.get("output_variable", "")).strip()
         if name:
             variables[name] = value
+
+    def _run_variable_action(self, kind: str, data: dict[str, Any], variables: dict[str, Any]) -> None:
+        name = str(data.get("variable", "")).strip()
+        if not name:
+            raise ValueError("variable name is required")
+        if kind == ActionType.SET_VARIABLE.value:
+            variables[name] = deepcopy(data.get("value"))
+        elif kind == ActionType.GET_VARIABLE.value:
+            if name not in variables:
+                raise KeyError(f"variable '{name}' does not exist")
+            self.log(f"Variable read: {name} = {variables[name]!r}")
+            output = str(data.get("output_variable", "")).strip()
+            if output:
+                variables[output] = deepcopy(variables[name])
+        elif kind == ActionType.INCREMENT_VARIABLE.value:
+            if name not in variables:
+                raise KeyError(f"variable '{name}' does not exist")
+            amount = data.get("amount", 1)
+            if isinstance(variables[name], bool) or not isinstance(variables[name], (int, float)):
+                raise TypeError(f"variable '{name}' must be numeric")
+            variables[name] += amount
+        elif kind == ActionType.APPEND_VARIABLE.value:
+            if name not in variables:
+                raise KeyError(f"variable '{name}' does not exist")
+            if not isinstance(variables[name], list):
+                raise TypeError(f"variable '{name}' must be a list")
+            variables[name].append(deepcopy(data.get("value")))
+        elif kind == ActionType.SET_OBJECT_PROPERTY.value:
+            if name not in variables or not isinstance(variables[name], dict):
+                raise TypeError(f"variable '{name}' must be an object")
+            property_path = str(data.get("property", "")).strip()
+            if not property_path:
+                raise ValueError("object property is required")
+            target = variables[name]
+            parts = property_path.split(".")
+            for part in parts[:-1]:
+                child = target.get(part)
+                if child is None:
+                    child = {}
+                    target[part] = child
+                if not isinstance(child, dict):
+                    raise TypeError(f"object property '{part}' is not an object")
+                target = child
+            target[parts[-1]] = deepcopy(data.get("value"))
+        elif kind == ActionType.DELETE_VARIABLE.value:
+            variables.pop(name, None)
+
+    def _log_variable_changes(self, before: dict[str, Any], after: dict[str, Any]) -> None:
+        sensitive = sensitive_variable_names(self.project)
+        for name in sorted(set(before) | set(after)):
+            if before.get(name, object()) == after.get(name, object()) and (name in before) == (name in after):
+                continue
+            if name not in after:
+                self.log(f"Variable deleted: {name}")
+                continue
+            display = "********" if name in sensitive else repr(after[name])
+            self.log(f"Variable updated: {name} = {display}")
 
     def _set_last_click(self, variables: dict[str, Any], x: int, y: int) -> None:
         variables["LAST_CLICK_X"] = x

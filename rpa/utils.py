@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-PLACEHOLDER_PATTERN = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
+PLACEHOLDER_PATTERN = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\}\}")
 
 
 class MissingPlaceholderError(ValueError):
@@ -24,7 +24,14 @@ def ensure_project_dirs(project_dir: Path) -> None:
 
 def resolve_placeholders(value: Any, variables: dict[str, Any]) -> Any:
     if isinstance(value, str):
-        return PLACEHOLDER_PATTERN.sub(lambda match: str(variables.get(match.group(1), match.group(0))), value)
+        exact = PLACEHOLDER_PATTERN.fullmatch(value)
+        if exact:
+            found, resolved = _nested_variable(variables, exact.group(1))
+            return resolved if found else value
+        def replace(match: re.Match[str]) -> str:
+            found, resolved = _nested_variable(variables, match.group(1))
+            return str(resolved) if found else match.group(0)
+        return PLACEHOLDER_PATTERN.sub(replace, value)
     if isinstance(value, list):
         return [resolve_placeholders(item, variables) for item in value]
     if isinstance(value, dict):
@@ -34,17 +41,36 @@ def resolve_placeholders(value: Any, variables: dict[str, Any]) -> Any:
 
 def resolve_placeholders_strict(value: Any, variables: dict[str, Any]) -> Any:
     if isinstance(value, str):
+        exact = PLACEHOLDER_PATTERN.fullmatch(value)
+        if exact:
+            found, resolved = _nested_variable(variables, exact.group(1))
+            if not found:
+                raise MissingPlaceholderError(exact.group(1))
+            return resolved
         def replace(match: re.Match[str]) -> str:
             key = match.group(1)
-            if key not in variables:
+            found, resolved = _nested_variable(variables, key)
+            if not found:
                 raise MissingPlaceholderError(key)
-            return str(variables[key])
+            return str(resolved)
         return PLACEHOLDER_PATTERN.sub(replace, value)
     if isinstance(value, list):
         return [resolve_placeholders_strict(item, variables) for item in value]
     if isinstance(value, dict):
         return {key: resolve_placeholders_strict(item, variables) for key, item in value.items()}
     return value
+
+
+def _nested_variable(variables: dict[str, Any], path: str) -> tuple[bool, Any]:
+    parts = path.split(".")
+    if not parts or parts[0] not in variables:
+        return False, None
+    value: Any = variables[parts[0]]
+    for part in parts[1:]:
+        if not isinstance(value, dict) or part not in value:
+            return False, None
+        value = value[part]
+    return True, value
 
 
 def create_file_logger(project_dir: Path, name: str = "python-rpa-recorder") -> tuple[logging.Logger, Path]:

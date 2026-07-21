@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from copy import deepcopy
+import json
 from pathlib import Path
 import re
 from typing import Any
 
-from .models import RpaProject, RuntimeInputDefinition
+from .models import RpaProject, RuntimeInputDefinition, VariableDefinition
 
 VARIABLE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 INPUT_TYPES = ("text", "number", "date", "dropdown", "password", "file", "folder")
+VARIABLE_TYPES = ("text", "integer", "decimal", "boolean", "list", "object", "null", "secret_text")
 
 
 def built_in_variables(now: datetime | None = None, clipboard_text: str = "") -> dict[str, Any]:
@@ -30,7 +33,22 @@ def prepare_runtime_variables(
     validate_paths: bool = True,
 ) -> tuple[dict[str, Any], list[str]]:
     supplied = supplied or {}
-    values: dict[str, Any] = dict(getattr(project, "variables", {}) or {})
+    definitions = getattr(project, "variable_definitions", {}) or {}
+    values: dict[str, Any] = {
+        name: deepcopy(
+            definition.default if isinstance(definition, VariableDefinition)
+            else VariableDefinition.from_dict(definition).default
+        )
+        for name, definition in definitions.items()
+    }
+    values.update(deepcopy(dict(getattr(project, "variables", {}) or {})))
+    if getattr(project.settings, "persist_variable_values", False):
+        known = set(values)
+        values.update({
+            name: deepcopy(value)
+            for name, value in (getattr(project, "persisted_variable_values", {}) or {}).items()
+            if name in known
+        })
     values.update(built_in_variables(now, clipboard_text))
     errors: list[str] = []
     for name, raw_definition in (getattr(project, "runtime_inputs", {}) or {}).items():
@@ -92,7 +110,7 @@ def coerce_runtime_input(
 
 
 def sensitive_variable_names(project: RpaProject) -> set[str]:
-    return {
+    sensitive = {
         name for name, raw_definition in (getattr(project, "runtime_inputs", {}) or {}).items()
         for definition in [
             raw_definition if isinstance(raw_definition, RuntimeInputDefinition)
@@ -100,6 +118,64 @@ def sensitive_variable_names(project: RpaProject) -> set[str]:
         ]
         if definition.sensitive or definition.type.casefold() == "password"
     }
+    sensitive.update(
+        name for name, raw_definition in (getattr(project, "variable_definitions", {}) or {}).items()
+        for definition in [
+            raw_definition if isinstance(raw_definition, VariableDefinition)
+            else VariableDefinition.from_dict(raw_definition)
+        ]
+        if definition.secret or definition.type == "secret_text"
+    )
+    return sensitive
+
+
+def coerce_variable_value(name: str, kind: str, raw: Any) -> tuple[Any, str | None]:
+    """Convert a dialog/import value to its declared JSON-friendly type."""
+    kind = str(kind).casefold()
+    try:
+        if kind in {"text", "secret_text"}:
+            return str(raw if raw is not None else ""), None
+        if kind == "integer":
+            if isinstance(raw, bool):
+                raise ValueError
+            return int(str(raw).strip()), None
+        if kind == "decimal":
+            if isinstance(raw, bool):
+                raise ValueError
+            return float(str(raw).strip()), None
+        if kind == "boolean":
+            if isinstance(raw, bool):
+                return raw, None
+            normalized = str(raw).strip().casefold()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True, None
+            if normalized in {"false", "0", "no", "off"}:
+                return False, None
+            raise ValueError
+        if kind in {"list", "object"}:
+            value = raw if isinstance(raw, (list, dict)) else json.loads(str(raw))
+            expected = list if kind == "list" else dict
+            if not isinstance(value, expected):
+                return raw, f"{name}: enter a JSON {kind}"
+            return value, None
+        if kind == "null":
+            return None, None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return raw, f"{name}: invalid {kind.replace('_', ' ')} value"
+    return raw, f"{name}: unsupported variable type '{kind}'"
+
+
+def json_compatible_runtime_values(values: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    compatible: dict[str, Any] = {}
+    warnings: list[str] = []
+    for name, value in values.items():
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError, OverflowError):
+            warnings.append(f"{name}: runtime value of type {type(value).__name__} cannot be persisted")
+        else:
+            compatible[name] = deepcopy(value)
+    return compatible, warnings
 
 
 def validate_variable_configuration(project: RpaProject) -> list[str]:
@@ -114,6 +190,16 @@ def validate_variable_configuration(project: RpaProject) -> list[str]:
             errors.append(f"{name or '(blank name)'}: invalid Project Variable name")
         if name in reserved:
             errors.append(f"{name}: built-in variable names cannot be redefined")
+        raw_definition = (getattr(project, "variable_definitions", {}) or {}).get(name)
+        definition = (
+            raw_definition if isinstance(raw_definition, VariableDefinition)
+            else VariableDefinition.from_dict(raw_definition if raw_definition is not None else project_variables[name])
+        )
+        if definition.type not in VARIABLE_TYPES:
+            errors.append(f"{name}: unsupported variable type '{definition.type}'")
+        _value, error = coerce_variable_value(name, definition.type, definition.default)
+        if error:
+            errors.append(error)
     for name, raw_definition in runtime_inputs.items():
         definition = (
             raw_definition if isinstance(raw_definition, RuntimeInputDefinition)

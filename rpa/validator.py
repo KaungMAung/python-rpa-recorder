@@ -158,6 +158,16 @@ def validate_project_detailed(
                             LEVEL_ERROR, step_number, name,
                             f"subflow input uses undefined parent variable: {parent_name}",
                         ))
+        if action.action in {
+            ActionType.GET_VARIABLE.value, ActionType.INCREMENT_VARIABLE.value,
+            ActionType.APPEND_VARIABLE.value, ActionType.SET_OBJECT_PROPERTY.value,
+            ActionType.DELETE_VARIABLE.value,
+        }:
+            variable_name = str(action.data.get("variable", "")).strip()
+            if variable_name and variable_name not in variables:
+                issues.append(ValidationIssue(
+                    LEVEL_ERROR, step_number, name, f"undefined variable: {variable_name}",
+                ))
         _validate_common(
             action, resolved, step_number, name, issues, len(project.actions), start_index + 1, end_index + 1,
         )
@@ -463,6 +473,16 @@ def _validate_action(
             except (SyntaxError, ValueError) as exc:
                 reason = getattr(exc, "msg", str(exc))
                 _add(issues, LEVEL_ERROR, number, name, f"Python code is invalid: {reason}")
+    elif action_type in {
+        ActionType.SET_VARIABLE.value, ActionType.GET_VARIABLE.value,
+        ActionType.INCREMENT_VARIABLE.value, ActionType.APPEND_VARIABLE.value,
+        ActionType.SET_OBJECT_PROPERTY.value, ActionType.DELETE_VARIABLE.value,
+    }:
+        variable = str(data.get("variable", "")).strip()
+        if not VARIABLE_NAME_PATTERN.fullmatch(variable):
+            _add(issues, LEVEL_ERROR, number, name, "a valid variable name is required")
+        if action_type == ActionType.SET_OBJECT_PROPERTY.value and not str(data.get("property", "")).strip():
+            _add(issues, LEVEL_ERROR, number, name, "object property is required")
 
 
 def _validate_condition_data(
@@ -628,6 +648,10 @@ def _collect_created_variables(action: RpaAction, variables: dict[str, Any]) -> 
     output_name = str(action.data.get("output_variable", "")).strip() if isinstance(action.data, dict) else ""
     if output_name:
         variables.setdefault(output_name, 0)
+    if action.action == ActionType.SET_VARIABLE.value and isinstance(action.data, dict):
+        name = str(action.data.get("variable", "")).strip()
+        if name:
+            variables[name] = action.data.get("value")
     if action.action == ActionType.RUN_SUBFLOW.value and isinstance(action.data, dict):
         for parent_name in mapping_dict(action.data.get("output_mappings")).values():
             variables.setdefault(parent_name, 0)

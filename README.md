@@ -125,9 +125,9 @@ The lower Logs/Status and Validation area has a practical minimum height and rem
 
 ## Adding Steps
 
-**Add Step** opens the Guided Flow Builder. Start with one of ten everyday intentions: **Click something**, **Type
+**Add Step** opens the Guided Flow Builder. Start with one of eleven everyday intentions: **Click something**, **Type
 text**, **Open an application**, **Wait for something**, **Work with a window**, **Work with a file**, **Add a
-condition**, **Repeat steps**, **Run another flow**, or **Run a script or command**. The next screen offers only the
+condition**, **Repeat steps**, **Run another flow**, **Work with a variable**, or **Run a script or command**. The next screen offers only the
 plain-language choices related to that intention, and the final screen asks only for that action's fields. Each stage
 explains what is missing immediately and shows a live sentence describing the configured step. Optional utility
 settings stay under **Advanced**.
@@ -270,22 +270,26 @@ MyRecording/
       screenshots/
 ```
 
-`project.json` contains settings, Project Variables, Runtime Input definitions, Output Variable names, and ordered actions. Older projects containing only the original `variables` object continue to load unchanged.
+`project.json` contains settings, typed flow-variable definitions, Runtime Input definitions, Output Variable names, and ordered actions. Older projects containing a flat `variables` object—or a legacy JSON-string variable map—are migrated when loaded and continue to run unchanged.
 
 ## Variables and Runtime Inputs
 
-Open **Project → Variables** to manage four clear views:
+Open **Project → Variables** (or use **Variables** in the Review toolbar) to manage four clear views:
 
-- **Project Variables** are saved with the flow and available to every run. This is the original `variables` behavior and remains fully compatible.
+- **Project Variables** uses a table for Name, Type, Default Value, Current Runtime Value, Description, and Secret. Supported types are Text, Integer, Decimal, Boolean, List, Object / JSON, Null, and Secret Text. Add, edit, delete, duplicate, import/export JSON, or reset runtime values without writing initialization code. Names follow Python identifier rules and must be unique across flow variables and Runtime Inputs. List/Object editors validate and format nested JSON before saving.
 - **Runtime Inputs** are defined with a type, default, required/optional state, description, and sensitive flag. Manual Run, Test Step, Run From Here, and Run Until Here request them before the recorder hides. Supported controls include text, number, date, dropdown, password, file, and folder.
 - **Output Variables** document values produced by earlier steps. Type Text and Open File can store their resolved value; Run Python and Python Code can store `result`. Python code may also continue assigning `variables['NAME']` directly.
 - **Current Values** shows the latest or active runner state for debugging, including built-ins and outputs. Sensitive values are always displayed as `[REDACTED]`.
 
-Placeholders resolve consistently throughout action data, including technical fields such as coordinates, timeouts, paths, image settings, text, and keys. Common examples are `{{INPUT_FILE}}`, `{{REPORT_DATE}}`, `{{CLIPBOARD_TEXT}}`, `{{LAST_CLICK_X}}`, `{{LAST_CLICK_Y}}`, and `{{RUN_DATE}}`. `RUN_DATE` uses ISO `YYYY-MM-DD`; clipboard text is captured when the run begins; the last-click coordinates update after click, image-click fallback, and drag actions.
+At run start, defaults are deep-copied into one mutable Python dictionary named `variables`. Every step and retry in that run receives the same dictionary, so `variables["quantity"] = 100`, `variables.update(...)`, and nested changes such as `variables["order"]["approved"] = True` are immediately visible to later steps. A new run resets to defaults. Enable **Persist variable values between runs** only when the flow should reuse JSON-compatible values; unsupported Python objects are skipped with a clear log warning. Retry attempts intentionally preserve changes made earlier in the same run.
 
-Required, typed, choice, and file/folder inputs are validated before execution. Scheduled runs never show an input dialog: configure their saved values in **Schedule Flows → Configure Inputs…**. Missing scheduled values block the run and are recorded as a validation failure. Sensitive runtime values are masked in the Log Viewer, evidence logs, summaries, errors, and persistent history. Scheduled values are stored locally in `flows/schedules.json`, so protect that file using normal Windows account and folder permissions.
+Use the Guided Flow Builder's **Work with a variable** intent for **Set Variable**, **Get Variable**, **Increment Variable**, **Append to List**, **Set Object Property**, and **Delete Variable**. Variable fields provide known names while remaining editable for outputs created earlier in the flow. These steps use the normal retry, timeout, validation, evidence, and generated-Python paths.
 
-Generated Python contains the same input definitions and placeholder handling. It prompts in the console (using hidden password entry), or accepts unattended values from environment variables named `RPA_INPUT_<VARIABLE_NAME>`.
+Placeholders resolve immediately before each step while the saved template remains unchanged. They work throughout action data, including coordinates, timeouts, paths, image settings, text, and keys. Nested object paths are supported: `{{quantity}}` and `{{order.product}}`. Common built-ins include `{{CLIPBOARD_TEXT}}`, `{{LAST_CLICK_X}}`, `{{LAST_CLICK_Y}}`, and `{{RUN_DATE}}`. `RUN_DATE` uses ISO `YYYY-MM-DD`; clipboard text is captured when the run begins; the last-click coordinates update after click, image-click fallback, and drag actions.
+
+Required, typed, choice, and file/folder inputs are validated before execution. Scheduled runs never show an input dialog: configure their saved values in **Schedule Flows → Configure Inputs…**. Missing scheduled values block the run and are recorded as a validation failure. Sensitive runtime and Secret Text values are masked in the Variables table, Log Viewer, evidence logs, summaries, errors, and persistent history. Project variables and scheduled values are still stored locally in `project.json` and `flows/schedules.json`; this is masking, not encryption, so protect those files using normal Windows account and folder permissions.
+
+Generated Python contains the same non-secret defaults, nested placeholder handling, shared mutable dictionary, and variable steps. It prompts for Runtime Inputs in the console (using hidden password entry), or accepts unattended values from environment variables named `RPA_INPUT_<VARIABLE_NAME>`. Supply flow secrets at runtime because raw Secret Text defaults are intentionally not emitted into generated source.
 
 ## Build EXE
 

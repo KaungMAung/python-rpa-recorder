@@ -299,14 +299,14 @@ class MainWindow(QMainWindow):
             ("Execution", [("Run", "▶ Run"), ("Stop Run", "Stop Run"), ("Schedule Flows", "⏱"), ("Generate Python", "Generate")]),
             ("Review", [("Validate Flow", "Validate"), ("Add Manual Action", "+ Add Step"), ("Insert Before", "Insert Before"), ("Insert After", "Insert After"), ("Duplicate", "⧉ Duplicate"), ("Delete Action", "Delete"), ("Move Up", "↑"), ("Move Down", "↓"), ("Deselect All", "Deselect"), ("Variables", "Variables"), ("Settings", "Settings")]),
         ]
-        groups[2] = (groups[2][0], [item for item in groups[2][1] if item[0] not in ("Variables", "Settings")])
+        groups[2] = (groups[2][0], [item for item in groups[2][1] if item[0] != "Settings"])
         groups[2][1].insert(7, ("Enable/Disable", "Enable/Disable"))
         # Keep the toolbar focused on the most common step actions. Insertion,
         # reordering and deselection remain available in the Step Editing menu
         # and the table context menu, where they are easier to discover without
         # turning the primary workspace into a wall of buttons.
         groups[2] = (groups[2][0], [item for item in groups[2][1] if item[0] in (
-            "Validate Flow", "Add Manual Action", "Duplicate", "Delete Action", "Enable/Disable",
+            "Validate Flow", "Add Manual Action", "Duplicate", "Delete Action", "Enable/Disable", "Variables",
         )])
         compact_labels = {
             "Add Manual Action": "+ Add",
@@ -565,6 +565,7 @@ class MainWindow(QMainWindow):
         self.menu_actions["Adjust Wait Before"].triggered.connect(self.adjust_selected_wait)
         self.menu_actions["Deselect All"].triggered.connect(self.clear_step_selection)
         self.menu_actions["Variables"].triggered.connect(self.variables_dialog)
+        self.buttons["Variables"].clicked.connect(self.variables_dialog)
         self.menu_actions["Settings"].triggered.connect(self.settings_dialog)
         self.empty_record_btn.clicked.connect(self.start_recording)
         self.empty_open_btn.clicked.connect(self.open_project)
@@ -1828,6 +1829,11 @@ class MainWindow(QMainWindow):
         skipped = sum(1 for action in self.project.actions[start:end + 1] if action.status == "skipped")
         runner = self.replay_worker.runner if self.replay_worker else None
         self.last_runtime_variables = dict(getattr(runner, "runtime_variables", {}))
+        if self.project.settings.persist_variable_values and self.project_dir:
+            try:
+                self.manager.save(self.project, self.project_dir)
+            except (OSError, TypeError, ValueError) as exc:
+                self.log(f"Variable persistence warning: {exc}")
         self.log("step test completed" if mode == "test" else "automation completed")
         self._finish_active_history(STATUS_SUCCESS, None, None, getattr(runner, "total_attempts", 0))
         self._finalize_evidence(
@@ -2764,6 +2770,7 @@ class MainWindow(QMainWindow):
         dialog = VariablesDialog(self.project, current, self)
         if dialog.exec() == QDialog.Accepted:
             self.project.variables = dialog.variables
+            self.project.variable_definitions = dialog.variable_definitions
             self.project.runtime_inputs = dialog.runtime_inputs
             self.project.output_variables = dialog.output_variables
             self.mark_dirty()

@@ -315,6 +315,32 @@ class ActionEditor(QWidget):
             self.advanced_form.addRow("Wait after opening", self._double(data.get("wait_after", 1), lambda v: self._set_data("wait_after", v), 0, 999))
             self.advanced_form.addRow("Expected window title", self._line(data.get("expected_window_title", ""), lambda v: self._set_data("expected_window_title", v)))
             self.advanced_form.addRow("Store opened path as", self._line(data.get("output_variable", ""), lambda v: self._set_data("output_variable", v)))
+        elif action.action in {
+            ActionType.SET_VARIABLE.value, ActionType.GET_VARIABLE.value,
+            ActionType.INCREMENT_VARIABLE.value, ActionType.APPEND_VARIABLE.value,
+            ActionType.SET_OBJECT_PROPERTY.value, ActionType.DELETE_VARIABLE.value,
+        }:
+            variable = QComboBox()
+            variable.setEditable(True)
+            variable.addItems(sorted(self.available_variables))
+            variable.setCurrentText(str(data.get("variable", "")))
+            variable.currentTextChanged.connect(lambda value: self._set_data("variable", value.strip()))
+            self.form.addRow("Variable", variable)
+            if action.action in {ActionType.SET_VARIABLE.value, ActionType.APPEND_VARIABLE.value}:
+                self.form.addRow("Value", self._line(
+                    self._variable_value_text(data.get("value")),
+                    lambda value: self._set_data("value", self._parse_variable_value(value)),
+                ))
+            elif action.action == ActionType.GET_VARIABLE.value:
+                self.form.addRow("Copy to", self._line(data.get("output_variable", ""), lambda value: self._set_data("output_variable", value.strip())))
+            elif action.action == ActionType.INCREMENT_VARIABLE.value:
+                self.form.addRow("Increase by", self._number_field(data.get("amount", 1), lambda value: self._set_data("amount", value)))
+            elif action.action == ActionType.SET_OBJECT_PROPERTY.value:
+                self.form.addRow("Property", self._line(data.get("property", ""), lambda value: self._set_data("property", value.strip())))
+                self.form.addRow("Value", self._line(
+                    self._variable_value_text(data.get("value")),
+                    lambda value: self._set_data("value", self._parse_variable_value(value)),
+                ))
         elif action.action in (ActionType.RUN_PYTHON.value, ActionType.PYTHON_CODE.value):
             warning = QLabel("Trusted code runs with your current user permissions.")
             warning.setWordWrap(True)
@@ -614,6 +640,24 @@ class ActionEditor(QWidget):
         if self.action and not self._loading:
             self.action.data[key] = value
             self.action_changed.emit()
+
+    @staticmethod
+    def _variable_value_text(value) -> str:
+        if isinstance(value, (dict, list, bool, int, float)) or value is None:
+            import json
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
+
+    @staticmethod
+    def _parse_variable_value(value: str):
+        import json
+        text = value.strip()
+        if text.startswith("{{") and text.endswith("}}"):
+            return text
+        try:
+            return json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return value
 
     def _set_condition_data(self, values: dict) -> None:
         if self.action and not self._loading:

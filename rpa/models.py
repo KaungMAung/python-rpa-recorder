@@ -77,6 +77,12 @@ class ActionType(str, Enum):
     RUN_POWERSHELL = "run_powershell"
     RUN_PYTHON_SCRIPT = "run_python_script"
     SHOW_NOTIFICATION = "show_notification"
+    SET_VARIABLE = "set_variable"
+    GET_VARIABLE = "get_variable"
+    INCREMENT_VARIABLE = "increment_variable"
+    APPEND_VARIABLE = "append_variable"
+    SET_OBJECT_PROPERTY = "set_object_property"
+    DELETE_VARIABLE = "delete_variable"
 
 
 class ActionStatus(str, Enum):
@@ -106,6 +112,7 @@ class ProjectSettings:
     show_desktop_before_recording: bool = True
     hide_window_during_replay: bool = True
     evidence_retention_runs: int = 100
+    persist_variable_values: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ProjectSettings":
@@ -178,6 +185,21 @@ class RpaAction:
             return f"Open {path}" if path else "Open a file"
         if self.action == ActionType.RUN_PYTHON.value:
             return "Run Python code"
+        if self.action in {
+            ActionType.SET_VARIABLE.value, ActionType.GET_VARIABLE.value,
+            ActionType.INCREMENT_VARIABLE.value, ActionType.APPEND_VARIABLE.value,
+            ActionType.SET_OBJECT_PROPERTY.value, ActionType.DELETE_VARIABLE.value,
+        }:
+            name = str(data.get("variable", "")).strip() or "variable"
+            verbs = {
+                ActionType.SET_VARIABLE.value: "Set",
+                ActionType.GET_VARIABLE.value: "Read",
+                ActionType.INCREMENT_VARIABLE.value: "Increment",
+                ActionType.APPEND_VARIABLE.value: "Append to",
+                ActionType.SET_OBJECT_PROPERTY.value: "Update",
+                ActionType.DELETE_VARIABLE.value: "Delete",
+            }
+            return f"{verbs[self.action]} variable {name}"
         if self.action == ActionType.PYTHON_CODE.value:
             name = data.get("name") or self.name or "Python Code"
             return str(name)
@@ -304,10 +326,50 @@ class RuntimeInputDefinition:
 
 
 @dataclass
+class VariableDefinition:
+    """Typed, flow-level variable metadata. Runtime values live elsewhere."""
+
+    type: str = "text"
+    default: Any = ""
+    description: str = ""
+    secret: bool = False
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "VariableDefinition":
+        if not isinstance(data, dict) or "type" not in data:
+            return cls(type=_infer_variable_type(data), default=data)
+        kind = str(data.get("type") or "text").casefold()
+        return cls(
+            type=kind,
+            default=data.get("default"),
+            description=str(data.get("description") or ""),
+            secret=bool(data.get("secret", False) or kind == "secret_text"),
+        )
+
+
+def _infer_variable_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "decimal"
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, dict):
+        return "object"
+    return "text"
+
+
+@dataclass
 class RpaProject:
     project: ProjectMeta = field(default_factory=ProjectMeta)
     settings: ProjectSettings = field(default_factory=ProjectSettings)
-    variables: dict[str, str] = field(default_factory=dict)
+    variables: dict[str, Any] = field(default_factory=dict)
+    variable_definitions: dict[str, VariableDefinition] = field(default_factory=dict)
+    persisted_variable_values: dict[str, Any] = field(default_factory=dict)
     runtime_inputs: dict[str, RuntimeInputDefinition] = field(default_factory=dict)
     output_variables: list[str] = field(default_factory=list)
     actions: list[RpaAction] = field(default_factory=list)
@@ -324,10 +386,48 @@ class RpaProject:
         raw_output_variables = data.get("output_variables") or []
         if not isinstance(raw_output_variables, list):
             raw_output_variables = []
+        raw_variables = data.get("variables") or {}
+        # A few early integrations wrote the whole variable map as JSON text.
+        if isinstance(raw_variables, str):
+            import json
+            try:
+                raw_variables = json.loads(raw_variables)
+            except (TypeError, ValueError):
+                raw_variables = {}
+        definitions: dict[str, VariableDefinition] = {}
+        persisted: dict[str, Any] = {}
+        possible_definitions = raw_variables.get("definitions") if isinstance(raw_variables, dict) else None
+        is_definition_store = (
+            isinstance(possible_definitions, dict)
+            and set(raw_variables).issubset({"definitions", "runtime_values"})
+            and all(
+                isinstance(item, dict) and ("type" in item or "default" in item)
+                for item in possible_definitions.values()
+            )
+        )
+        if is_definition_store:
+            raw_definitions = raw_variables.get("definitions") or {}
+            if isinstance(raw_definitions, dict):
+                definitions = {
+                    str(name): VariableDefinition.from_dict(definition)
+                    for name, definition in raw_definitions.items()
+                }
+            raw_persisted = raw_variables.get("runtime_values") or {}
+            if isinstance(raw_persisted, dict):
+                persisted = dict(raw_persisted)
+            variable_values = {name: definition.default for name, definition in definitions.items()}
+        else:
+            variable_values = dict(raw_variables) if isinstance(raw_variables, dict) else {}
+            definitions = {
+                str(name): VariableDefinition.from_dict(value)
+                for name, value in variable_values.items()
+            }
         return cls(
             project=ProjectMeta(**data.get("project", {})),
             settings=ProjectSettings.from_dict(data.get("settings")),
-            variables=dict(data.get("variables") or {}),
+            variables=variable_values,
+            variable_definitions=definitions,
+            persisted_variable_values=persisted,
             runtime_inputs={
                 str(name): RuntimeInputDefinition.from_dict(definition)
                 for name, definition in raw_runtime_inputs.items()
@@ -337,12 +437,26 @@ class RpaProject:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        definitions = dict(self.variable_definitions)
+        # Code and tests may still add directly to project.variables. Preserve it
+        # and infer metadata without requiring callers to use the new dialog.
+        for name, value in self.variables.items():
+            if name not in definitions:
+                definitions[name] = VariableDefinition.from_dict(value)
+            elif definitions[name].default != value:
+                definitions[name] = VariableDefinition(
+                    type=definitions[name].type, default=value,
+                    description=definitions[name].description, secret=definitions[name].secret,
+                )
         return {
             "format": FORMAT_NAME,
             "format_version": FORMAT_VERSION,
             "project": asdict(self.project),
             "settings": asdict(self.settings),
-            "variables": self.variables,
+            "variables": {
+                "definitions": {name: asdict(definition) for name, definition in definitions.items()},
+                **({"runtime_values": self.persisted_variable_values} if self.persisted_variable_values else {}),
+            },
             "runtime_inputs": {
                 name: asdict(
                     definition if isinstance(definition, RuntimeInputDefinition)
@@ -366,6 +480,12 @@ FRIENDLY_ACTION_NAMES = {
     ActionType.OPEN_FILE.value: "Open File",
     ActionType.RUN_PYTHON.value: "Run Python",
     ActionType.PYTHON_CODE.value: "Python Code",
+    ActionType.SET_VARIABLE.value: "Set Variable",
+    ActionType.GET_VARIABLE.value: "Get Variable",
+    ActionType.INCREMENT_VARIABLE.value: "Increment Variable",
+    ActionType.APPEND_VARIABLE.value: "Append to List",
+    ActionType.SET_OBJECT_PROPERTY.value: "Set Object Property",
+    ActionType.DELETE_VARIABLE.value: "Delete Variable",
     ActionType.CLICK_COORDINATE.value: "Click Position",
     ActionType.MOUSE_MOVE.value: "Mouse Move",
     ActionType.DRAG.value: "Drag",

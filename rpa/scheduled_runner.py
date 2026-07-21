@@ -199,6 +199,14 @@ class ScheduledRunController(QObject):
             )
             self.store.set(self.schedule)
             self.store.save()
+        if (
+            status == STATUS_SUCCESS and self.project is not None
+            and self.project.settings.persist_variable_values
+        ):
+            try:
+                ProjectManager().save(self.project, self.flow_dir)
+            except (OSError, TypeError, ValueError) as exc:
+                self._log(f"Variable persistence warning: {exc}")
         if self.toolbar:
             self.toolbar.close()
             self.toolbar = None

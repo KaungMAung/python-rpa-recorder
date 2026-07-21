@@ -15,7 +15,7 @@ def app() -> QApplication:
     return QApplication.instance() or QApplication([])
 
 
-def test_builder_starts_with_ten_plain_language_intents() -> None:
+def test_builder_starts_with_plain_language_intents() -> None:
     app()
     dialog = ManualActionDialog(ProjectSettings(), {})
 
@@ -23,7 +23,7 @@ def test_builder_starts_with_ten_plain_language_intents() -> None:
     assert [button.text() for button in dialog.intent_buttons.values()] == [
         "Click something", "Type text", "Open an application", "Wait for something",
         "Work with a window", "Work with a file", "Add a condition", "Repeat steps",
-        "Run another flow", "Run a script or command",
+        "Run another flow", "Work with a variable", "Run a script or command",
     ]
     assert dialog.type_selector_widget.isHidden()
     dialog.close()
