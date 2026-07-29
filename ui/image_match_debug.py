@@ -52,7 +52,7 @@ class MatchResultsDialog(QDialog):
         self.resize(760, 500)
         layout = QVBoxLayout(self)
         title = QLabel(f"{len(diagnostic.matches)} detected match(es) | search time {diagnostic.duration:.2f}s")
-        title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        title.setStyleSheet("font-size: 12pt; font-weight: 600;")
         layout.addWidget(title)
         self.detail = QLabel()
         self.detail.setWordWrap(True)

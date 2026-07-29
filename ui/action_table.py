@@ -61,14 +61,12 @@ class ActionTable(QTableWidget):
         self.cellClicked.connect(self._cell_clicked)
         self.verticalHeader().setVisible(False)
         header = self.horizontalHeader()
-        # Every column stays user-resizable (Interactive), except "What it does"
-        # which stretches to absorb any extra/deficit width so the table adapts
-        # smoothly when the panel is resized instead of leaving dead space or
-        # requiring a horizontal scrollbar.
+        # Every column stays user-resizable (Interactive) so header separators
+        # can always be dragged; none are Fixed/Stretch-only, and the last
+        # section isn't auto-stretched, so no column is forced to a fixed size.
         header.setStretchLastSection(False)
         for col in range(len(self.HEADERS)):
             header.setSectionResizeMode(col, QHeaderView.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)
         self.setToolTip("Select one or more steps to review or edit them. Drag selected rows to reorder; right-click for bulk commands.")
 
     def set_actions(self, actions: list[RpaAction]) -> None:

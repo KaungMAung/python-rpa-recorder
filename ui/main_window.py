@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from rpa import __version__
 from rpa.generator import generate_python
 from rpa.control_flow import BLOCK_OPENERS, IF_TYPES, LOOP_TYPES, CONTROL_TYPES, NON_EXECUTABLE_TYPES, parse_control_flow
 from rpa.evidence import RunEvidenceSession
@@ -336,7 +337,7 @@ class MainWindow(QMainWindow):
             elif group_index:
                 target_toolbar.addSeparator()
             label = QLabel(group_title)
-            label.setStyleSheet("font-weight: 700; color: #334155; margin-left: 4px; margin-right: 4px;")
+            label.setStyleSheet("font-weight: 600; color: #334155; margin-left: 4px; margin-right: 4px;")
             target_toolbar.addWidget(label)
             for name, text in group:
                 text = compact_labels.get(name, text)
@@ -355,7 +356,7 @@ class MainWindow(QMainWindow):
         empty_layout.addStretch(1)
         empty_title = QLabel("No automation recorded yet")
         empty_title.setAlignment(Qt.AlignCenter)
-        empty_title.setStyleSheet("font-size: 18px; font-weight: 700; color: #1f2937;")
+        empty_title.setStyleSheet("font-size: 14pt; font-weight: 600; color: #1f2937;")
         empty_subtitle = QLabel("Record your first automation, or open one you already created.")
         empty_subtitle.setAlignment(Qt.AlignCenter)
         empty_subtitle.setStyleSheet("color: #64748b;")
@@ -365,7 +366,7 @@ class MainWindow(QMainWindow):
         self.empty_open_btn = QPushButton("Open Automation")
         self.empty_record_btn.setMinimumHeight(34)
         self.empty_open_btn.setMinimumHeight(34)
-        self.empty_record_btn.setStyleSheet("background: #dc2626; color: white; font-weight: 700; padding: 6px 14px;")
+        self.empty_record_btn.setStyleSheet("background: #dc2626; color: white; font-weight: 600; padding: 6px 14px;")
         empty_buttons.addWidget(self.empty_record_btn)
         empty_buttons.addWidget(self.empty_open_btn)
         empty_buttons.addStretch(1)
@@ -376,7 +377,7 @@ class MainWindow(QMainWindow):
         table_wrap = QWidget()
         table_layout = QVBoxLayout(table_wrap)
         table_heading = QLabel("Steps")
-        table_heading.setStyleSheet("font-size: 14px; font-weight: 700;")
+        table_heading.setStyleSheet("font-size: 10pt; font-weight: 600;")
         table_layout.addWidget(table_heading)
         table_layout.addWidget(self.filter_box)
         table_layout.addWidget(self.table)
@@ -416,7 +417,7 @@ class MainWindow(QMainWindow):
         validation_layout.setContentsMargins(6, 6, 6, 6)
         validation_header = QHBoxLayout()
         validation_title = QLabel("Flow Validation")
-        validation_title.setStyleSheet("font-weight: 700;")
+        validation_title.setStyleSheet("font-weight: 600;")
         self.validation_summary = QLabel("Validate the flow to check whether it is ready to run.")
         self.validation_summary.setStyleSheet("color: #64748b;")
         validation_header.addWidget(validation_title)
@@ -467,11 +468,11 @@ class MainWindow(QMainWindow):
             workflow_layout.addWidget(button)
             self.workflow_buttons[label] = button
         self.workflow_buttons["Record"].setStyleSheet(
-            "QPushButton { text-align: left; padding: 7px 14px; font-weight: 700; "
+            "QPushButton { text-align: left; padding: 7px 14px; font-weight: 600; "
             "background: #fff1f2; color: #991b1b; border: 1px solid #fecaca; }"
         )
         self.workflow_buttons["Run"].setStyleSheet(
-            "QPushButton { text-align: left; padding: 7px 14px; font-weight: 700; "
+            "QPushButton { text-align: left; padding: 7px 14px; font-weight: 600; "
             "background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }"
         )
         layout.addWidget(workflow)
@@ -487,6 +488,7 @@ class MainWindow(QMainWindow):
             ("Execution", ["Run", "Run Until Breakpoint", "Validate Flow", "Test This Step", "Run From Here", "Run Until Here", "Stop Run", "Schedule Flows", "Generate Python"]),
             ("Step Editing", ["Undo", "Redo", "Copy", "Cut", "Paste", "Toggle Breakpoint", "Add Manual Action", "Add Comment", "Group Selected", "Move Into Group", "Move Out of Group", "Insert Before", "Insert After", "Duplicate", "Delete Action", "Move Up", "Move Down", "Enable Selected", "Disable Selected", "Adjust Wait Before", "Enable/Disable", "Deselect All"]),
             ("Project", ["Variables", "Settings"]),
+            ("Help", ["About"]),
         ]
         for menu_name, names in menus:
             menu = self.menuBar().addMenu(menu_name)
@@ -575,6 +577,7 @@ class MainWindow(QMainWindow):
         self.menu_actions["Variables"].triggered.connect(self.variables_dialog)
         self.buttons["Variables"].clicked.connect(self.variables_dialog)
         self.menu_actions["Settings"].triggered.connect(self.settings_dialog)
+        self.menu_actions["About"].triggered.connect(self.about_dialog)
         self.empty_record_btn.clicked.connect(self.start_recording)
         self.empty_open_btn.clicked.connect(self.open_project)
         self.workflow_buttons["Record"].clicked.connect(self.start_recording)
@@ -2293,6 +2296,7 @@ class MainWindow(QMainWindow):
             return
         path = generate_python(self.project, self.project_dir)
         self.log(f"Python file generated: {path}")
+        QMessageBox.information(self, "Generate Python", "Python code generated successfully.")
 
     def add_manual_action(self, position: str | None = None) -> None:
         if not self.ensure_project_dir():
@@ -2846,6 +2850,9 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             self.mark_dirty()
 
+    def about_dialog(self) -> None:
+        QMessageBox.information(self, "About", f"RPA Recorder v{__version__}")
+
     def mark_dirty(self) -> None:
         self.dirty = True
         self._record_history()
@@ -3256,6 +3263,8 @@ class MainWindow(QMainWindow):
         return value
 
     def update_status(self, prefix: str = "Ready") -> None:
+        flow_name = getattr(getattr(self.project, "project", None), "name", "") if self.project else ""
+        self.setWindowTitle(f"RPA Recorder - {flow_name}" if flow_name else "Python RPA Recorder")
         recording = self.recorder is not None and self.recorder.state == RecorderState.RECORDING
         paused = self.recorder is not None and self.recorder.state == RecorderState.PAUSED
         running = self.replay_thread is not None

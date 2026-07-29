@@ -24,7 +24,7 @@ class RunDetailsDialog(QDialog):
         layout = QVBoxLayout(self)
 
         title = QLabel("Execution report")
-        title.setStyleSheet("font-size: 18px; font-weight: 700;")
+        title.setStyleSheet("font-size: 14pt; font-weight: 600;")
         layout.addWidget(title)
         self.summary_label = QLabel(self._summary_text())
         self.summary_label.setWordWrap(True)

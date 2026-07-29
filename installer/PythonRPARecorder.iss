@@ -1,20 +1,20 @@
-#define AppName "Python RPA Recorder"
-#define AppVersion "1.0.0"
-#define AppPublisher "Python RPA Recorder"
-#define AppExeName "PythonRPARecorder.exe"
+#define AppName "RPA Recorder"
+#define AppVersion "1.0.1"
+#define AppPublisher "RPA Recorder"
+#define AppExeName "RPARecorder.exe"
 
 [Setup]
 AppId={{BEB99E9C-A064-49BC-A28D-927930D3E4B7}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
-DefaultDirName={localappdata}\Programs\PythonRPARecorder
+DefaultDirName={localappdata}\Programs\RPARecorder
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=..\installer_output
-OutputBaseFilename=PythonRPARecorderSetup
+OutputBaseFilename=RPARecorderSetup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

@@ -7,6 +7,8 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
+from ui.style import apply_global_style, enable_high_dpi
+
 
 def main() -> int:
     if len(sys.argv) >= 3 and sys.argv[1] == "--run-generated":
@@ -29,15 +31,19 @@ def main() -> int:
             parser.error("--scheduled-run requires --project and --schedule-id")
         from rpa.scheduled_runner import scheduled_run_main
 
+        enable_high_dpi()
         app = QApplication(sys.argv)
-        app.setApplicationName("Python RPA Recorder Scheduled Run")
+        apply_global_style(app)
+        app.setApplicationName("RPA Recorder Scheduled Run")
         app.setQuitOnLastWindowClosed(False)
         _controller, exit_code = scheduled_run_main(
             app, Path(options.project), str(options.schedule_id),
         )
         return exit_code
+    enable_high_dpi()
     app = QApplication(sys.argv)
-    app.setApplicationName("Python RPA Recorder")
+    apply_global_style(app)
+    app.setApplicationName("RPA Recorder")
     from ui.main_window import MainWindow
 
     window = MainWindow()

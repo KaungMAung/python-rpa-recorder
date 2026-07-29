@@ -264,7 +264,7 @@ def show_notification(title: str, message: str) -> None:
     data.uID = int(time.time() * 1000) & 0xFFFFFFFF
     data.hIcon = user32.LoadIconW(None, 32512)  # IDI_APPLICATION
     data.uFlags = 0x17  # NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_INFO
-    data.szTip = "Python RPA Recorder"
+    data.szTip = "RPA Recorder"
     data.szInfo = str(message)[:255]
     data.szInfoTitle = str(title)[:63]
     data.dwInfoFlags = 0x1  # NIIF_INFO

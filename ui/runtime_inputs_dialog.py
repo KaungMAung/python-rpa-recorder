@@ -35,7 +35,7 @@ class RuntimeInputsDialog(QDialog):
         self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
         title = QLabel("Values needed for this run")
-        title.setStyleSheet("font-size: 17px; font-weight: 700;")
+        title.setStyleSheet("font-size: 13pt; font-weight: 600;")
         layout.addWidget(title)
         description = QLabel("Confirm the values below before the recorder hides and execution starts.")
         description.setWordWrap(True)

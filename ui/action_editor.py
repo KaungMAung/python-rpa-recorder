@@ -63,7 +63,7 @@ class ActionEditor(QWidget):
         self._loading = False
 
         self.title = QLabel("Step Details")
-        self.title.setStyleSheet("font-size: 15px; font-weight: 700; color: #1f2937;")
+        self.title.setStyleSheet("font-size: 11pt; font-weight: 600; color: #1f2937;")
         self.placeholder = QLabel("Select a step to review or edit it. The step list remains available on the left.")
         self.placeholder.setWordWrap(True)
         self.placeholder.setStyleSheet("color: #64748b; padding: 14px 0;")

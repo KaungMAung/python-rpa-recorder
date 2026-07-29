@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 
 
-def recorder_window_handles(title: str = "Python RPA Recorder") -> list[int]:
+def recorder_window_handles(title: str = "PA Recorder") -> list[int]:
     """Return visible, non-minimized recorder windows eligible for restoration."""
     if sys.platform != "win32":
         return []
