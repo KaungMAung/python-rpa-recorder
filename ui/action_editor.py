@@ -33,7 +33,6 @@ from ui.window_target_editor import WindowTargetEditor
 from ui.subflow_editor import SubflowEditor
 from ui.utility_action_editor import UTILITY_ACTIONS, UtilityActionEditor
 from ui.target_preview import TargetPreviewWidget
-from rpa.verification import SUPPORTED_VERIFICATIONS
 
 
 WINDOW_ACTIONS = {
@@ -51,6 +50,8 @@ class ActionEditor(QWidget):
     test_step_requested = Signal(RpaAction)
     test_locator_requested = Signal(RpaAction)
     recapture_requested = Signal(RpaAction)
+    expected_image_capture_requested = Signal(RpaAction)
+    expected_window_pick_requested = Signal(RpaAction)
     search_region_requested = Signal(RpaAction)
     advanced_changed = Signal(bool)
     open_subflow_requested = Signal(str)
@@ -450,32 +451,140 @@ class ActionEditor(QWidget):
         enabled.setChecked(bool(action.expect))
         enabled.toggled.connect(self._toggle_expectation)
         self.expected_form.addRow("", enabled)
-        choices = [(kind.replace("_", " ").title(), kind) for kind in sorted(SUPPORTED_VERIFICATIONS)]
+        choices = [
+            ("Image Visible", "image_visible"),
+            ("Image Not Visible", "image_not_visible"),
+            ("File Exists", "file_exists"),
+            ("File Not Exists", "file_not_exists"),
+            ("Process Running", "process_running"),
+            ("Variable Equals", "variable_equals"),
+            ("Variable Not Empty", "variable_not_empty"),
+            ("Window Title Contains", "window_title_contains"),
+        ]
         kind = self._combo(
             choices, condition.get("type", "file_exists"),
-            lambda value: self._set_expectation("type", value),
+            self._expectation_type_changed,
         )
-        value = self._line(
-            self._variable_value_text(condition.get("value", "")),
-            lambda text: self._set_expectation("value", self._parse_variable_value(text)),
-        )
-        value.setToolTip("Image/file path, title text, process name, variable name, or expected value depending on the type.")
-        variable = QComboBox()
-        variable.setEditable(True)
-        variable.addItems(self.available_variables)
-        variable.setCurrentText(str(condition.get("variable", "")))
-        variable.currentTextChanged.connect(lambda text: self._set_expectation("variable", text.strip()))
+        self.expected_kind_combo = kind
         self.expected_form.addRow("Condition", kind)
-        self.expected_form.addRow("Target / expected value", value)
-        self.expected_form.addRow("Variable", variable)
-        self.expected_form.addRow(
+        self.expected_fields = QWidget()
+        self.expected_fields_form = QFormLayout(self.expected_fields)
+        self.expected_fields_form.setContentsMargins(0, 0, 0, 0)
+        self.expected_form.addRow(self.expected_fields)
+        self._build_expectation_fields(str(kind.currentData()))
+
+    def _expectation_type_changed(self, kind: str) -> None:
+        self._set_expectation("type", kind)
+        self._clear_layout(self.expected_fields_form)
+        self._build_expectation_fields(kind)
+
+    def _build_expectation_fields(self, kind: str) -> None:
+        condition = dict(self.action.expect or {}) if self.action else {}
+        if kind in {"image_visible", "image_not_visible"}:
+            edit = self._line(condition.get("value", ""), lambda value: self._set_expectation("value", value.strip()))
+            browse = QPushButton("Browse")
+            capture = QPushButton("Capture")
+            browse.clicked.connect(lambda: self._browse_expected_image(edit))
+            capture.clicked.connect(lambda: self.action and self.expected_image_capture_requested.emit(self.action))
+            row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(edit, 1); row.addWidget(browse); row.addWidget(capture)
+            wrapper = QWidget(); wrapper.setLayout(row)
+            self.expected_fields_form.addRow("Image", wrapper)
+            preview = TargetPreviewWidget()
+            self._load_expected_preview(preview, edit.text())
+            edit.editingFinished.connect(lambda: self._load_expected_preview(preview, edit.text()))
+            self.expected_fields_form.addRow("Preview", preview)
+            self.expected_fields_form.addRow(
+                "Confidence",
+                self._double(condition.get("confidence", 0.86), lambda value: self._set_expectation("confidence", value), 0.01, 1.0),
+            )
+            self._add_expectation_timing(condition)
+        elif kind in {"file_exists", "file_not_exists"}:
+            edit = self._line(condition.get("value", ""), lambda value: self._set_expectation("value", value.strip()))
+            file_button = QPushButton("File")
+            folder_button = QPushButton("Folder")
+            file_button.clicked.connect(lambda: self._browse_expected_path(edit, False))
+            folder_button.clicked.connect(lambda: self._browse_expected_path(edit, True))
+            row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(edit, 1); row.addWidget(file_button); row.addWidget(folder_button)
+            wrapper = QWidget(); wrapper.setLayout(row)
+            self.expected_fields_form.addRow("Path", wrapper)
+            self._add_expectation_timing(condition)
+        elif kind == "process_running":
+            edit = self._line(condition.get("value", ""), lambda value: self._set_expectation("value", value.strip()))
+            browse = QPushButton("Executable")
+            browse.clicked.connect(lambda: self._browse_expected_process(edit))
+            row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(edit, 1); row.addWidget(browse)
+            wrapper = QWidget(); wrapper.setLayout(row)
+            self.expected_fields_form.addRow("Process name", wrapper)
+            self._add_expectation_timing(condition)
+        elif kind in {"variable_equals", "variable_not_empty"}:
+            variable = QComboBox()
+            variable.setEditable(True)
+            variable.addItems(self.available_variables)
+            variable.setCurrentText(str(condition.get("variable", condition.get("value", "") if kind == "variable_not_empty" else "")))
+            variable.currentTextChanged.connect(lambda text: self._set_expectation("variable", text.strip()))
+            self.expected_fields_form.addRow("Variable", variable)
+            if kind == "variable_equals":
+                value = self._line(
+                    self._variable_value_text(condition.get("value", "")),
+                    lambda text: self._set_expectation("value", self._parse_variable_value(text)),
+                )
+                self.expected_fields_form.addRow("Expected value", value)
+        elif kind == "window_title_contains":
+            edit = self._line(condition.get("value", ""), lambda value: self._set_expectation("value", value.strip()))
+            pick = QPushButton("Pick Window")
+            pick.clicked.connect(lambda: self.action and self.expected_window_pick_requested.emit(self.action))
+            row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(edit, 1); row.addWidget(pick)
+            wrapper = QWidget(); wrapper.setLayout(row)
+            self.expected_fields_form.addRow("Window title contains", wrapper)
+            self._add_expectation_timing(condition)
+
+    def _add_expectation_timing(self, condition: dict) -> None:
+        self.expected_fields_form.addRow(
             "Timeout",
-            self._double(condition.get("timeout_seconds", 0), lambda v: self._set_expectation("timeout_seconds", v), 0, 86400),
+            self._double(condition.get("timeout_seconds", 0), lambda value: self._set_expectation("timeout_seconds", value), 0, 86400),
         )
-        self.expected_form.addRow(
+        self.expected_fields_form.addRow(
             "Poll interval",
-            self._double(condition.get("poll_interval_seconds", 0.5), lambda v: self._set_expectation("poll_interval_seconds", v), 0.05, 3600),
+            self._double(condition.get("poll_interval_seconds", 0.5), lambda value: self._set_expectation("poll_interval_seconds", value), 0.05, 3600),
         )
+
+    def _load_expected_preview(self, preview: TargetPreviewWidget, value: str) -> None:
+        path = Path(value).expanduser()
+        if not path.is_absolute() and self.project_dir:
+            path = self.project_dir / path
+        if value and path.is_file():
+            preview.load_image(path)
+        else:
+            preview.setText(Path(value).name if value else "No expected image selected")
+
+    def _browse_expected_image(self, edit: QLineEdit) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Select Expected Image", edit.text(), "Images (*.png *.jpg *.jpeg *.bmp)")
+        if path:
+            edit.setText(path)
+            self._set_expectation("value", path)
+            preview = self.expected_fields.findChild(TargetPreviewWidget)
+            if preview:
+                self._load_expected_preview(preview, path)
+
+    def _browse_expected_path(self, edit: QLineEdit, folder: bool) -> None:
+        if folder:
+            path = QFileDialog.getExistingDirectory(self, "Select Expected Folder", edit.text())
+        else:
+            path, _ = QFileDialog.getOpenFileName(self, "Select Expected File", edit.text())
+        if path:
+            edit.setText(path)
+            self._set_expectation("value", path)
+
+    def _browse_expected_process(self, edit: QLineEdit) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Select Executable", edit.text(), "Executables (*.exe);;All files (*)")
+        if path:
+            value = Path(path).name
+            edit.setText(value)
+            self._set_expectation("value", value)
 
     def _build_failure_handling(self, action: RpaAction) -> None:
         policy = dict(action.on_failure or {})
@@ -523,7 +632,8 @@ class ActionEditor(QWidget):
     def _toggle_expectation(self, enabled: bool) -> None:
         if not self.action or self._loading:
             return
-        self.action.expect = {"type": "file_exists", "value": ""} if enabled else None
+        kind = str(self.expected_kind_combo.currentData()) if hasattr(self, "expected_kind_combo") else "file_exists"
+        self.action.expect = {"type": kind, "value": ""} if enabled else None
         self.action_changed.emit()
 
     def _set_expectation(self, key: str, value) -> None:

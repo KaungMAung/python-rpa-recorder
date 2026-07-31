@@ -266,6 +266,8 @@ class MainWindow(QMainWindow):
         self.details_were_visible_before_run = True
         self.target_capture_overlay: TargetCaptureOverlay | None = None
         self.target_capture_action: RpaAction | None = None
+        self.target_capture_expectation = False
+        self.expected_window_action: RpaAction | None = None
         self.target_capture_origin = (0, 0)
         self.target_capture_was_maximized = False
         self.search_region_overlay: RegionSelectionOverlay | None = None
@@ -606,6 +608,8 @@ class MainWindow(QMainWindow):
         self.editor.test_step_requested.connect(self.test_selected_step)
         self.editor.test_locator_requested.connect(self.test_target)
         self.editor.recapture_requested.connect(self.recapture_target)
+        self.editor.expected_image_capture_requested.connect(self.capture_expected_image)
+        self.editor.expected_window_pick_requested.connect(self.pick_expected_window)
         self.editor.search_region_requested.connect(self.select_image_search_region)
         self.editor.open_subflow_requested.connect(self._open_referenced_subflow)
         self.editor.advanced_changed.connect(lambda expanded: self.settings.setValue("advanced_expanded", expanded))
@@ -623,6 +627,7 @@ class MainWindow(QMainWindow):
         self.recorder_failed.connect(self._recorder_failed)
 
     def refresh(self) -> None:
+        self._apply_action_availability()
         self.editor.set_available_variables(
             set(self.project.variables)
             | set(self.project.runtime_inputs)
@@ -2204,6 +2209,23 @@ class MainWindow(QMainWindow):
         if self.target_capture_overlay is not None:
             return
         self.target_capture_action = action
+        self.target_capture_expectation = False
+        self.target_capture_was_maximized = self.isMaximized()
+        self.hide()
+        QTimer.singleShot(200, self._start_target_capture_overlay)
+
+    def capture_expected_image(self, action: RpaAction) -> None:
+        if not self.project_dir:
+            show_error(self, "Capture Expected Image", "Open or create an automation first.")
+            return
+        if action not in self.project.actions or not action.expect or action.expect.get("type") not in {
+            "image_visible", "image_not_visible",
+        }:
+            return
+        if self.target_capture_overlay is not None:
+            return
+        self.target_capture_action = action
+        self.target_capture_expectation = True
         self.target_capture_was_maximized = self.isMaximized()
         self.hide()
         QTimer.singleShot(200, self._start_target_capture_overlay)
@@ -2229,6 +2251,29 @@ class MainWindow(QMainWindow):
         action = self.target_capture_action
         if not overlay or not action or not self.project_dir:
             self._restore_main_after_target_capture()
+            return
+        if self.target_capture_expectation:
+            image = (Path("screenshots") / f"expected_{action.id[:8]}.png").as_posix()
+            try:
+                save_crop_from_image(
+                    self.project_dir / image,
+                    overlay.captured_image,
+                    x,
+                    y,
+                    width,
+                    height,
+                    *self.target_capture_origin,
+                )
+                if action.expect is not None:
+                    action.expect["value"] = image
+                self.mark_dirty()
+                self.editor.set_action(action, self.project_dir)
+                self.log(f"expected-result image captured for {action.summary()}")
+                self._restore_main_after_target_capture()
+                self._show_message_near(x, y, "Expected Image Captured", "The expected-result image was saved.")
+            except Exception as exc:
+                self._restore_main_after_target_capture()
+                show_error(self, "Capture Expected Image Failed", str(exc))
             return
         image = str(action.data.get("image", ""))
         if not image:
@@ -2256,7 +2301,6 @@ class MainWindow(QMainWindow):
             self.editor.set_action(action, self.project_dir)
             self.log(f"target recaptured for {action.summary()} at ({x}, {y})")
             self._restore_main_after_target_capture()
-            self._show_message_near(x, y, "Target Recaptured", "The new target image and original click position were saved.")
         except Exception as exc:
             self._restore_main_after_target_capture()
             show_error(self, "Recapture Target Failed", str(exc))
@@ -2269,6 +2313,7 @@ class MainWindow(QMainWindow):
         overlay = self.target_capture_overlay
         self.target_capture_overlay = None
         self.target_capture_action = None
+        self.target_capture_expectation = False
         if overlay:
             overlay.deleteLater()
         if self.target_capture_was_maximized:
@@ -2278,6 +2323,61 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
         self.update_status()
+
+    def pick_expected_window(self, action: RpaAction) -> None:
+        if action not in self.project.actions or not action.expect or action.expect.get("type") != "window_title_contains":
+            return
+        if self.window_pick_overlay is not None:
+            return
+        self.expected_window_action = action
+        self.target_capture_was_maximized = self.isMaximized()
+        self.hide()
+        QTimer.singleShot(200, self._start_expected_window_picker)
+
+    def _start_expected_window_picker(self) -> None:
+        try:
+            self.window_pick_overlay = WindowPickOverlay()
+            self.window_pick_overlay.picked.connect(self._complete_expected_window_pick)
+            self.window_pick_overlay.canceled.connect(self._cancel_expected_window_pick)
+            self.window_pick_overlay.show()
+        except Exception as exc:
+            self._restore_after_expected_window_pick()
+            show_error(self, "Pick Expected Window Failed", str(exc))
+
+    def _complete_expected_window_pick(self, x: int, y: int) -> None:
+        action = self.expected_window_action
+        try:
+            backend = NativeWindowBackend()
+            try:
+                x, y = backend.cursor_position()
+            except OSError:
+                pass
+            window = backend.window_at_point(x, y, exclude_process_id=os.getpid())
+            if action and action.expect is not None:
+                action.expect["value"] = window.title
+                self.mark_dirty()
+                self.editor.set_action(action, self.project_dir)
+                self.log(f"expected window selected: {window.title!r}")
+            self._restore_after_expected_window_pick()
+        except Exception as exc:
+            self._restore_after_expected_window_pick()
+            show_error(self, "Pick Expected Window Failed", str(exc))
+
+    def _cancel_expected_window_pick(self) -> None:
+        self._restore_after_expected_window_pick()
+
+    def _restore_after_expected_window_pick(self) -> None:
+        overlay = self.window_pick_overlay
+        self.window_pick_overlay = None
+        self.expected_window_action = None
+        if overlay:
+            overlay.deleteLater()
+        if self.target_capture_was_maximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def _position_floating_toolbar(self) -> None:
         if not self.floating:
@@ -2664,7 +2764,66 @@ class MainWindow(QMainWindow):
         if error:
             self._step_edit_error("Cannot Duplicate Steps", error)
             return
+        created_images: list[Path] = []
+        try:
+            for duplicate_index in selected:
+                self._copy_duplicate_step_images(prospective[duplicate_index], created_images)
+        except OSError as exc:
+            for created in created_images:
+                try:
+                    created.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self._step_edit_error("Cannot Duplicate Steps", f"Could not copy the step image: {exc}")
+            return
         self._apply_step_edit(prospective, selected, f"duplicated {len(selected)} step(s)")
+
+    def _copy_duplicate_step_images(self, action: RpaAction, created: list[Path]) -> None:
+        if not self.project_dir:
+            return
+        project_root = self.project_dir.resolve()
+        copied: dict[str, str] = {}
+
+        def copy_image(value) -> str:
+            original = str(value or "")
+            if not original or "{{" in original or "${" in original:
+                return original
+            source_path = Path(original).expanduser()
+            source = (source_path if source_path.is_absolute() else project_root / source_path).resolve()
+            if not source.is_file() or not source.is_relative_to(project_root):
+                return original
+            cache_key = str(source)
+            if cache_key in copied:
+                return copied[cache_key]
+            timestamp = int(time.time() * 1000)
+            suffix = source.suffix.lower() or ".png"
+            target = source.with_name(f"manual_target_{timestamp}{suffix}")
+            while target.exists():
+                timestamp += 1
+                target = source.with_name(f"manual_target_{timestamp}{suffix}")
+            shutil.copy2(source, target)
+            created.append(target)
+            replacement = str(target) if source_path.is_absolute() else target.relative_to(project_root).as_posix()
+            copied[cache_key] = replacement
+            return replacement
+
+        def copy_nested_images(value) -> None:
+            if isinstance(value, dict):
+                for key, item in list(value.items()):
+                    if key == "image" and isinstance(item, (str, Path)):
+                        value[key] = copy_image(item)
+                    elif key == "reference_images" and isinstance(item, list):
+                        value[key] = [copy_image(path) for path in item]
+                    else:
+                        copy_nested_images(item)
+            elif isinstance(value, list):
+                for item in value:
+                    copy_nested_images(item)
+
+        copy_nested_images(action.data)
+        copy_nested_images(action.on_failure)
+        if action.expect and action.expect.get("type") in {"image_visible", "image_not_visible"}:
+            action.expect["value"] = copy_image(action.expect.get("value", ""))
 
     def move_action(self, delta: int) -> None:
         indices = self.table.selected_indices()
@@ -2920,7 +3079,23 @@ class MainWindow(QMainWindow):
     def settings_dialog(self) -> None:
         dialog = SettingsDialog(self.project.settings, self, self.project)
         if dialog.exec() == QDialog.Accepted:
+            self._apply_action_availability()
             self.mark_dirty()
+
+    def _apply_action_availability(self) -> None:
+        comment_available = self.project.settings.is_action_available(ActionType.COMMENT.value)
+        group_available = (
+            self.project.settings.is_action_available(ActionType.GROUP_START.value)
+            and self.project.settings.is_action_available(ActionType.GROUP_END.value)
+        )
+        if "Add Comment" in self.menu_actions:
+            self.menu_actions["Add Comment"].setVisible(comment_available)
+        if "Group Selected" in self.menu_actions:
+            self.menu_actions["Group Selected"].setVisible(group_available)
+        if hasattr(self, "table"):
+            self.table.set_new_step_action_availability(
+                comment=comment_available, group=group_available,
+            )
 
     def about_dialog(self) -> None:
         QMessageBox.information(self, "About", f"RPA Recorder v{__version__}")

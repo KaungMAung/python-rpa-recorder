@@ -6,9 +6,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QPushButton
 
-from rpa.models import ActionType, ProjectSettings, RpaAction, RpaProject
+from rpa.models import ALL_ACTION_TYPES, ActionType, ProjectSettings, RpaAction, RpaProject
 from ui.action_editor import ActionEditor
-from ui.dialogs import ManualActionDialog
+from ui.dialogs import ManualActionDialog, SettingsDialog
 from ui.main_window import MainWindow
 
 
@@ -132,6 +132,119 @@ def test_actual_step_editor_still_exposes_advanced_settings() -> None:
     assert editor.advanced_button.text().startswith("Advanced Settings")
     assert not editor.advanced_button.isHidden()
     editor.close()
+
+
+def test_available_actions_default_to_all_and_round_trip_with_project() -> None:
+    settings = ProjectSettings()
+    assert all(settings.is_action_available(action_type) for action_type in ALL_ACTION_TYPES)
+
+    project = RpaProject(
+        settings=ProjectSettings(disabled_action_types=[ActionType.TYPE_TEXT.value]),
+        actions=[RpaAction(ActionType.TYPE_TEXT.value, {"text": "existing"})],
+    )
+    loaded = RpaProject.from_dict(project.to_dict())
+    assert not loaded.settings.is_action_available(ActionType.TYPE_TEXT.value)
+    assert loaded.actions[0].action == ActionType.TYPE_TEXT.value
+
+
+def test_available_actions_settings_lists_every_type_and_bulk_controls(monkeypatch) -> None:
+    app()
+    stored = {}
+
+    class FakeSettings:
+        def __init__(self, *_args):
+            pass
+
+        def setValue(self, key, value):
+            stored[key] = value
+
+    monkeypatch.setattr("ui.dialogs.QSettings", FakeSettings)
+    settings = ProjectSettings()
+    dialog = SettingsDialog(settings)
+    assert len(dialog.action_type_checks) == len(ALL_ACTION_TYPES)
+    assert set(dialog.action_type_checks) == set(ALL_ACTION_TYPES)
+    assert all(checkbox.isChecked() for checkbox in dialog.action_type_checks.values())
+
+    dialog._set_all_actions_enabled(False)
+    assert not any(checkbox.isChecked() for checkbox in dialog.action_type_checks.values())
+    dialog._reset_available_actions()
+    assert all(checkbox.isChecked() for checkbox in dialog.action_type_checks.values())
+    dialog.action_type_checks[ActionType.TYPE_TEXT.value].setChecked(False)
+    dialog.accept()
+    assert settings.disabled_action_types == [ActionType.TYPE_TEXT.value]
+    assert stored["disabled_action_types"] == [ActionType.TYPE_TEXT.value]
+
+
+def test_available_actions_uses_collapsible_guided_groups() -> None:
+    app()
+    dialog = SettingsDialog(ProjectSettings())
+    assert list(dialog.action_groups) == [
+        "Mouse Actions",
+        "Keyboard and Text",
+        "Applications and Processes",
+        "Windows",
+        "Files and Folders",
+        "Conditions",
+        "Loops",
+        "Variables",
+        "Scripts and Commands",
+        "Clipboard",
+        "Flow Control",
+        "Notifications and Utilities",
+    ]
+    grouped_types = [
+        action_type
+        for group in dialog.action_groups.values()
+        for action_type in group.action_types
+    ]
+    assert len(grouped_types) == len(set(grouped_types)) == len(ALL_ACTION_TYPES)
+    assert set(grouped_types) == set(ALL_ACTION_TYPES)
+
+    mouse = dialog.action_groups["Mouse Actions"]
+    assert mouse.group_checkbox.text() == f"Mouse Actions ({len(mouse.action_types)}/{len(mouse.action_types)})"
+    mouse.group_checkbox.click()
+    assert not any(checkbox.isChecked() for checkbox in mouse.checkboxes.values())
+    assert mouse.group_checkbox.text() == f"Mouse Actions (0/{len(mouse.action_types)})"
+    mouse.expand_button.click()
+    assert mouse.content.isHidden()
+    mouse.expand_button.click()
+    assert not mouse.content.isHidden()
+    dialog.close()
+
+
+def test_disabled_actions_are_filtered_from_guided_and_full_add_step() -> None:
+    app()
+    settings = ProjectSettings(disabled_action_types=[
+        ActionType.TYPE_TEXT.value,
+        ActionType.PRESS_KEY.value,
+        ActionType.HOTKEY.value,
+        ActionType.WAIT.value,
+    ])
+    dialog = ManualActionDialog(settings, {})
+
+    assert dialog.type_box.findData(ActionType.TYPE_TEXT.value) == -1
+    assert dialog.type_box.findData(ActionType.WAIT.value) == -1
+    assert dialog.intent_buttons["type"].isHidden()
+    assert not dialog.intent_buttons["wait"].isHidden()
+    dialog.select_intent("wait")
+    assert dialog.guided_type_box.findData(ActionType.WAIT.value) == -1
+    assert dialog.guided_type_box.findData(ActionType.WAIT_WINDOW.value) >= 0
+    dialog._use_full_editor()
+    assert dialog.pages.currentWidget() is dialog.details_page
+    assert not dialog.type_selector_widget.isHidden()
+    dialog.close()
+
+
+def test_full_editor_remains_accessible_when_every_action_is_disabled() -> None:
+    app()
+    dialog = ManualActionDialog(
+        ProjectSettings(disabled_action_types=list(ALL_ACTION_TYPES)), {},
+    )
+    dialog._use_full_editor()
+    assert dialog.pages.currentWidget() is dialog.details_page
+    assert dialog.type_box.count() == 0
+    assert not dialog.confirm_button.isEnabled()
+    dialog.close()
 
 
 def test_relevant_test_controls_emit_the_same_rpa_action_model(tmp_path) -> None:

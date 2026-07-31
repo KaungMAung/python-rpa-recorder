@@ -6,6 +6,7 @@ from typing import Any, Callable
 from .execution import ExecutionContext
 from .models import ActionType
 from .tools import FunctionTool, ToolRegistry
+from .utils import normalize_mouse_button
 
 
 WINDOW_ACTIONS = {
@@ -115,8 +116,10 @@ def _wait(inputs: dict[str, Any], context: ExecutionContext) -> None:
 
 def _coordinate_click(inputs: dict[str, Any], context: ExecutionContext) -> None:
     x, y = int(inputs.get("x", 0)), int(inputs.get("y", 0))
+    button = normalize_mouse_button(inputs.get("button", "left"))
     context.helper("sleep")(float(inputs.get("pre_click_pause", context.project.settings.pre_click_pause)))
-    _gui(context).click(x, y, button=str(inputs.get("button", "left")))
+    context.log(f"mouse click: button={button}, target=({x}, {y})")
+    _gui(context).click(x, y, button=button)
     context.helper("set_last_click")(context.variables, x, y)
 
 
@@ -167,4 +170,3 @@ def _subflow(inputs: dict[str, Any], context: ExecutionContext) -> None:
 
 def _utility(inputs: dict[str, Any], context: ExecutionContext) -> None:
     context.helper("native_utility")(_action(context), inputs, context.variables)
-

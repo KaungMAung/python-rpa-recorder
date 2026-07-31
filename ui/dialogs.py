@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 
-from PySide6.QtCore import QSettings, Signal
+from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -27,12 +27,14 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from rpa.models import (
-    ActionType, ProjectSettings, RpaAction, RpaProject, RuntimeInputDefinition, VariableDefinition,
+    ALL_ACTION_TYPES, DEFAULT_DISABLED_ACTION_TYPES, FRIENDLY_ACTION_NAMES, ActionType,
+    ProjectSettings, RpaAction, RpaProject, RuntimeInputDefinition, VariableDefinition,
 )
 from rpa.control_flow import CONTROL_TYPES, METADATA_TYPES
 from rpa.variables import (
@@ -68,6 +70,8 @@ def load_default_project_settings() -> ProjectSettings:
     defaults = ProjectSettings()
     values: dict = {}
     for key, default_value in defaults.__dict__.items():
+        if key == "disabled_action_types":
+            default_value = list(DEFAULT_DISABLED_ACTION_TYPES)
         stored = qsettings.value(key, default_value, type=type(default_value))
         values[key] = stored
     return ProjectSettings.from_dict(values)
@@ -157,6 +161,62 @@ class ManualActionDialog(QDialog):
         ]),
     ]
 
+    @classmethod
+    def available_action_groups(cls) -> list[tuple[str, list[str]]]:
+        """Build Settings groups from the Guided Add Step intent mapping."""
+        guided = {
+            key: [
+                ActionType.CLICK_COORDINATE.value if action_type == "right_click" else action_type
+                for _label, action_type in choices
+            ]
+            for key, _label, _help, choices in cls.GUIDED_INTENTS
+        }
+        candidates = [
+            ("Mouse Actions", guided["click"]),
+            ("Keyboard and Text", guided["type"]),
+            ("Applications and Processes", [
+                ActionType.LAUNCH_APPLICATION.value,
+                ActionType.WAIT_PROCESS.value,
+                ActionType.ACTIVATE_PROCESS.value,
+                ActionType.CLOSE_PROCESS.value,
+            ]),
+            ("Windows", guided["window"]),
+            ("Files and Folders", guided["file"]),
+            ("Conditions", guided["condition"]),
+            ("Loops", guided["repeat"] + [ActionType.END_LOOP.value]),
+            ("Variables", guided["variable"]),
+            ("Scripts and Commands", guided["script"] + [ActionType.RUN_PYTHON.value]),
+            ("Clipboard", [ActionType.READ_CLIPBOARD.value, ActionType.WRITE_CLIPBOARD.value]),
+            ("Flow Control", guided["subflow"] + [
+                ActionType.ELSE.value,
+                ActionType.END_IF.value,
+                ActionType.COMMENT.value,
+                ActionType.GROUP_START.value,
+                ActionType.GROUP_END.value,
+            ]),
+            ("Notifications and Utilities", [
+                ActionType.WAIT.value,
+                ActionType.SHOW_NOTIFICATION.value,
+            ]),
+        ]
+        assigned: set[str] = set()
+        groups: list[tuple[str, list[str]]] = []
+        for name, action_types in candidates:
+            unique: list[str] = []
+            for action_type in action_types:
+                if (
+                    action_type in ALL_ACTION_TYPES
+                    and action_type not in assigned
+                    and action_type not in unique
+                ):
+                    unique.append(action_type)
+            assigned.update(unique)
+            groups.append((name, unique))
+        # New technical action types remain visible by default until a more
+        # specific Guided category is assigned to them.
+        groups[-1][1].extend(action_type for action_type in ALL_ACTION_TYPES if action_type not in assigned)
+        return groups
+
     def __init__(
         self, settings: ProjectSettings, variables: dict[str, str], parent=None,
         project_dir: Path | None = None,
@@ -231,7 +291,9 @@ class ManualActionDialog(QDialog):
             ("Set Object Property", ActionType.SET_OBJECT_PROPERTY.value),
             ("Delete Variable", ActionType.DELETE_VARIABLE.value),
         ]:
-            self.type_box.addItem(label, value)
+            stored_type = ActionType.CLICK_COORDINATE.value if value == "right_click" else value
+            if self.settings.is_action_available(stored_type):
+                self.type_box.addItem(label, value)
         self.form = QFormLayout()
         self.summary = QLabel()
         self.summary.setWordWrap(True)
@@ -319,15 +381,26 @@ class ManualActionDialog(QDialog):
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
         self.intent_buttons: dict[str, QPushButton] = {}
-        for index, (key, label, help_text, _choices) in enumerate(self.GUIDED_INTENTS):
-            button = QPushButton(label)
+        visible_index = 0
+        for key, label, help_text, _choices in self.GUIDED_INTENTS:
+            button = QPushButton(label, page)
             button.setObjectName(f"intent_{key}")
             button.setMinimumHeight(46)
             button.setToolTip(help_text)
             button.setStyleSheet("text-align: left; padding: 9px 12px; font-weight: 600;")
             button.clicked.connect(lambda _checked=False, selected=key: self._choose_intent(selected))
             self.intent_buttons[key] = button
-            grid.addWidget(button, index // 2, index % 2)
+            visible = any(
+                self.settings.is_action_available(
+                    ActionType.CLICK_COORDINATE.value if action_type == "right_click" else action_type
+                )
+                for _choice_label, action_type in _choices
+            )
+            if visible:
+                grid.addWidget(button, visible_index // 2, visible_index % 2)
+                visible_index += 1
+            else:
+                button.setVisible(False)
         layout.addLayout(grid)
         layout.addStretch(1)
         full = QPushButton("Use the full step editor")
@@ -389,7 +462,9 @@ class ManualActionDialog(QDialog):
         self.guided_type_box.clear()
         self.guided_type_box.addItem("Choose what should happen…", None)
         for choice_label, action_type in choices:
-            self.guided_type_box.addItem(choice_label, action_type)
+            stored_type = ActionType.CLICK_COORDINATE.value if action_type == "right_click" else action_type
+            if self.settings.is_action_available(stored_type):
+                self.guided_type_box.addItem(choice_label, action_type)
         self.guided_type_box.setCurrentIndex(0)
         self.guided_type_box.blockSignals(False)
         self._guided_choice_changed()
@@ -812,6 +887,13 @@ class ManualActionDialog(QDialog):
         if ok: self.text.insertPlainText("{{" + name + "}}")
 
     def _update_summary(self, *_args) -> None:
+        if self.type_box.currentData() is None:
+            self.summary.setText("No action types are currently enabled. Use Settings → Available Actions to enable one.")
+            self._show_inline_validation("No action types are available to add.")
+            self.test_match_button.setVisible(False)
+            self.test_step_button.setVisible(False)
+            self.confirm_button.setEnabled(False)
+            return
         if hasattr(self, "mode_note"):
             self.mode_note.setText(
                 "Image matching with coordinate fallback" if self.capture_image.isChecked()
@@ -933,6 +1015,9 @@ class ManualActionDialog(QDialog):
 
     def _confirm(self) -> None:
         self.diagnostic.emit("[Add Step] confirmation clicked")
+        if self.type_box.currentData() is None:
+            QMessageBox.warning(self, "No actions available", "Enable an action in Settings → Available Actions first.")
+            return
         error = self._validation_error()
         if error:
             self.diagnostic.emit(f"[Add Step] validation failed: {error}")
@@ -1572,6 +1657,84 @@ class VariablesDialog(QDialog):
         self.accept()
 
 
+class ActionAvailabilityGroup(QWidget):
+    """Collapsible action checkbox group used by Available Actions settings."""
+
+    def __init__(self, name: str, action_types: list[str], enabled_types: set[str], parent=None) -> None:
+        super().__init__(parent)
+        self.name = name
+        self.action_types = action_types
+        self.checkboxes: dict[str, QCheckBox] = {}
+        self._expanded = True
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.header = QWidget()
+        self.header.setObjectName("availableActionsGroupHeader")
+        self.header.setStyleSheet(
+            "QWidget#availableActionsGroupHeader { background: #eef2f7; "
+            "border: 1px solid #d6dde8; border-radius: 3px; }"
+        )
+        header_layout = QHBoxLayout(self.header)
+        header_layout.setContentsMargins(8, 5, 8, 5)
+        self.expand_button = QToolButton()
+        self.expand_button.setText("▾")
+        self.expand_button.setToolTip(f"Collapse {name}")
+        self.expand_button.setAutoRaise(True)
+        self.expand_button.clicked.connect(self._toggle_expanded)
+        self.group_checkbox = QCheckBox()
+        self.group_checkbox.setTristate(True)
+        self.group_checkbox.setStyleSheet("font-weight: 600;")
+        self.group_checkbox.clicked.connect(self._set_group_enabled)
+        header_layout.addWidget(self.expand_button)
+        header_layout.addWidget(self.group_checkbox, 1)
+        layout.addWidget(self.header)
+
+        self.content = QWidget()
+        content_grid = QGridLayout(self.content)
+        content_grid.setContentsMargins(32, 7, 8, 9)
+        content_grid.setHorizontalSpacing(18)
+        for index, action_type in enumerate(action_types):
+            label = FRIENDLY_ACTION_NAMES.get(action_type, action_type.replace("_", " ").title())
+            checkbox = QCheckBox(label)
+            checkbox.setObjectName(f"available_action_{action_type}")
+            checkbox.setChecked(action_type in enabled_types)
+            checkbox.setToolTip(action_type)
+            checkbox.stateChanged.connect(self.update_header)
+            self.checkboxes[action_type] = checkbox
+            content_grid.addWidget(checkbox, index // 2, index % 2)
+        layout.addWidget(self.content)
+        self.update_header()
+
+    def _toggle_expanded(self) -> None:
+        self._expanded = not self._expanded
+        self.content.setVisible(self._expanded)
+        self.expand_button.setText("▾" if self._expanded else "▸")
+        self.expand_button.setToolTip(
+            f"{'Collapse' if self._expanded else 'Expand'} {self.name}"
+        )
+
+    def _set_group_enabled(self, enabled: bool) -> None:
+        for checkbox in self.checkboxes.values():
+            checkbox.setChecked(enabled)
+        self.update_header()
+
+    def update_header(self, *_args) -> None:
+        enabled = sum(checkbox.isChecked() for checkbox in self.checkboxes.values())
+        total = len(self.checkboxes)
+        self.group_checkbox.blockSignals(True)
+        self.group_checkbox.setText(f"{self.name} ({enabled}/{total})")
+        if enabled == 0:
+            state = Qt.CheckState.Unchecked
+        elif enabled == total:
+            state = Qt.CheckState.Checked
+        else:
+            state = Qt.CheckState.PartiallyChecked
+        self.group_checkbox.setCheckState(state)
+        self.group_checkbox.blockSignals(False)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, settings: ProjectSettings, parent=None, project: RpaProject | None = None) -> None:
         super().__init__(parent)
@@ -1626,29 +1789,87 @@ class SettingsDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout = QFormLayout(self)
-        layout.addRow("Timing mode", self.timing_mode)
-        layout.addRow("Screenshot crop width", self.crop_width)
-        layout.addRow("Screenshot crop height", self.crop_height)
-        layout.addRow("Default confidence", self.confidence)
-        layout.addRow("Default image timeout", self.timeout)
-        layout.addRow("Text flush timeout", self.text_flush)
-        layout.addRow("Double-click interval", self.double_click)
-        layout.addRow("Coordinate fallback", self.coordinate_fallback)
-        layout.addRow("Typing interval", self.typing_interval)
-        layout.addRow("Start delay", self.start_delay)
-        layout.addRow("Pre-click pause", self.pre_click_pause)
-        layout.addRow("Ignore application window", self.ignore_app)
-        layout.addRow("Show desktop before recording", self.show_desktop)
-        layout.addRow("Hide recorder while running", self.hide_during_replay)
-        layout.addRow("Run evidence retention", self.evidence_retention)
-        layout.addRow("PyAutoGUI failsafe", self.failsafe)
-        layout.addRow(QLabel("Completion Criteria"))
-        layout.addRow("", self.completion_enabled)
-        layout.addRow("Mode", self.completion_mode)
-        layout.addRow("Conditions (JSON)", self.completion_conditions)
-        layout.addRow(completion_note)
+        tabs = QTabWidget()
+        general_page = QWidget()
+        general_layout = QFormLayout(general_page)
+        general_layout.addRow("Timing mode", self.timing_mode)
+        general_layout.addRow("Screenshot crop width", self.crop_width)
+        general_layout.addRow("Screenshot crop height", self.crop_height)
+        general_layout.addRow("Default confidence", self.confidence)
+        general_layout.addRow("Default image timeout", self.timeout)
+        general_layout.addRow("Text flush timeout", self.text_flush)
+        general_layout.addRow("Double-click interval", self.double_click)
+        general_layout.addRow("Coordinate fallback", self.coordinate_fallback)
+        general_layout.addRow("Typing interval", self.typing_interval)
+        general_layout.addRow("Start delay", self.start_delay)
+        general_layout.addRow("Pre-click pause", self.pre_click_pause)
+        general_layout.addRow("Ignore application window", self.ignore_app)
+        general_layout.addRow("Show desktop before recording", self.show_desktop)
+        general_layout.addRow("Hide recorder while running", self.hide_during_replay)
+        general_layout.addRow("Run evidence retention", self.evidence_retention)
+        general_layout.addRow("PyAutoGUI failsafe", self.failsafe)
+        general_layout.addRow(QLabel("Completion Criteria"))
+        general_layout.addRow("", self.completion_enabled)
+        general_layout.addRow("Mode", self.completion_mode)
+        general_layout.addRow("Conditions (JSON)", self.completion_conditions)
+        general_layout.addRow(completion_note)
+        tabs.addTab(general_page, "General")
+
+        available_page = QWidget()
+        available_layout = QVBoxLayout(available_page)
+        available_note = QLabel(
+            "Choose which action types users may add to this flow. Existing steps are unaffected."
+        )
+        available_note.setWordWrap(True)
+        available_layout.addWidget(available_note)
+        action_scroll = QScrollArea()
+        action_scroll.setWidgetResizable(True)
+        action_scroll.setFrameShape(QScrollArea.NoFrame)
+        action_list = QWidget()
+        action_list_layout = QVBoxLayout(action_list)
+        action_list_layout.setContentsMargins(0, 0, 0, 0)
+        action_list_layout.setSpacing(7)
+        self.action_type_checks: dict[str, QCheckBox] = {}
+        self.action_groups: dict[str, ActionAvailabilityGroup] = {}
+        enabled_types = {
+            action_type for action_type in ALL_ACTION_TYPES
+            if self.settings.is_action_available(action_type)
+        }
+        for group_name, action_types in ManualActionDialog.available_action_groups():
+            group = ActionAvailabilityGroup(group_name, action_types, enabled_types)
+            self.action_groups[group_name] = group
+            self.action_type_checks.update(group.checkboxes)
+            action_list_layout.addWidget(group)
+        action_list_layout.addStretch(1)
+        action_scroll.setWidget(action_list)
+        available_layout.addWidget(action_scroll, 1)
+        action_buttons = QHBoxLayout()
+        enable_all = QPushButton("Enable All")
+        disable_all = QPushButton("Disable All")
+        reset_defaults = QPushButton("Reset to Default")
+        enable_all.clicked.connect(lambda: self._set_all_actions_enabled(True))
+        disable_all.clicked.connect(lambda: self._set_all_actions_enabled(False))
+        reset_defaults.clicked.connect(self._reset_available_actions)
+        action_buttons.addWidget(enable_all)
+        action_buttons.addWidget(disable_all)
+        action_buttons.addWidget(reset_defaults)
+        action_buttons.addStretch(1)
+        available_layout.addLayout(action_buttons)
+        tabs.addTab(available_page, "Available Actions")
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(tabs)
         layout.addWidget(buttons)
+        self.resize(760, 680)
+
+    def _set_all_actions_enabled(self, enabled: bool) -> None:
+        for checkbox in self.action_type_checks.values():
+            checkbox.setChecked(enabled)
+
+    def _reset_available_actions(self) -> None:
+        disabled = set(DEFAULT_DISABLED_ACTION_TYPES)
+        for action_type, checkbox in self.action_type_checks.items():
+            checkbox.setChecked(action_type not in disabled)
 
     def _spin(self, value, minimum, maximum):
         widget = QSpinBox()
@@ -1691,6 +1912,11 @@ class SettingsDialog(QDialog):
         self.settings.hide_window_during_replay = self.hide_during_replay.isChecked()
         self.settings.evidence_retention_runs = self.evidence_retention.value()
         self.settings.pyautogui_failsafe = self.failsafe.isChecked()
+        self.settings.disabled_action_types = [
+            action_type
+            for action_type, checkbox in self.action_type_checks.items()
+            if not checkbox.isChecked()
+        ]
         if self.project is not None:
             self.project.success_when = completion
         qsettings = QSettings("PythonRPARecorder", "PythonRPARecorder")

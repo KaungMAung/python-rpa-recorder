@@ -11,6 +11,14 @@ from typing import Any, Callable
 PLACEHOLDER_PATTERN = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\}\}")
 
 
+def normalize_mouse_button(value: Any, default: str = "left") -> str:
+    name = getattr(value, "name", value)
+    button = str(name or "").strip().casefold()
+    if button.startswith("button."):
+        button = button.split(".", 1)[1]
+    return button if button in {"left", "right", "middle"} else default
+
+
 class MissingPlaceholderError(ValueError):
     def __init__(self, variable: str) -> None:
         self.variable = variable

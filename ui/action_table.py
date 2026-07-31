@@ -37,6 +37,8 @@ class ActionTable(QTableWidget):
         self._collapsed_action_ids: set[str] = set()
         self._filter_text = ""
         self._pending_reorder: tuple[list[int], int] | None = None
+        self._comment_action_available = True
+        self._group_action_available = True
         self._drop_finalize_timer = QTimer(self)
         self._drop_finalize_timer.setSingleShot(True)
         self._drop_finalize_timer.timeout.connect(self._finish_drop)
@@ -68,6 +70,10 @@ class ActionTable(QTableWidget):
         for col in range(len(self.HEADERS)):
             header.setSectionResizeMode(col, QHeaderView.Interactive)
         self.setToolTip("Select one or more steps to review or edit them. Drag selected rows to reorder; right-click for bulk commands.")
+
+    def set_new_step_action_availability(self, *, comment: bool, group: bool) -> None:
+        self._comment_action_available = comment
+        self._group_action_available = group
 
     def set_actions(self, actions: list[RpaAction]) -> None:
         self._actions = actions
@@ -306,6 +312,10 @@ class ActionTable(QTableWidget):
         ]:
             if key == "separator":
                 menu.addSeparator()
+                continue
+            if key == "comment" and not self._comment_action_available:
+                continue
+            if key == "group" and not self._group_action_available:
                 continue
             if key == "toggle_enabled" and selected:
                 status_item = self.item(self.selected_index(), 5)

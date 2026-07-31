@@ -9,7 +9,7 @@ from typing import Callable
 from .image_matcher import save_click_crop
 from .models import ActionType, ProjectSettings, RecorderState, RpaAction
 from .timing import runtime_delay
-from .utils import foreground_elevation_mismatch, should_ignore_foreground
+from .utils import foreground_elevation_mismatch, normalize_mouse_button, should_ignore_foreground
 
 keyboard = None
 mouse = None
@@ -233,12 +233,12 @@ class RpaRecorder:
             if self.state != RecorderState.RECORDING or self._should_ignore():
                 return
             self._flush_text_locked()
-            button_name = str(button).replace("Button.", "")
+            button_name = normalize_mouse_button(button)
             now = time.monotonic()
             action_type = ActionType.CLICK_IMAGE.value
             if self._last_click:
                 last_t, last_x, last_y, last_button = self._last_click
-                if now - last_t <= self.settings.double_click_interval and abs(x - last_x) <= 4 and abs(y - last_y) <= 4 and button_name == last_button:
+                if button_name == "left" and now - last_t <= self.settings.double_click_interval and abs(x - last_x) <= 4 and abs(y - last_y) <= 4 and button_name == last_button:
                     action_type = ActionType.DOUBLE_CLICK_IMAGE.value
             self._last_click = (now, x, y, button_name)
             self._screenshot_index += 1

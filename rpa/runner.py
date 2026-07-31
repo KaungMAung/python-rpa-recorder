@@ -19,7 +19,10 @@ from .models import ActionStatus, ActionType, RpaAction, RpaProject, condition_s
 from .project_manager import ProjectManager
 from .subflows import MAX_SUBFLOW_DEPTH, mapping_dict, resolve_subflow_project
 from .control_flow import CONTROL_TYPES, IF_TYPES, LOOP_TYPES, METADATA_TYPES, parse_control_flow
-from .utils import MissingPlaceholderError, foreground_elevation_mismatch, resolve_placeholders_strict
+from .utils import (
+    MissingPlaceholderError, foreground_elevation_mismatch, normalize_mouse_button,
+    resolve_placeholders_strict,
+)
 from .variables import (
     json_compatible_runtime_values, mask_sensitive_text, prepare_runtime_variables,
     sensitive_variable_names,
@@ -1351,8 +1354,10 @@ class ReplayRunner:
                 "search_region": data.get("search_region"),
             }
             clicks = 2 if action.action == ActionType.DOUBLE_CLICK_IMAGE.value else 1
+            button = normalize_mouse_button(data.get("button", "left"))
             self.sleep_checked(float(data.get("pre_click_pause", self.project.settings.pre_click_pause)))
-            get_pyautogui().click(x, y, clicks=clicks, button=str(data.get("button", "left")))
+            self.log(f"mouse click: button={button}, target=({x}, {y}), clicks={clicks}")
+            get_pyautogui().click(x, y, clicks=clicks, button=button)
             self._set_last_click(self.runtime_variables, x, y)
             return
         self.log(
@@ -1367,14 +1372,16 @@ class ReplayRunner:
             "warnings": warnings,
         }
         if allow_coordinate_fallback and data.get("use_coordinate_fallback", True):
+            x = int(data.get("fallback_x", 0))
+            y = int(data.get("fallback_y", 0))
+            button = normalize_mouse_button(data.get("button", "left"))
             self.sleep_checked(float(data.get("pre_click_pause", self.project.settings.pre_click_pause)))
-            get_pyautogui().click(int(data.get("fallback_x", 0)), int(data.get("fallback_y", 0)), button=str(data.get("button", "left")))
-            self._set_last_click(
-                self.runtime_variables, int(data.get("fallback_x", 0)), int(data.get("fallback_y", 0)),
-            )
+            self.log(f"mouse click: button={button}, target=({x}, {y}), fallback=true")
+            get_pyautogui().click(x, y, button=button)
+            self._set_last_click(self.runtime_variables, x, y)
             self._last_image_result["coordinate_fallback"] = True
-            self._last_image_result["click_x"] = int(data.get("fallback_x", 0))
-            self._last_image_result["click_y"] = int(data.get("fallback_y", 0))
+            self._last_image_result["click_x"] = x
+            self._last_image_result["click_y"] = y
             return
         raise FileNotFoundError(
             f"Image not found: {image_path}; best confidence={self._best_image_confidence:.3f}, "

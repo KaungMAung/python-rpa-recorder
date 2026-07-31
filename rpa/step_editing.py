@@ -138,7 +138,7 @@ def paste_payload(
     entries = payload["actions"]
     try:
         for entry in entries:
-            clone = RpaAction.from_dict(deepcopy(entry["action"]))
+            clone = deepcopy(RpaAction.from_dict(deepcopy(entry["action"])))
             old_id = clone.id
             clone.id = str(uuid4())
             old_to_new[old_id] = clone.id

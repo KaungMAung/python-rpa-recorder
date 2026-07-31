@@ -87,6 +87,22 @@ class ActionType(str, Enum):
     READ_EXCEL_COLUMN = "read_excel_column"
 
 
+ALL_ACTION_TYPES = tuple(action_type.value for action_type in ActionType)
+DEFAULT_DISABLED_ACTION_TYPES = (
+    ActionType.DRAG.value,
+    ActionType.SCROLL.value,
+    ActionType.SET_OBJECT_PROPERTY.value,
+    ActionType.RUN_PYTHON_SCRIPT.value,
+    ActionType.RUN_PYTHON.value,
+    ActionType.RUN_SUBFLOW.value,
+    ActionType.ELSE.value,
+    ActionType.END_IF.value,
+    ActionType.COMMENT.value,
+    ActionType.GROUP_START.value,
+    ActionType.GROUP_END.value,
+)
+
+
 class ActionStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -115,13 +131,27 @@ class ProjectSettings:
     hide_window_during_replay: bool = True
     evidence_retention_runs: int = 100
     persist_variable_values: bool = False
+    disabled_action_types: list[str] = field(default_factory=list)
+
+    def is_action_available(self, action_type: str) -> bool:
+        """Return whether users may add a new step of this type."""
+        return action_type not in self.disabled_action_types
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ProjectSettings":
         if not data:
             return cls()
         fields = cls().__dict__.keys()
-        return cls(**{key: data[key] for key in fields if key in data})
+        values = {key: data[key] for key in fields if key in data}
+        disabled = values.get("disabled_action_types", [])
+        if isinstance(disabled, str):
+            disabled = [disabled]
+        if not isinstance(disabled, (list, tuple, set)):
+            disabled = []
+        values["disabled_action_types"] = [
+            action_type for action_type in ALL_ACTION_TYPES if action_type in disabled
+        ]
+        return cls(**values)
 
 
 @dataclass
