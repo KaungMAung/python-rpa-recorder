@@ -31,6 +31,18 @@ def test_validator_reports_missing_files_coordinates_fields_and_variables(tmp_pa
     assert "application, script, or file is missing" in text
 
 
+def test_validator_accepts_placeholder_text_bound_to_a_currently_blank_variable(tmp_path: Path) -> None:
+    """A Type Text step containing only {{id}} must not be flagged as empty just
+    because 'id' currently defaults to a blank value; the real value is only
+    known once the flow runs (e.g. set by an earlier step or a For Each loop)."""
+    project = RpaProject(
+        variables={"id": ""},
+        actions=[RpaAction(ActionType.TYPE_TEXT.value, {"text": "{{id}}"}, name="Type id")],
+    )
+    issues = validate_project_detailed(project, tmp_path)
+    assert not any(issue.reason == "text is required" for issue in issues)
+
+
 def test_validator_accepts_negative_multimonitor_coordinates(tmp_path: Path) -> None:
     project = RpaProject(actions=[RpaAction(ActionType.DRAG.value, {
         "start_x": -1920, "start_y": -200, "end_x": 300, "end_y": 400,

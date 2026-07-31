@@ -12,7 +12,7 @@ IF_TYPES = {
     ActionType.IF_PATH_EXISTS.value,
     ActionType.IF_VARIABLE.value,
 }
-LOOP_TYPES = {ActionType.REPEAT_COUNT.value, ActionType.REPEAT_UNTIL.value}
+LOOP_TYPES = {ActionType.REPEAT_COUNT.value, ActionType.REPEAT_UNTIL.value, ActionType.FOR_EACH.value}
 GROUP_TYPES = {ActionType.GROUP_START.value, ActionType.GROUP_END.value}
 METADATA_TYPES = GROUP_TYPES | {ActionType.COMMENT.value}
 BLOCK_OPENERS = IF_TYPES | LOOP_TYPES | {ActionType.GROUP_START.value}

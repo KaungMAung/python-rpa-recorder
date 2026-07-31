@@ -18,6 +18,7 @@ UTILITY_ACTION_TYPES = {
     ActionType.DELETE_PATH.value, ActionType.WAIT_PATH.value,
     ActionType.RUN_POWERSHELL.value, ActionType.RUN_PYTHON_SCRIPT.value,
     ActionType.SHOW_NOTIFICATION.value,
+    ActionType.READ_EXCEL_COLUMN.value,
 }
 
 
@@ -324,6 +325,22 @@ def generate_python(project: RpaProject, project_dir: Path) -> Path:
                 lines.append(f"{prefix}for {loop_var} in range({max_var}):")
                 indent_level += 1
                 lines.append(f"{'    ' * indent_level}print(f'Step {index} loop iteration: {{{loop_var} + 1}}')")
+            elif action.action == ActionType.FOR_EACH.value:
+                items_var = f"__foreach_items_{index}"
+                loop_var = f"__loop_step_{index}"
+                item_var = f"__foreach_current_{index}"
+                item_variable = str(data.get("item_variable") or "current_item").strip() or "current_item"
+                list_name = str(data.get("list_variable", "")).strip()
+                lines.append(f"{prefix}{items_var} = RUNTIME_VARIABLES.get({list_name!r}, [])")
+                lines.append(f"{prefix}for {loop_var}, {item_var} in enumerate({items_var}):")
+                indent_level += 1
+                nested = "    " * indent_level
+                lines.append(f"{nested}RUNTIME_VARIABLES[{item_variable!r}] = {item_var}")
+                lines.append(f"{nested}RUNTIME_VARIABLES['loop_index'] = {loop_var}")
+                lines.append(f"{nested}RUNTIME_VARIABLES['loop_number'] = {loop_var} + 1")
+                lines.append(f"{nested}RUNTIME_VARIABLES['is_first_item'] = {loop_var} == 0")
+                lines.append(f"{nested}RUNTIME_VARIABLES['is_last_item'] = {loop_var} == len({items_var}) - 1")
+                lines.append(f"{nested}print(f'Step {index} for-each item {{{loop_var} + 1}}/{{len({items_var})}}')")
             elif action.action == ActionType.END_LOOP.value:
                 start_index = flow.end_loop_start[action_index]
                 start_action = project.actions[start_index]

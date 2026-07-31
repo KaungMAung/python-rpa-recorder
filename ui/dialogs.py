@@ -124,6 +124,7 @@ class ManualActionDialog(QDialog):
             ("Rename a file or folder", ActionType.RENAME_PATH.value),
             ("Delete a file or folder", ActionType.DELETE_PATH.value),
             ("Wait for a file or folder", ActionType.WAIT_PATH.value),
+            ("Read a column from Excel or CSV", ActionType.READ_EXCEL_COLUMN.value),
         ]),
         ("condition", "Add a condition", "Run steps only when an image, window, path, or value matches.", [
             ("If an image exists", ActionType.IF_IMAGE_EXISTS.value),
@@ -135,6 +136,7 @@ class ManualActionDialog(QDialog):
         ("repeat", "Repeat steps", "Repeat a block a number of times or until something happens.", [
             ("Repeat a number of times", ActionType.REPEAT_COUNT.value),
             ("Repeat until a condition is met", ActionType.REPEAT_UNTIL.value),
+            ("Repeat once for each item in a list", ActionType.FOR_EACH.value),
             ("Leave the current repeat block", ActionType.BREAK_LOOP.value),
         ]),
         ("subflow", "Run another flow", "Choose another saved flow and optionally map its variables.", [
@@ -197,6 +199,7 @@ class ManualActionDialog(QDialog):
             ("Run PowerShell Command", ActionType.RUN_POWERSHELL.value),
             ("Run Python Script", ActionType.RUN_PYTHON_SCRIPT.value),
             ("Show Desktop Notification", ActionType.SHOW_NOTIFICATION.value),
+            ("Read Excel Column", ActionType.READ_EXCEL_COLUMN.value),
             ("Run Python", ActionType.RUN_PYTHON.value),
             ("Python Code", ActionType.PYTHON_CODE.value),
             ("Run Subflow", ActionType.RUN_SUBFLOW.value),
@@ -209,6 +212,7 @@ class ManualActionDialog(QDialog):
             ("End If", ActionType.END_IF.value),
             ("Repeat N Times", ActionType.REPEAT_COUNT.value),
             ("Repeat Until", ActionType.REPEAT_UNTIL.value),
+            ("For Each Loop", ActionType.FOR_EACH.value),
             ("End Loop", ActionType.END_LOOP.value),
             ("Break Loop", ActionType.BREAK_LOOP.value),
             ("Select / Target Window", ActionType.SELECT_WINDOW.value),
@@ -514,6 +518,7 @@ class ManualActionDialog(QDialog):
             "direction", "amount", "text", "wait_ms", "path", "key", "keys", "condition_editor",
             "repeat_count", "max_iterations", "iteration_delay", "window_editor", "relative_x", "relative_y",
             "scale_window", "absolute_fallback", "window_button", "window_move_duration",
+            "for_each_list", "for_each_item", "for_each_max", "for_each_failure",
             "subflow_editor",
             "utility_editor",
         ):
@@ -617,6 +622,26 @@ class ManualActionDialog(QDialog):
             self.form.addRow(self.condition_editor)
             self.form.addRow("Safety limit", self.max_iterations)
             self.form.addRow("Delay between loops", self.iteration_delay)
+        elif kind == ActionType.FOR_EACH.value:
+            self.for_each_list = QComboBox(); self.for_each_list.setEditable(True)
+            self.for_each_list.addItems(sorted(self.variables))
+            self.for_each_list.setCurrentText("")
+            self.for_each_list.setToolTip("A list variable, for example the output of a Read Excel Column step")
+            self.for_each_list.currentTextChanged.connect(self._update_summary)
+            self.for_each_item = QLineEdit("current_item")
+            self.for_each_item.textChanged.connect(self._update_summary)
+            self.for_each_max = QSpinBox(); self.for_each_max.setRange(1, 1000000); self.for_each_max.setValue(1000)
+            self.for_each_failure = QComboBox()
+            for label, value in (
+                ("Stop the loop", "stop"),
+                ("Skip the failed item and continue", "skip_item"),
+                ("Retry the failed item", "retry_item"),
+            ):
+                self.for_each_failure.addItem(label, value)
+            self.form.addRow("List variable", self.for_each_list)
+            self.form.addRow("Item variable name", self.for_each_item)
+            self.form.addRow("Max iterations", self.for_each_max)
+            self.form.addRow("On step failure", self.for_each_failure)
         elif kind in {ActionType.ELSE.value, ActionType.END_IF.value, ActionType.END_LOOP.value, ActionType.BREAK_LOOP.value}:
             note = QLabel({
                 ActionType.ELSE.value: "Starts the alternative branch of the nearest If block.",
@@ -881,11 +906,16 @@ class ManualActionDialog(QDialog):
             ActionType.RUN_POWERSHELL.value: ("command", "Enter a PowerShell command."),
             ActionType.RUN_PYTHON_SCRIPT.value: ("path", "Choose a Python script."),
             ActionType.SHOW_NOTIFICATION.value: ("message", "Enter the notification message."),
+            ActionType.READ_EXCEL_COLUMN.value: ("file_path", "Choose the Excel or CSV file to read."),
         }
         if action.action in required:
             field, message = required[action.action]
             if not str(data.get(field, "")).strip():
                 return message
+        if action.action == ActionType.READ_EXCEL_COLUMN.value and not str(data.get("column_header", "")).strip():
+            return "Enter the column header or letter to read."
+        if action.action == ActionType.FOR_EACH.value and not str(data.get("list_variable", "")).strip():
+            return "Choose the list variable to iterate over."
         if action.action in {ActionType.COPY_PATH.value, ActionType.MOVE_PATH.value, ActionType.RENAME_PATH.value} and not str(data.get("destination", "")).strip():
             return "Choose the destination path."
         if action.action in WINDOW_ACTIONS:
@@ -976,6 +1006,13 @@ class ManualActionDialog(QDialog):
             return RpaAction(kind, {
                 **self.condition_editor.data(), "max_iterations": self.max_iterations.value(),
                 "iteration_delay": self.iteration_delay.value(),
+            })
+        if kind == ActionType.FOR_EACH.value:
+            return RpaAction(kind, {
+                "list_variable": self.for_each_list.currentText().strip(),
+                "item_variable": self.for_each_item.text().strip() or "current_item",
+                "max_iterations": self.for_each_max.value(),
+                "failure_mode": self.for_each_failure.currentData(),
             })
         if kind in {ActionType.ELSE.value, ActionType.END_IF.value, ActionType.END_LOOP.value, ActionType.BREAK_LOOP.value}:
             return RpaAction(kind, {})

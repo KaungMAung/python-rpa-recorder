@@ -133,8 +133,17 @@ class FloatingExecutionToolbar(QWidget):
         self.debug_controls.hide()
         self.setStyleSheet("QWidget { background: #eff6ff; border: 1px solid #bfdbfe; }")
 
+    _STATUS_MAX_WIDTH = 320
+
     def set_status(self, text: str) -> None:
-        self.status.setText(text)
+        # Elide each line individually so long step summaries/paths don't grow
+        # the always-on-top indicator; the full text remains via tooltip.
+        self.status.setToolTip(text)
+        metrics = self.status.fontMetrics()
+        elided = "\n".join(
+            metrics.elidedText(line, Qt.ElideRight, self._STATUS_MAX_WIDTH) for line in text.split("\n")
+        )
+        self.status.setText(elided)
         self.adjustSize()
 
     def set_debug_paused(self, current: str, next_step: str = "") -> None:

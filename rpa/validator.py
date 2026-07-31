@@ -186,6 +186,17 @@ def validate_project_detailed(
                 issues.append(ValidationIssue(
                     LEVEL_ERROR, step_number, name, f"undefined variable: {variable_name}",
                 ))
+        if action.action == ActionType.FOR_EACH.value:
+            list_name = str(action.data.get("list_variable", "")).strip()
+            if list_name and list_name not in variables:
+                issues.append(ValidationIssue(
+                    LEVEL_ERROR, step_number, name, f"undefined variable: {list_name}",
+                ))
+            elif list_name in project.variables and not isinstance(project.variables[list_name], list):
+                issues.append(ValidationIssue(
+                    LEVEL_WARNING, step_number, name,
+                    f"variable '{list_name}' is not a list and may not be iterable at run time",
+                ))
         _validate_common(
             action, resolved, step_number, name, issues, len(project.actions), start_index + 1, end_index + 1,
         )
@@ -396,7 +407,7 @@ def _validate_action(
         ActionType.COPY_PATH.value, ActionType.MOVE_PATH.value, ActionType.RENAME_PATH.value,
         ActionType.DELETE_PATH.value, ActionType.WAIT_PATH.value,
         ActionType.RUN_POWERSHELL.value, ActionType.RUN_PYTHON_SCRIPT.value,
-        ActionType.SHOW_NOTIFICATION.value,
+        ActionType.SHOW_NOTIFICATION.value, ActionType.READ_EXCEL_COLUMN.value,
     }:
         _validate_utility_action(action_type, data, project_dir, number, name, issues)
         return
@@ -460,6 +471,21 @@ def _validate_action(
         if delay is None or delay < 0:
             _add(issues, LEVEL_ERROR, number, name, "loop iteration delay must be non-negative")
         _add(issues, LEVEL_INFO, number, name, f"loop safety limit: {maximum or '?'} iterations")
+        return
+    if action_type == ActionType.FOR_EACH.value:
+        if not str(data.get("list_variable", "")).strip():
+            _add(issues, LEVEL_ERROR, number, name, "choose the list variable to iterate over")
+        item_variable = str(data.get("item_variable", "current_item")).strip()
+        if not VARIABLE_NAME_PATTERN.fullmatch(item_variable):
+            _add(issues, LEVEL_ERROR, number, name, "item variable name must be letters, numbers, and underscores")
+        maximum = _integer(data.get("max_iterations", 1000))
+        if maximum is None or maximum < 1:
+            _add(issues, LEVEL_ERROR, number, name, "For Each needs a maximum iteration limit of at least 1")
+        elif maximum > 10000:
+            _add(issues, LEVEL_WARNING, number, name, "maximum iterations is very high and risks a long-running loop")
+        failure_mode = str(data.get("failure_mode", "stop")).strip().lower()
+        if failure_mode not in {"stop", "skip_item", "retry_item"}:
+            _add(issues, LEVEL_ERROR, number, name, "on-failure behavior must be Stop, Skip item, or Retry item")
         return
     if action_type in {
         ActionType.ELSE.value, ActionType.END_IF.value,
@@ -525,7 +551,11 @@ def _validate_action(
         if data.get("move_to"):
             _validate_coordinates(data, ("x", "y"), number, name, issues, "scroll position")
     elif action_type == ActionType.TYPE_TEXT.value:
-        if "text" not in data or not str(data.get("text", "")).strip():
+        # Check the raw (unresolved) text so a placeholder such as {{id}} is not
+        # flagged as empty just because the referenced variable currently holds
+        # a blank value at validation time; the resolved value is only known
+        # once the flow actually runs.
+        if "text" not in action.data or not str(action.data.get("text", "")).strip():
             _add(issues, LEVEL_ERROR, number, name, "text is required")
         interval = _finite_number(data.get("interval", project.settings.typing_interval))
         if interval is None or interval < 0:
@@ -670,6 +700,35 @@ def _validate_utility_action(
     elif action_type == ActionType.SHOW_NOTIFICATION.value:
         if not str(data.get("message", "")).strip():
             _add(issues, LEVEL_ERROR, number, name, "notification message is required")
+    elif action_type == ActionType.READ_EXCEL_COLUMN.value:
+        raw, path = path_value("file_path")
+        if not raw:
+            _add(issues, LEVEL_ERROR, number, name, "choose the Excel or CSV file to read")
+        else:
+            suffix = Path(raw).suffix.casefold()
+            if suffix not in {".xlsx", ".xls", ".csv"}:
+                _add(issues, LEVEL_ERROR, number, name, "file must be an .xlsx, .xls, or .csv spreadsheet")
+            elif path and not path.is_file():
+                _add(issues, LEVEL_ERROR, number, name, f"spreadsheet file is missing: {raw}")
+        if not str(data.get("column_header", "")).strip():
+            _add(issues, LEVEL_ERROR, number, name, "column header or letter is required")
+        selection = str(data.get("row_selection", "all")).strip().lower()
+        if selection not in {"all", "first_n", "range"}:
+            _add(issues, LEVEL_ERROR, number, name, "row selection must be All rows, First N rows, or a range")
+        elif selection == "first_n":
+            count = _integer(data.get("row_count"))
+            if count is None or count <= 0:
+                _add(issues, LEVEL_ERROR, number, name, "number of rows must be a positive whole number")
+        elif selection == "range":
+            start_row = _integer(data.get("row_start", 1))
+            end_row = _integer(data.get("row_end")) if data.get("row_end") not in (None, "") else None
+            if start_row is None or start_row < 1:
+                _add(issues, LEVEL_ERROR, number, name, "start row must be at least 1")
+            if end_row is not None and start_row is not None and end_row < start_row:
+                _add(issues, LEVEL_ERROR, number, name, "end row must be greater than or equal to the start row")
+        output_variable = str(data.get("output_variable", "")).strip()
+        if output_variable and not VARIABLE_NAME_PATTERN.fullmatch(output_variable):
+            _add(issues, LEVEL_ERROR, number, name, "output variable name is invalid")
 
     if action_type in {ActionType.WAIT_PROCESS.value, ActionType.WAIT_PATH.value, ActionType.RUN_POWERSHELL.value, ActionType.RUN_PYTHON_SCRIPT.value}:
         timeout = _finite_number(data.get("timeout", 30.0))
@@ -742,6 +801,12 @@ def _collect_created_variables(action: RpaAction, variables: dict[str, Any]) -> 
     if action.action == ActionType.RUN_SUBFLOW.value and isinstance(action.data, dict):
         for parent_name in mapping_dict(action.data.get("output_mappings")).values():
             variables.setdefault(parent_name, 0)
+    if action.action == ActionType.FOR_EACH.value and isinstance(action.data, dict):
+        item_name = str(action.data.get("item_variable") or "").strip()
+        if item_name:
+            variables.setdefault(item_name, "")
+        for meta_name in ("loop_index", "loop_number", "is_first_item", "is_last_item"):
+            variables.setdefault(meta_name, 0)
     if isinstance(action.data, dict):
         for field in ("stderr_variable", "exit_code_variable"):
             name = str(action.data.get(field, "")).strip()

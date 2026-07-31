@@ -21,6 +21,7 @@ UTILITY_ACTIONS = {
     ActionType.DELETE_PATH.value, ActionType.WAIT_PATH.value,
     ActionType.RUN_POWERSHELL.value, ActionType.RUN_PYTHON_SCRIPT.value,
     ActionType.SHOW_NOTIFICATION.value,
+    ActionType.READ_EXCEL_COLUMN.value,
 }
 
 
@@ -62,6 +63,7 @@ class UtilityActionEditor(QWidget):
             ActionType.RUN_POWERSHELL.value: {"command"},
             ActionType.RUN_PYTHON_SCRIPT.value: {"path"},
             ActionType.SHOW_NOTIFICATION.value: {"title", "message"},
+            ActionType.READ_EXCEL_COLUMN.value: {"file_path", "column_header"},
         }.get(self.action_type, set())
         for key, control in self.controls.items():
             if key in basic:
@@ -182,6 +184,46 @@ class UtilityActionEditor(QWidget):
         elif kind == ActionType.SHOW_NOTIFICATION.value:
             self.form.addRow("Title", self._line("title", "Python RPA Recorder"))
             self.form.addRow("Message", self._text("message"))
+        elif kind == ActionType.READ_EXCEL_COLUMN.value:
+            self._build_read_excel_column()
+
+    def _build_read_excel_column(self) -> None:
+        self._browse_row("file_path", "Excel or CSV file", "excel")
+        sheet_field = self._line("sheet_name", "Sheet1", "Worksheet name (ignored for .csv)")
+        self.form.addRow("Sheet name", sheet_field)
+        self.form.addRow("Column header / letter", self._line("column_header", placeholder="e.g. PR Number or A"))
+        selection = QComboBox()
+        for label, value in (("All rows", "all"), ("First N rows", "first_n"), ("Start-End range", "range")):
+            selection.addItem(label, value)
+        selection.setCurrentIndex(max(0, selection.findData(self.initial.get("row_selection", "all"))))
+        selection.currentIndexChanged.connect(self.changed)
+        self.controls["row_selection"] = selection
+        self.form.addRow("Rows to read", selection)
+        row_count = self._line("row_count", "10")
+        self.form.addRow("Number of rows", row_count)
+        row_start = self._line("row_start", "1")
+        self.form.addRow("Start row", row_start)
+        row_end = self._line("row_end", "")
+        self.form.addRow("End row (blank = last)", row_end)
+        self.form.addRow("Store list as", self._line("output_variable", placeholder="leave blank to auto-name"))
+        self.form.addRow("", self._check("first_row_headers", "First row contains headers", True))
+        self.form.addRow("", self._check("skip_blanks", "Skip blank cells", True))
+        self.form.addRow("", self._check("remove_duplicates", "Remove duplicate values", False))
+
+        def update_rows() -> None:
+            mode = selection.currentData()
+            self.form.setRowVisible(row_count, mode == "first_n")
+            self.form.setRowVisible(row_start, mode == "range")
+            self.form.setRowVisible(row_end, mode == "range")
+
+        def update_sheet() -> None:
+            is_csv = self.controls["file_path"].text().strip().casefold().endswith(".csv")
+            sheet_field.setEnabled(not is_csv)
+
+        selection.currentIndexChanged.connect(lambda _index=0: update_rows())
+        self.controls["file_path"].textChanged.connect(lambda _text="": update_sheet())
+        update_rows()
+        update_sheet()
 
     def _browse(self, field: QLineEdit, mode: str) -> None:
         path = ""
@@ -190,7 +232,11 @@ class UtilityActionEditor(QWidget):
         elif mode == "destination":
             path, _ = QFileDialog.getSaveFileName(self, "Choose destination")
         else:
-            file_filter = "Python scripts (*.py *.pyw)" if mode == "python" else "All files (*)"
+            file_filter = (
+                "Python scripts (*.py *.pyw)" if mode == "python"
+                else "Spreadsheets (*.xlsx *.xls *.csv)" if mode == "excel"
+                else "All files (*)"
+            )
             path, _ = QFileDialog.getOpenFileName(self, "Choose file", filter=file_filter)
         if path:
             field.setText(path)

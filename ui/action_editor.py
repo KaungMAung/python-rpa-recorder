@@ -278,6 +278,28 @@ class ActionEditor(QWidget):
             self.form.addRow(condition)
             self.form.addRow("Safety limit", self._spin(data.get("max_iterations", 1000), lambda v: self._set_data("max_iterations", v), 1, 10000))
             self.form.addRow("Delay between loops", self._double(data.get("iteration_delay", 0.0), lambda v: self._set_data("iteration_delay", v), 0, 3600))
+        elif action.action == ActionType.FOR_EACH.value:
+            list_combo = QComboBox()
+            list_combo.setEditable(True)
+            list_combo.addItems(sorted(self.available_variables))
+            list_combo.setCurrentText(str(data.get("list_variable", "")))
+            list_combo.currentTextChanged.connect(lambda value: self._set_data("list_variable", value.strip()))
+            self.form.addRow("List variable", list_combo)
+            self.form.addRow("Item variable name", self._line(
+                str(data.get("item_variable", "current_item")),
+                lambda v: self._set_data("item_variable", v.strip() or "current_item"),
+            ))
+            self.form.addRow("Max iterations", self._spin(
+                data.get("max_iterations", 1000), lambda v: self._set_data("max_iterations", v), 1, 1000000,
+            ))
+            self.form.addRow("On step failure", self._combo(
+                [
+                    ("Stop the loop", "stop"),
+                    ("Skip the failed item and continue", "skip_item"),
+                    ("Retry the failed item", "retry_item"),
+                ],
+                data.get("failure_mode", "stop"), lambda v: self._set_data("failure_mode", v),
+            ))
         elif action.action in {ActionType.ELSE.value, ActionType.END_IF.value, ActionType.END_LOOP.value, ActionType.BREAK_LOOP.value}:
             note = QLabel({
                 ActionType.ELSE.value: "Runs when the matching If condition is false.",

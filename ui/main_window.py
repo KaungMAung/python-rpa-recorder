@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from copy import deepcopy
 import json
+import re
 import shutil
 from datetime import datetime, timezone
 from html import escape
@@ -50,7 +51,14 @@ from rpa.evidence import RunEvidenceSession
 from rpa.execution import COMPLETED_UNVERIFIED
 from rpa.execution import FAILED as EXECUTION_FAILED, STOPPED_BY_USER
 from rpa.image_matcher import find_image, find_reference_matches, save_crop_from_image, screenshot_image, virtual_screen_origin
-from rpa.models import ActionType, ProjectSettings, RecorderState, RpaAction, RpaProject
+from rpa.models import (
+    FRIENDLY_ACTION_NAMES,
+    ActionType,
+    ProjectSettings,
+    RecorderState,
+    RpaAction,
+    RpaProject,
+)
 from rpa.project_manager import ProjectManager
 from rpa.recorder import RpaRecorder
 from rpa.runner import ReplayActionError, ReplayRunner, StopReplay
@@ -220,6 +228,7 @@ class MainWindow(QMainWindow):
         self.recorder: RpaRecorder | None = None
         self.floating: FloatingRecorderToolbar | None = None
         self.execution_floating: FloatingExecutionToolbar | None = None
+        self._execution_toolbar_watched_screens: list = []
         self._active_run_settings: ProjectSettings | None = None
         self.replay_was_maximized = False
         self.replay_thread: QThread | None = None
@@ -243,6 +252,7 @@ class MainWindow(QMainWindow):
         self.recording_permission_timer.setInterval(1000)
         self.recording_permission_timer.timeout.connect(self._check_recording_permissions)
         self.running_action_index: int | None = None
+        self._loop_progress_text = ""
         self.run_started_at: float | None = None
         self.run_start_index = 0
         self.run_end_index = -1
@@ -1317,8 +1327,10 @@ class MainWindow(QMainWindow):
         worker = self.sender()
         flow_name = getattr(worker, "flow_name", "")
         if self.execution_floating:
-            label = "Failed" if status == "failed" else "Running"
-            self.execution_floating.set_status(f"{flow_name} · Step {index + 1} · {label}")
+            actions = worker.runner.project.actions if worker is not None else []
+            label = "Failed" if status == "failed" else ""
+            text = self._format_running_status(actions, index, label)
+            self.execution_floating.set_status(f"{flow_name}\n{text}" if flow_name else text)
             self._position_execution_toolbar()
         flow_dir = flows_root() / flow_name if flow_name else None
         if flow_dir and self.project_dir and Path(self.project_dir).resolve() == flow_dir.resolve():
@@ -1328,14 +1340,19 @@ class MainWindow(QMainWindow):
         worker = self.sender()
         flow_name = getattr(worker, "flow_name", "")
         if self.execution_floating:
-            self.execution_floating.set_status(f"{flow_name} · Step {index + 1} · Retry {attempt}/{total}")
+            actions = worker.runner.project.actions if worker is not None else []
+            text = self._format_running_status(actions, index, f"Retry {attempt}/{total}")
+            self.execution_floating.set_status(f"{flow_name}\n{text}" if flow_name else text)
             self._position_execution_toolbar()
 
     def _scheduled_control_progress(self, index: int, message: str) -> None:
         worker = self.sender()
         flow_name = getattr(worker, "flow_name", "")
+        self._update_loop_progress_text(message)
         if self.execution_floating:
-            self.execution_floating.set_status(f"{flow_name} · Step {index + 1} · {message}")
+            actions = worker.runner.project.actions if worker is not None else []
+            text = self._format_running_status(actions, index)
+            self.execution_floating.set_status(f"{flow_name}\n{text}" if flow_name else text)
             self._position_execution_toolbar()
 
     def _scheduled_run_success(self) -> None:
@@ -1715,7 +1732,8 @@ class MainWindow(QMainWindow):
 
     def _retry_progress(self, index: int, attempt: int, total: int, _reason: str) -> None:
         if self.execution_floating:
-            self.execution_floating.set_status(f"Step {index + 1} · Retry {attempt}/{total}")
+            label = f"Retry {attempt}/{total}"
+            self.execution_floating.set_status(self._format_running_status(self.project.actions, index, label))
             self._position_execution_toolbar()
 
     def _show_failure_attention(self, payload: dict, worker: ReplayWorker) -> None:
@@ -1756,8 +1774,9 @@ class MainWindow(QMainWindow):
             self.hide()
 
     def _control_progress(self, index: int, message: str) -> None:
+        self._update_loop_progress_text(message)
         if self.execution_floating:
-            self.execution_floating.set_status(f"Step {index + 1} · {message}")
+            self.execution_floating.set_status(self._format_running_status(self.project.actions, index))
             self._position_execution_toolbar()
 
     def run_finished(self) -> None:
@@ -1767,6 +1786,7 @@ class MainWindow(QMainWindow):
         self.replay_thread = None
         self.replay_worker = None
         self.running_action_index = None
+        self._loop_progress_text = ""
         self.debug_paused_index = None
         self.debug_paused_values = {}
         self.debug_showed_main = False
@@ -1807,6 +1827,7 @@ class MainWindow(QMainWindow):
         self.execution_floating.show()
         self._position_execution_toolbar()
         self.execution_floating.position_changed.connect(self._execution_toolbar_moved)
+        self._watch_execution_toolbar_screen()
         if not settings.hide_window_during_replay:
             return
         self.hide()
@@ -1823,27 +1844,49 @@ class MainWindow(QMainWindow):
         toolbar = self.execution_floating
         if not toolbar:
             return
+        # Always anchor to the bottom-right of the available work area (above
+        # the taskbar) on the monitor showing the main window, recalculated
+        # fresh each time instead of restoring a previously dragged position.
         screen = self.screen() or QApplication.primaryScreen()
         if not screen:
             return
         bounds = screen.availableGeometry()
         toolbar.adjustSize()
-        saved = self.settings.value("execution_toolbar_position")
-        if isinstance(saved, QPoint):
-            saved_rect = QRect(saved, toolbar.size())
-            saved_center = QPoint(saved_rect.center())
-            saved_screen = QApplication.screenAt(saved_center)
-            saved_bounds = saved_screen.availableGeometry() if saved_screen else bounds
-            if saved_bounds.contains(saved_rect):
-                toolbar.move(saved)
-                return
-        margin = 32
+        margin = 12
         default_position = QPoint(
             bounds.right() - toolbar.width() - margin + 1,
             bounds.bottom() - toolbar.height() - margin + 1,
         )
         toolbar.move(default_position)
-        self.settings.setValue("execution_toolbar_position", default_position)
+
+    def _watch_execution_toolbar_screen(self) -> None:
+        """Recalculate the indicator's position on resolution/DPI/monitor/taskbar changes."""
+        toolbar = self.execution_floating
+        if not toolbar:
+            return
+        self._unwatch_execution_toolbar_screen()
+        app = QApplication.instance()
+        if app is not None:
+            app.primaryScreenChanged.connect(self._reposition_execution_toolbar_on_screen_change)
+            self._execution_toolbar_watched_screens.append(app.primaryScreenChanged)
+        for screen in QApplication.screens():
+            screen.availableGeometryChanged.connect(self._reposition_execution_toolbar_on_screen_change)
+            self._execution_toolbar_watched_screens.append(screen.availableGeometryChanged)
+        window_handle = toolbar.windowHandle()
+        if window_handle:
+            window_handle.screenChanged.connect(self._reposition_execution_toolbar_on_screen_change)
+            self._execution_toolbar_watched_screens.append(window_handle.screenChanged)
+
+    def _unwatch_execution_toolbar_screen(self) -> None:
+        for signal in self._execution_toolbar_watched_screens:
+            try:
+                signal.disconnect(self._reposition_execution_toolbar_on_screen_change)
+            except (RuntimeError, TypeError):
+                pass
+        self._execution_toolbar_watched_screens = []
+
+    def _reposition_execution_toolbar_on_screen_change(self, *_args) -> None:
+        self._position_execution_toolbar()
 
     def _execution_toolbar_moved(self, position: QPoint) -> None:
         toolbar = self.execution_floating
@@ -1861,9 +1904,9 @@ class MainWindow(QMainWindow):
             toolbar.blockSignals(True)
             toolbar.move(safe)
             toolbar.blockSignals(False)
-        self.settings.setValue("execution_toolbar_position", safe)
 
     def _restore_run_environment(self) -> None:
+        self._unwatch_execution_toolbar_screen()
         if self.execution_floating:
             self.execution_floating.close()
             self.execution_floating = None
@@ -2270,6 +2313,35 @@ class MainWindow(QMainWindow):
         box.move(left, top)
         box.exec()
 
+    _LOOP_ITEM_RE = re.compile(r"item (\d+) of (\d+)")
+
+    def _update_loop_progress_text(self, message: str) -> None:
+        # Track the most recent "item N of M" loop message so it can be shown
+        # alongside whichever nested step is currently running, since loop
+        # progress and step progress are reported through separate callbacks.
+        match = self._LOOP_ITEM_RE.search(message)
+        if match:
+            self._loop_progress_text = f"Loop item {match.group(1)} of {match.group(2)}"
+        elif "completed" in message or "is empty" in message:
+            self._loop_progress_text = ""
+
+    def _format_running_status(self, actions: list, index: int, label: str = "") -> str:
+        # Reuse the existing step summary() logic instead of duplicating it,
+        # so the floating indicator always matches what the editor shows.
+        total = len(actions)
+        lines = [f"Step {index + 1} of {total}" if 0 <= index < total else f"Step {index + 1}"]
+        if 0 <= index < total:
+            action = actions[index]
+            lines.append(FRIENDLY_ACTION_NAMES.get(action.action, action.action.replace("_", " ").title()))
+            summary_text = action.summary()
+            if summary_text:
+                lines.append(summary_text)
+        if self._loop_progress_text:
+            lines.append(self._loop_progress_text)
+        if label:
+            lines.append(label)
+        return "\n".join(lines)
+
     def set_action_status(self, index: int, status: str) -> None:
         if 0 <= index < len(self.project.actions):
             self.running_action_index = index
@@ -2279,10 +2351,10 @@ class MainWindow(QMainWindow):
             if status == "running":
                 self.log(f"[Step {index + 1}] Running: {self.project.actions[index].summary()}")
                 if self.execution_floating:
-                    self.execution_floating.set_status(f"Step {index + 1} · Running")
+                    self.execution_floating.set_status(self._format_running_status(self.project.actions, index))
                     self._position_execution_toolbar()
             elif status == "failed" and self.execution_floating:
-                self.execution_floating.set_status(f"Step {index + 1} · Failed")
+                self.execution_floating.set_status(self._format_running_status(self.project.actions, index, "Failed"))
                 self._position_execution_toolbar()
             self.update_status("Running")
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import os
 import shutil
@@ -52,6 +53,17 @@ class ReplayActionError(RuntimeError):
         self.action = action
         self.cause = cause
         super().__init__(f"Step {index + 1} {action.summary()}: {cause}")
+
+
+def _excel_output_variable(configured: Any, column_header: str) -> str:
+    """Return the output variable for a Read Excel Column step, deriving one when blank."""
+    name = str(configured or "").strip()
+    if name:
+        return name
+    slug = re.sub(r"[^0-9a-z]+", "_", str(column_header or "").casefold())
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    slug = re.sub(r"^[0-9_]+", "", slug)
+    return f"{slug}_list" if slug else "excel_column_list"
 
 
 class ReplayRunner:
@@ -428,6 +440,13 @@ class ReplayRunner:
                         continue
                     index += 1
                     continue
+                override_index = self._for_each_failure_override(
+                    index, flow, loop_states, failure_settings, failure_message,
+                )
+                if override_index is not None:
+                    self.log(f"[Step {index + 1}] For Each handling failure at Step {override_index + 1}")
+                    index = override_index
+                    continue
                 self.final_status = FAILED
                 raise ReplayActionError(index, action, RuntimeError(failure_message))
             if action_callback:
@@ -553,6 +572,21 @@ class ReplayRunner:
             state: dict[str, Any] = {"iteration": 1, "type": action.action}
             if action.action == ActionType.REPEAT_COUNT.value:
                 state["limit"] = max(0, self._safe_int(data.get("count", 1), 1))
+            elif action.action == ActionType.FOR_EACH.value:
+                # Restarting inside a For Each body is treated as its first active
+                # iteration (item index 0), mirroring the simplification used for
+                # the other loop types above.
+                item_variable = str(data.get("item_variable") or "current_item").strip() or "current_item"
+                raw_list = self.runtime_variables.get(str(data.get("list_variable", "")).strip())
+                items = list(raw_list) if isinstance(raw_list, list) else []
+                state["limit"] = max(1, self._safe_int(data.get("max_iterations", 1000), 1000))
+                state["failure_mode"] = str(data.get("failure_mode", "stop")).strip().lower() or "stop"
+                state["data"] = data
+                state["item_variable"] = item_variable
+                state["items"] = items
+                state["items_index"] = 0
+                if items:
+                    self._assign_for_each_item(state, 0)
             else:
                 state["limit"] = max(1, self._safe_int(data.get("max_iterations", 1000), 1000))
                 state["data"] = data
@@ -625,6 +659,34 @@ class ReplayRunner:
                         message = "Loop skipped · 0 iterations"
                     else:
                         message = f"Loop iteration {state['iteration']}/{count}"
+                elif kind == ActionType.FOR_EACH.value:
+                    item_variable = str(data.get("item_variable") or "current_item").strip() or "current_item"
+                    state["limit"] = max(1, self._safe_int(data.get("max_iterations", 1000), 1000))
+                    state["failure_mode"] = str(data.get("failure_mode", "stop")).strip().lower() or "stop"
+                    state["data"] = data
+                    state["item_variable"] = item_variable
+                    if "items" in state:
+                        # Re-entry after a retry_item failure keeps the current item.
+                        items = state["items"]
+                        message = f"For Each {item_variable}: item {state['items_index'] + 1} of {len(items)}"
+                    else:
+                        list_name = str(data.get("list_variable", "")).strip()
+                        if list_name not in self.runtime_variables:
+                            raise ValueError(f"For Each list variable '{list_name or '(unset)'}' is not defined")
+                        raw_list = self.runtime_variables.get(list_name)
+                        if not isinstance(raw_list, list):
+                            raise TypeError(f"For Each list variable '{list_name}' is not a list")
+                        items = list(raw_list)
+                        state["items"] = items
+                        state["items_index"] = 0
+                        if not items:
+                            self._record_skipped_steps(index + 1, end_loop - 1, "List is empty", action_callback)
+                            loop_states.pop(index, None)
+                            next_index = end_loop + 1
+                            message = f"For Each {item_variable}: List is empty"
+                        else:
+                            self._assign_for_each_item(state, 0)
+                            message = f"For Each {item_variable}: item 1 of {len(items)}"
                 else:
                     state["limit"] = max(1, self._safe_int(data.get("max_iterations", 1000), 1000))
                     state["data"] = data
@@ -650,6 +712,27 @@ class ReplayRunner:
                         message = f"Loop completed · {state['iteration']} iterations"
                         self._report_control(index, message, control_callback)
                         result = {"kind": "loop_end", "continue": False, "iterations": state["iteration"]}
+                        loop_states.pop(start, None)
+                elif state["type"] == ActionType.FOR_EACH.value:
+                    items = state["items"]
+                    item_variable = state["item_variable"]
+                    next_item = state["items_index"] + 1
+                    if next_item < len(items):
+                        loop_number = next_item + 1
+                        if loop_number > state["limit"]:
+                            message = f"For Each safety limit reached after {state['limit']} iterations"
+                            self._report_control(index, message, control_callback)
+                            raise RuntimeError(message)
+                        self._assign_for_each_item(state, next_item)
+                        state.pop("item_retry_count", None)
+                        message = f"For Each {item_variable}: item {loop_number} of {len(items)}"
+                        self._report_control(index, message, control_callback)
+                        result = {"kind": "loop_end", "continue": True, "iteration": loop_number, "limit": len(items)}
+                        next_index = start + 1
+                    else:
+                        message = f"Loop completed · {len(items)} iterations"
+                        self._report_control(index, message, control_callback)
+                        result = {"kind": "loop_end", "continue": False, "iterations": len(items)}
                         loop_states.pop(start, None)
                 else:
                     matched, detail = self._evaluate_condition(state["data"], str(state["data"].get("condition_type", "variable")))
@@ -744,6 +827,62 @@ class ReplayRunner:
         self.log(f"[Step {index + 1}] {message}")
         if callback:
             callback(index, message)
+
+    def _assign_for_each_item(self, state: dict[str, Any], item_index: int) -> None:
+        """Bind the current For Each item and its loop metadata into runtime variables."""
+        items = state["items"]
+        state["items_index"] = item_index
+        self.runtime_variables[state["item_variable"]] = items[item_index]
+        self.runtime_variables["loop_index"] = item_index
+        self.runtime_variables["loop_number"] = item_index + 1
+        self.runtime_variables["is_first_item"] = item_index == 0
+        self.runtime_variables["is_last_item"] = item_index == len(items) - 1
+
+    def _for_each_failure_override(
+        self, index: int, flow, loop_states: dict[int, dict[str, Any]],
+        failure_settings: dict[str, Any], failure_message: str,
+    ) -> int | None:
+        """Return a new index when an enclosing For Each loop absorbs a body failure.
+
+        ``skip_item`` jumps to the loop's End Loop so the loop advances to the next
+        item; ``retry_item`` re-enters the loop for the same item until its retry
+        budget is exhausted. Returns ``None`` to let the caller raise as usual.
+        """
+        for start in reversed(flow.enclosing_loops.get(index, [])):
+            state = loop_states.get(start)
+            if not state or state.get("type") != ActionType.FOR_EACH.value:
+                continue
+            mode = str(state.get("failure_mode", "stop")).strip().lower()
+            if mode == "skip_item":
+                self.log(f"[Step {index + 1}] For Each: skipping failed item ({failure_message})")
+                self.had_continued_failures = True
+                if self.first_failed_index is None:
+                    self.first_failed_index = index
+                    self.first_failure_error = failure_message
+                state.pop("item_retry_count", None)
+                return flow.loop_end[start]
+            if mode == "retry_item":
+                loop_data = state.get("data", {})
+                retry_limit = max(0, self._safe_int(
+                    failure_settings.get("retry_count") or loop_data.get("retry_count", 2), 2,
+                ))
+                retry_delay = max(0.0, self._safe_float(
+                    failure_settings.get("retry_delay_seconds")
+                    or loop_data.get("retry_delay_seconds", 1.0), 1.0,
+                ))
+                attempts = self._safe_int(state.get("item_retry_count", 0), 0)
+                if attempts < retry_limit:
+                    state["item_retry_count"] = attempts + 1
+                    self.log(
+                        f"[Step {index + 1}] For Each: retrying failed item "
+                        f"(attempt {attempts + 1}/{retry_limit}: {failure_message})"
+                    )
+                    if retry_delay:
+                        self.sleep_checked(retry_delay)
+                    return start
+                state.pop("item_retry_count", None)
+            return None
+        return None
 
     def _record_skipped_steps(
         self, start: int, end: int, reason: str,
@@ -891,6 +1030,29 @@ class ReplayRunner:
         elif kind == ActionType.SHOW_NOTIFICATION.value:
             show_notification(str(data.get("title", "Python RPA Recorder")), str(data.get("message", "")))
             result = {"title": str(data.get("title", "")), "shown": True}
+        elif kind == ActionType.READ_EXCEL_COLUMN.value:
+            from . import spreadsheet
+            file_path = str(self._project_path(data.get("file_path", "")))
+            column_header = str(data.get("column_header", ""))
+            values = spreadsheet.read_excel_column(
+                file_path,
+                str(data.get("sheet_name", "")),
+                column_header,
+                first_row_headers=bool(data.get("first_row_headers", True)),
+                row_selection=str(data.get("row_selection", "all")),
+                row_start=self._safe_int(data.get("row_start", 1), 1),
+                row_end=(self._safe_int(data.get("row_end"), 0) if data.get("row_end") not in (None, "") else None),
+                row_count=(self._safe_int(data.get("row_count"), 0) if data.get("row_count") not in (None, "") else None),
+                skip_blanks=bool(data.get("skip_blanks", True)),
+                remove_duplicates=bool(data.get("remove_duplicates", False)),
+            )
+            output_variable = _excel_output_variable(data.get("output_variable"), column_header)
+            variables[output_variable] = values
+            result = {
+                "output_variable": output_variable,
+                "count": len(values),
+                "preview": values[:10],
+            }
         else:
             raise ValueError(f"unsupported utility action: {kind}")
         result.setdefault("duration_seconds", max(0.0, time.monotonic() - started))

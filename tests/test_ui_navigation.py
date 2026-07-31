@@ -113,10 +113,12 @@ def test_step_details_hide_during_run_and_restore_afterward() -> None:
     assert window.table.selected_index() == 0
 
 
-def test_execution_toolbar_uses_safe_saved_position(monkeypatch) -> None:
+def test_execution_toolbar_always_anchors_bottom_right(monkeypatch) -> None:
     window = window_with_actions()
     monkeypatch.setattr(window, "_show_windows_desktop", lambda: None)
     previous = window.settings.value("execution_toolbar_position")
+    # A stale saved position should be ignored: the indicator always starts
+    # anchored to the bottom-right of the available work area.
     window.settings.setValue("execution_toolbar_position", QPoint(99999, 99999))
     try:
         window._hide_for_replay()
@@ -124,13 +126,18 @@ def test_execution_toolbar_uses_safe_saved_position(monkeypatch) -> None:
         assert toolbar is not None
         bounds = (window.screen() or QApplication.primaryScreen()).availableGeometry()
         assert bounds.contains(toolbar.frameGeometry())
-        assert 24 <= bounds.right() - toolbar.frameGeometry().right() <= 40
-        assert 24 <= bounds.bottom() - toolbar.frameGeometry().bottom() <= 40
+        assert 4 <= bounds.right() - toolbar.frameGeometry().right() <= 20
+        assert 4 <= bounds.bottom() - toolbar.frameGeometry().bottom() <= 20
 
         moved = QPoint(bounds.left() + 48, bounds.top() + 56)
         toolbar.move(moved)
         app().processEvents()
-        assert window.settings.value("execution_toolbar_position") == moved
+        assert toolbar.pos() == moved
+
+        # Simulating a resolution/DPI/taskbar change recalculates the anchor.
+        window._reposition_execution_toolbar_on_screen_change()
+        assert 4 <= bounds.right() - toolbar.frameGeometry().right() <= 20
+        assert 4 <= bounds.bottom() - toolbar.frameGeometry().bottom() <= 20
     finally:
         window._restore_after_replay()
         if previous is None:

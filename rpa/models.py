@@ -48,6 +48,7 @@ class ActionType(str, Enum):
     END_IF = "end_if"
     REPEAT_COUNT = "repeat_count"
     REPEAT_UNTIL = "repeat_until"
+    FOR_EACH = "for_each"
     END_LOOP = "end_loop"
     BREAK_LOOP = "break_loop"
     SELECT_WINDOW = "select_window"
@@ -83,6 +84,7 @@ class ActionType(str, Enum):
     APPEND_VARIABLE = "append_variable"
     SET_OBJECT_PROPERTY = "set_object_property"
     DELETE_VARIABLE = "delete_variable"
+    READ_EXCEL_COLUMN = "read_excel_column"
 
 
 class ActionStatus(str, Enum):
@@ -240,6 +242,8 @@ class RpaAction:
             return f"Repeat {data.get('count', 1)} times"
         if self.action == ActionType.REPEAT_UNTIL.value:
             return f"Repeat until {condition_summary(data)}"
+        if self.action == ActionType.FOR_EACH.value:
+            return f"For Each {data.get('item_variable') or 'item'} in {data.get('list_variable') or '?'}"
         if self.action == ActionType.END_LOOP.value:
             return "End Loop"
         if self.action == ActionType.BREAK_LOOP.value:
@@ -291,6 +295,8 @@ class RpaAction:
             return f"Run Python script {data.get('path') or ''}".strip()
         if self.action == ActionType.SHOW_NOTIFICATION.value:
             return f"Show notification: {data.get('title') or 'Python RPA Recorder'}"
+        if self.action == ActionType.READ_EXCEL_COLUMN.value:
+            return f"Read Excel column {data.get('column_header') or '?'} into {data.get('output_variable') or 'variable'}"
         return self.action
 
     def friendly_name(self) -> str:
@@ -510,6 +516,7 @@ FRIENDLY_ACTION_NAMES = {
     ActionType.END_IF.value: "End If",
     ActionType.REPEAT_COUNT.value: "Repeat N Times",
     ActionType.REPEAT_UNTIL.value: "Repeat Until",
+    ActionType.FOR_EACH.value: "For Each Loop",
     ActionType.END_LOOP.value: "End Loop",
     ActionType.BREAK_LOOP.value: "Break Loop",
     ActionType.SELECT_WINDOW.value: "Select / Target Window",
@@ -539,6 +546,7 @@ FRIENDLY_ACTION_NAMES = {
     ActionType.RUN_POWERSHELL.value: "Run PowerShell Command",
     ActionType.RUN_PYTHON_SCRIPT.value: "Run Python Script",
     ActionType.SHOW_NOTIFICATION.value: "Show Desktop Notification",
+    ActionType.READ_EXCEL_COLUMN.value: "Read Excel Column",
 }
 
 

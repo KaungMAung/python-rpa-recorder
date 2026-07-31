@@ -24,6 +24,7 @@ UTILITY_ACTIONS = {
     ActionType.DELETE_PATH.value, ActionType.WAIT_PATH.value,
     ActionType.RUN_POWERSHELL.value, ActionType.RUN_PYTHON_SCRIPT.value,
     ActionType.SHOW_NOTIFICATION.value,
+    ActionType.READ_EXCEL_COLUMN.value,
 }
 
 VARIABLE_ACTIONS = {
