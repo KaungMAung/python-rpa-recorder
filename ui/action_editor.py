@@ -32,6 +32,7 @@ from ui.condition_editor import ConditionEditor
 from ui.window_target_editor import WindowTargetEditor
 from ui.subflow_editor import SubflowEditor
 from ui.utility_action_editor import UTILITY_ACTIONS, UtilityActionEditor
+from ui.webhook_action_editor import WebhookActionEditor
 from ui.target_preview import TargetPreviewWidget
 
 
@@ -336,6 +337,10 @@ class ActionEditor(QWidget):
             subflow.changed.connect(lambda: self._set_subflow_data(subflow.data()))
             subflow.open_requested.connect(self.open_subflow_requested)
             self.form.addRow("Saved flow", subflow)
+        elif action.action == ActionType.POWER_AUTOMATE_WEBHOOK.value:
+            webhook = WebhookActionEditor(data, self)
+            webhook.changed.connect(lambda: self._set_webhook_data(webhook.data()))
+            self.form.addRow(webhook)
         elif action.action in UTILITY_ACTIONS:
             utility = UtilityActionEditor(action.action, data, self.available_variables, self)
             utility.changed.connect(lambda: self._set_utility_data(utility.data()))
@@ -426,7 +431,11 @@ class ActionEditor(QWidget):
             self._loading = False
             return
         self._build_expected_result(action)
-        self._build_failure_handling(action)
+        if action.action != ActionType.POWER_AUTOMATE_WEBHOOK.value:
+            self._build_failure_handling(action)
+        else:
+            self.failure_button.setVisible(False)
+            self.failure_widget.setVisible(False)
         self.advanced_form.addRow(
             "Step timeout (0 = off)",
             self._double(data.get("step_timeout", 0.0), lambda v: self._set_data("step_timeout", v), 0, 86400),
@@ -690,6 +699,17 @@ class ActionEditor(QWidget):
         }
         common = {key: value for key, value in self.action.data.items() if key in common_keys}
         self.action.data = {**data, **common}
+        self.action_changed.emit()
+
+    def _set_webhook_data(self, data: dict) -> None:
+        if self._loading or not self.action:
+            return
+        common_keys = {
+            "step_timeout", "capture_failure_screenshot", "capture_before", "capture_after",
+        }
+        common = {key: value for key, value in self.action.data.items() if key in common_keys}
+        self.action.data = {**data, **common}
+        self.action.on_failure = None
         self.action_changed.emit()
 
     def _click_image_fields(self, data: dict) -> None:

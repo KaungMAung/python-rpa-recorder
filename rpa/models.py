@@ -77,6 +77,7 @@ class ActionType(str, Enum):
     WAIT_PATH = "wait_path"
     RUN_POWERSHELL = "run_powershell"
     RUN_PYTHON_SCRIPT = "run_python_script"
+    POWER_AUTOMATE_WEBHOOK = "power_automate_webhook"
     SHOW_NOTIFICATION = "show_notification"
     SET_VARIABLE = "set_variable"
     GET_VARIABLE = "get_variable"
@@ -323,6 +324,8 @@ class RpaAction:
             return "Run PowerShell command"
         if self.action == ActionType.RUN_PYTHON_SCRIPT.value:
             return f"Run Python script {data.get('path') or ''}".strip()
+        if self.action == ActionType.POWER_AUTOMATE_WEBHOOK.value:
+            return "Send JSON to Power Automate"
         if self.action == ActionType.SHOW_NOTIFICATION.value:
             return f"Show notification: {data.get('title') or 'Python RPA Recorder'}"
         if self.action == ActionType.READ_EXCEL_COLUMN.value:
@@ -575,6 +578,7 @@ FRIENDLY_ACTION_NAMES = {
     ActionType.WAIT_PATH.value: "Wait for File or Folder",
     ActionType.RUN_POWERSHELL.value: "Run PowerShell Command",
     ActionType.RUN_PYTHON_SCRIPT.value: "Run Python Script",
+    ActionType.POWER_AUTOMATE_WEBHOOK.value: "Power Automate Webhook",
     ActionType.SHOW_NOTIFICATION.value: "Show Desktop Notification",
     ActionType.READ_EXCEL_COLUMN.value: "Read Excel Column",
 }

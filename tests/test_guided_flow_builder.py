@@ -4,9 +4,13 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QPushButton
 
-from rpa.models import ALL_ACTION_TYPES, ActionType, ProjectSettings, RpaAction, RpaProject
+from rpa.models import (
+    ALL_ACTION_TYPES, DEFAULT_DISABLED_ACTION_TYPES, ActionType, ProjectSettings,
+    RpaAction, RpaProject,
+)
 from ui.action_editor import ActionEditor
 from ui.dialogs import ManualActionDialog, SettingsDialog
 from ui.main_window import MainWindow
@@ -147,20 +151,11 @@ def test_available_actions_default_to_all_and_round_trip_with_project() -> None:
     assert loaded.actions[0].action == ActionType.TYPE_TEXT.value
 
 
-def test_available_actions_settings_lists_every_type_and_bulk_controls(monkeypatch) -> None:
+def test_available_actions_settings_lists_every_type_and_bulk_controls(tmp_path) -> None:
     app()
-    stored = {}
-
-    class FakeSettings:
-        def __init__(self, *_args):
-            pass
-
-        def setValue(self, key, value):
-            stored[key] = value
-
-    monkeypatch.setattr("ui.dialogs.QSettings", FakeSettings)
     settings = ProjectSettings()
-    dialog = SettingsDialog(settings)
+    system_store = QSettings(str(tmp_path / "system.ini"), QSettings.IniFormat)
+    dialog = SettingsDialog(settings, system_store=system_store)
     assert len(dialog.action_type_checks) == len(ALL_ACTION_TYPES)
     assert set(dialog.action_type_checks) == set(ALL_ACTION_TYPES)
     assert all(checkbox.isChecked() for checkbox in dialog.action_type_checks.values())
@@ -168,11 +163,14 @@ def test_available_actions_settings_lists_every_type_and_bulk_controls(monkeypat
     dialog._set_all_actions_enabled(False)
     assert not any(checkbox.isChecked() for checkbox in dialog.action_type_checks.values())
     dialog._reset_available_actions()
-    assert all(checkbox.isChecked() for checkbox in dialog.action_type_checks.values())
+    assert {
+        action_type for action_type, checkbox in dialog.action_type_checks.items()
+        if not checkbox.isChecked()
+    } == set(DEFAULT_DISABLED_ACTION_TYPES)
+    dialog._set_all_actions_enabled(True)
     dialog.action_type_checks[ActionType.TYPE_TEXT.value].setChecked(False)
     dialog.accept()
     assert settings.disabled_action_types == [ActionType.TYPE_TEXT.value]
-    assert stored["disabled_action_types"] == [ActionType.TYPE_TEXT.value]
 
 
 def test_available_actions_uses_collapsible_guided_groups() -> None:

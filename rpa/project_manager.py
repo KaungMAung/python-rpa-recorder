@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from copy import deepcopy
 from pathlib import Path
 
 from .models import ProjectSettings, RpaProject, utc_now
@@ -15,7 +16,7 @@ class ProjectManager:
     def new_project(self, name: str = "Untitled Recording", settings: ProjectSettings | None = None) -> RpaProject:
         project = RpaProject()
         if settings is not None:
-            project.settings = settings
+            project.settings = deepcopy(settings)
         project.project.name = name
         return project
 

@@ -45,6 +45,7 @@ from ui.condition_editor import ConditionEditor
 from ui.window_target_editor import WindowTargetEditor
 from ui.subflow_editor import SubflowEditor
 from ui.utility_action_editor import UTILITY_ACTIONS, UtilityActionEditor
+from ui.webhook_action_editor import WebhookActionEditor
 import shiboken6
 
 
@@ -57,24 +58,36 @@ WINDOW_ACTIONS = {
 }
 
 
-def load_default_project_settings() -> ProjectSettings:
-    """Build a ProjectSettings using values last saved from the Settings dialog.
-
-    The Settings dialog persists every field to QSettings on accept, but new
-    projects previously always started from ProjectSettings()'s hardcoded
-    defaults, so changes never carried over to the next flow. This reads
-    back whatever was last saved (falling back to the dataclass default for
-    any field that hasn't been saved yet).
-    """
-    qsettings = QSettings("PythonRPARecorder", "PythonRPARecorder")
+def default_system_settings() -> ProjectSettings:
     defaults = ProjectSettings()
+    defaults.disabled_action_types = list(DEFAULT_DISABLED_ACTION_TYPES)
+    return defaults
+
+
+def load_system_settings(qsettings: QSettings | None = None) -> ProjectSettings:
+    """Load application-wide defaults, including legacy unprefixed keys."""
+    if qsettings is None:
+        qsettings = QSettings("PythonRPARecorder", "PythonRPARecorder")
+    defaults = default_system_settings()
     values: dict = {}
     for key, default_value in defaults.__dict__.items():
-        if key == "disabled_action_types":
-            default_value = list(DEFAULT_DISABLED_ACTION_TYPES)
         stored = qsettings.value(key, default_value, type=type(default_value))
         values[key] = stored
     return ProjectSettings.from_dict(values)
+
+
+def save_system_settings(settings: ProjectSettings, qsettings: QSettings | None = None) -> None:
+    """Persist application-wide defaults using the existing QSettings keys."""
+    if qsettings is None:
+        qsettings = QSettings("PythonRPARecorder", "PythonRPARecorder")
+    for key, value in settings.__dict__.items():
+        qsettings.setValue(key, value)
+    qsettings.sync()
+
+
+def load_default_project_settings() -> ProjectSettings:
+    """Backward-compatible alias for callers creating a new flow."""
+    return load_system_settings()
 
 
 class ManualActionDialog(QDialog):
@@ -154,10 +167,11 @@ class ManualActionDialog(QDialog):
             ("Set an object property", ActionType.SET_OBJECT_PROPERTY.value),
             ("Delete a variable", ActionType.DELETE_VARIABLE.value),
         ]),
-        ("script", "Run a script or command", "Run PowerShell, a Python script, or advanced Python code.", [
+        ("script", "Run a script or command", "Run PowerShell, Python, or send JSON to Power Automate.", [
             ("Run a PowerShell command", ActionType.RUN_POWERSHELL.value),
             ("Run a Python script", ActionType.RUN_PYTHON_SCRIPT.value),
             ("Run Python code", ActionType.PYTHON_CODE.value),
+            ("Power Automate Webhook — Send JSON to Power Automate and wait for its response.", ActionType.POWER_AUTOMATE_WEBHOOK.value),
         ]),
     ]
 
@@ -258,6 +272,7 @@ class ManualActionDialog(QDialog):
             ("Wait for File or Folder", ActionType.WAIT_PATH.value),
             ("Run PowerShell Command", ActionType.RUN_POWERSHELL.value),
             ("Run Python Script", ActionType.RUN_PYTHON_SCRIPT.value),
+            ("Power Automate Webhook", ActionType.POWER_AUTOMATE_WEBHOOK.value),
             ("Show Desktop Notification", ActionType.SHOW_NOTIFICATION.value),
             ("Read Excel Column", ActionType.READ_EXCEL_COLUMN.value),
             ("Run Python", ActionType.RUN_PYTHON.value),
@@ -596,6 +611,7 @@ class ManualActionDialog(QDialog):
             "for_each_list", "for_each_item", "for_each_max", "for_each_failure",
             "subflow_editor",
             "utility_editor",
+            "webhook_editor",
         ):
             if hasattr(self, name):
                 delattr(self, name)
@@ -801,6 +817,10 @@ class ManualActionDialog(QDialog):
             )
             self.subflow_editor.changed.connect(self._update_summary)
             self.form.addRow("Saved flow", self.subflow_editor)
+        elif kind == ActionType.POWER_AUTOMATE_WEBHOOK.value:
+            self.webhook_editor = WebhookActionEditor(parent=self)
+            self.webhook_editor.changed.connect(self._update_summary)
+            self.form.addRow(self.webhook_editor)
         elif kind in UTILITY_ACTIONS:
             self.utility_editor = UtilityActionEditor(
                 kind, variables=list(self.variables), parent=self, guided=self._guided_mode,
@@ -888,7 +908,7 @@ class ManualActionDialog(QDialog):
 
     def _update_summary(self, *_args) -> None:
         if self.type_box.currentData() is None:
-            self.summary.setText("No action types are currently enabled. Use Settings → Available Actions to enable one.")
+            self.summary.setText("No action types are currently enabled. Use Flow Settings → Available Actions to enable one.")
             self._show_inline_validation("No action types are available to add.")
             self.test_match_button.setVisible(False)
             self.test_step_button.setVisible(False)
@@ -966,6 +986,8 @@ class ManualActionDialog(QDialog):
                 return "Complete the Repeat Until condition."
         if action.action == ActionType.RUN_SUBFLOW.value and not str(data.get("project", "")).strip():
             return "Choose the saved flow to run."
+        if action.action == ActionType.POWER_AUTOMATE_WEBHOOK.value:
+            return self.webhook_editor.validation_error()
         if action.action in {
             ActionType.SET_VARIABLE.value, ActionType.GET_VARIABLE.value,
             ActionType.INCREMENT_VARIABLE.value, ActionType.APPEND_VARIABLE.value,
@@ -1016,7 +1038,7 @@ class ManualActionDialog(QDialog):
     def _confirm(self) -> None:
         self.diagnostic.emit("[Add Step] confirmation clicked")
         if self.type_box.currentData() is None:
-            QMessageBox.warning(self, "No actions available", "Enable an action in Settings → Available Actions first.")
+            QMessageBox.warning(self, "No actions available", "Enable an action in Flow Settings → Available Actions first.")
             return
         error = self._validation_error()
         if error:
@@ -1120,6 +1142,8 @@ class ManualActionDialog(QDialog):
             return RpaAction(kind, data)
         if kind == ActionType.RUN_SUBFLOW.value:
             return RpaAction(kind, self.subflow_editor.data())
+        if kind == ActionType.POWER_AUTOMATE_WEBHOOK.value:
+            return RpaAction(kind, self.webhook_editor.data())
         if kind in UTILITY_ACTIONS:
             return RpaAction(kind, self.utility_editor.data())
         defaults = {
@@ -1736,11 +1760,17 @@ class ActionAvailabilityGroup(QWidget):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: ProjectSettings, parent=None, project: RpaProject | None = None) -> None:
+    def __init__(
+        self, settings: ProjectSettings, parent=None, project: RpaProject | None = None,
+        *, scope: str = "flow", system_store: QSettings | None = None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Flow Settings")
+        self.scope = scope
+        self.system_store = system_store
+        self.setWindowTitle("System Settings" if scope == "system" else "Flow Settings")
         self.settings = settings
-        self.project = project
+        self.project = project if scope == "flow" else None
+        self._reset_system_settings: ProjectSettings | None = None
         self.timing_mode = QComboBox()
         self.timing_mode.addItems(["recorded", "none"])
         self.timing_mode.setCurrentText(settings.timing_mode)
@@ -1789,6 +1819,9 @@ class SettingsDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        if self.scope == "flow":
+            reset_system = buttons.addButton("Reset to System Defaults", QDialogButtonBox.ResetRole)
+            reset_system.clicked.connect(self._reset_to_system_defaults)
         tabs = QTabWidget()
         general_page = QWidget()
         general_layout = QFormLayout(general_page)
@@ -1808,16 +1841,19 @@ class SettingsDialog(QDialog):
         general_layout.addRow("Hide recorder while running", self.hide_during_replay)
         general_layout.addRow("Run evidence retention", self.evidence_retention)
         general_layout.addRow("PyAutoGUI failsafe", self.failsafe)
-        general_layout.addRow(QLabel("Completion Criteria"))
-        general_layout.addRow("", self.completion_enabled)
-        general_layout.addRow("Mode", self.completion_mode)
-        general_layout.addRow("Conditions (JSON)", self.completion_conditions)
-        general_layout.addRow(completion_note)
+        if self.scope == "flow":
+            general_layout.addRow(QLabel("Completion Criteria"))
+            general_layout.addRow("", self.completion_enabled)
+            general_layout.addRow("Mode", self.completion_mode)
+            general_layout.addRow("Conditions (JSON)", self.completion_conditions)
+            general_layout.addRow(completion_note)
         tabs.addTab(general_page, "General")
 
         available_page = QWidget()
         available_layout = QVBoxLayout(available_page)
         available_note = QLabel(
+            "Choose the default action types for new flows. Existing flows are unaffected."
+            if self.scope == "system" else
             "Choose which action types users may add to this flow. Existing steps are unaffected."
         )
         available_note.setWordWrap(True)
@@ -1858,6 +1894,14 @@ class SettingsDialog(QDialog):
         tabs.addTab(available_page, "Available Actions")
 
         layout = QVBoxLayout(self)
+        description = QLabel(
+            "Application-wide defaults used as the starting values for new flows. Existing flows are not changed."
+            if self.scope == "system" else
+            "Settings stored in this flow. Changes here do not affect System Settings or other flows."
+        )
+        description.setWordWrap(True)
+        description.setStyleSheet("color: #475569;")
+        layout.addWidget(description)
         layout.addWidget(tabs)
         layout.addWidget(buttons)
         self.resize(760, 680)
@@ -1867,7 +1911,45 @@ class SettingsDialog(QDialog):
             checkbox.setChecked(enabled)
 
     def _reset_available_actions(self) -> None:
-        disabled = set(DEFAULT_DISABLED_ACTION_TYPES)
+        defaults = (
+            default_system_settings()
+            if self.scope == "system" else load_system_settings(self.system_store)
+        )
+        disabled = set(defaults.disabled_action_types)
+        for action_type, checkbox in self.action_type_checks.items():
+            checkbox.setChecked(action_type not in disabled)
+
+    def _reset_to_system_defaults(self) -> None:
+        if QMessageBox.question(
+            self,
+            "Reset Flow Settings",
+            "Replace this flow's settings with the current System Settings defaults?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+        defaults = load_system_settings(self.system_store)
+        self._reset_system_settings = defaults
+        self._apply_settings_to_controls(defaults)
+
+    def _apply_settings_to_controls(self, settings: ProjectSettings) -> None:
+        self.timing_mode.setCurrentText(settings.timing_mode)
+        self.crop_width.setValue(settings.crop_width)
+        self.crop_height.setValue(settings.crop_height)
+        self.confidence.setValue(settings.default_confidence)
+        self.timeout.setValue(settings.default_timeout)
+        self.text_flush.setValue(settings.text_flush_timeout)
+        self.double_click.setValue(settings.double_click_interval)
+        self.coordinate_fallback.setChecked(settings.coordinate_fallback)
+        self.typing_interval.setValue(settings.typing_interval)
+        self.start_delay.setValue(settings.start_delay)
+        self.pre_click_pause.setValue(settings.pre_click_pause)
+        self.ignore_app.setChecked(settings.ignore_application_window)
+        self.failsafe.setChecked(settings.pyautogui_failsafe)
+        self.show_desktop.setChecked(settings.show_desktop_before_recording)
+        self.hide_during_replay.setChecked(settings.hide_window_during_replay)
+        self.evidence_retention.setValue(settings.evidence_retention_runs)
+        disabled = set(settings.disabled_action_types)
         for action_type, checkbox in self.action_type_checks.items():
             checkbox.setChecked(action_type not in disabled)
 
@@ -1886,7 +1968,7 @@ class SettingsDialog(QDialog):
 
     def accept(self) -> None:
         completion: dict | None = None
-        if self.completion_enabled.isChecked():
+        if self.scope == "flow" and self.completion_enabled.isChecked():
             try:
                 conditions = json.loads(self.completion_conditions.toPlainText() or "[]")
             except json.JSONDecodeError as exc:
@@ -1896,6 +1978,9 @@ class SettingsDialog(QDialog):
                 QMessageBox.warning(self, "Invalid Completion Criteria", "Add one or more JSON condition objects.")
                 return
             completion = {"mode": str(self.completion_mode.currentData()), "conditions": conditions}
+        if self._reset_system_settings is not None:
+            for key, value in self._reset_system_settings.__dict__.items():
+                setattr(self.settings, key, list(value) if isinstance(value, list) else value)
         self.settings.timing_mode = self.timing_mode.currentText()
         self.settings.crop_width = self.crop_width.value()
         self.settings.crop_height = self.crop_height.value()
@@ -1919,9 +2004,8 @@ class SettingsDialog(QDialog):
         ]
         if self.project is not None:
             self.project.success_when = completion
-        qsettings = QSettings("PythonRPARecorder", "PythonRPARecorder")
-        for key, value in self.settings.__dict__.items():
-            qsettings.setValue(key, value)
+        if self.scope == "system":
+            save_system_settings(self.settings, self.system_store)
         super().accept()
 
 

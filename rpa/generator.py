@@ -17,6 +17,7 @@ UTILITY_ACTION_TYPES = {
     ActionType.COPY_PATH.value, ActionType.MOVE_PATH.value, ActionType.RENAME_PATH.value,
     ActionType.DELETE_PATH.value, ActionType.WAIT_PATH.value,
     ActionType.RUN_POWERSHELL.value, ActionType.RUN_PYTHON_SCRIPT.value,
+    ActionType.POWER_AUTOMATE_WEBHOOK.value,
     ActionType.SHOW_NOTIFICATION.value,
     ActionType.READ_EXCEL_COLUMN.value,
 }
@@ -797,6 +798,7 @@ def _write_generated_requirements(out_dir: Path) -> None:
         "Pillow>=10.4,<12",
         "opencv-python>=4.10,<5",
         "numpy>=2,<3",
+        "requests>=2.32,<3",
     ]
     (out_dir / "requirements.txt").write_text("\n".join(requirements) + "\n", encoding="utf-8")
 

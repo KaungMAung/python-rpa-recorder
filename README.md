@@ -21,7 +21,7 @@ For task-oriented instructions, see the [User Manual](docs/USER_MANUAL.md).
 | Reuse and code | Relative subflows with input/output mappings, PowerShell, Python Script, Run Python, Python Code, and generated Python |
 | Operations | Manual and scheduled runs, Windows Task Scheduler integration, runtime-input profiles, history, logs, screenshots, evidence summaries, and Run Details |
 
-The complete saved action identifiers are defined in `rpa/models.py`. The **Settings → Available Actions** page presents them in collapsible groups and controls only which types may be added. Disabling a type never removes or blocks an existing step.
+The complete saved action identifiers are defined in `rpa/models.py`. The **Flow Settings → Available Actions** page presents them in collapsible groups and controls only which types may be added. Disabling a type never removes or blocks an existing step.
 
 New installations initially hide these advanced actions from Add Step: Drag, Scroll, Set Object Property, Run Python Script, Run Python, Run Subflow, Else, End If, Comment / Note, Group, and End Group. They can be enabled at any time. Existing flows and saved selections keep their stored settings.
 
@@ -102,6 +102,12 @@ flows/
 
 Do not separate `project.json` from its `screenshots/` folder. Back up or move the complete flow folder.
 
+### Optional SharePoint run-log template
+
+The bundled workbook at `templates/sharepoint/rpa_run_log_template.xlsx` is an optional template for creating a SharePoint run-log list with SharePoint's **From Excel** option. Delete its clearly marked sample row after SharePoint creates the list.
+
+Its columns map directly to the scalar fields persisted by `RunHistoryEntry`, plus the owning schedule's `flow_name`. The application currently produces no canonical machine/user or records-processed fields, so the template does not introduce them or duplicate the nested diagnostic data.
+
 ## Features in practice
 
 ### Recording and image targeting
@@ -114,7 +120,9 @@ Image steps support multiple ordered reference images, confidence, timeout, gray
 
 Add Step begins with plain-language intentions for clicking, typing, opening, waiting, windows, files, conditions, loops, subflows, variables, and scripts. Categories with no enabled choices disappear and the remaining category buttons reflow into two columns. **Use the full step editor** remains available.
 
-**Settings → Available Actions** contains grouped checkboxes with per-group and global controls. The selection affects only new-step choices. Loading, editing, validating, and running existing steps is unchanged.
+**Flow Settings → Available Actions** contains grouped checkboxes with per-group and global controls. The selection affects only new-step choices. Loading, editing, validating, and running existing steps is unchanged.
+
+**System Settings** stores application-wide defaults for new flows. Each new flow receives its own copy; later System Settings changes do not alter existing flows, and Flow Settings changes do not alter the system defaults. Use **Reset to System Defaults** in Flow Settings to replace the active flow's settings after confirmation.
 
 ### Variables and placeholders
 

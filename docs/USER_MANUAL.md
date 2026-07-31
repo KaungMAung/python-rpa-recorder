@@ -122,7 +122,9 @@ Guided and Full modes create the same saved actions. They differ only in how cho
 
 ## Enable or disable available actions
 
-Open **Project → Settings → Available Actions**. Actions are arranged in collapsible groups such as Mouse Actions, Keyboard and Text, Windows, Conditions, Loops, Variables, Scripts and Commands, Clipboard, Flow Control, and Utilities.
+Open **Project → Flow Settings → Available Actions**. Actions are arranged in collapsible groups such as Mouse Actions, Keyboard and Text, Windows, Conditions, Loops, Variables, Scripts and Commands, Clipboard, Flow Control, and Utilities.
+
+**Project → System Settings** stores persistent application-wide defaults. A new flow receives a copy of those defaults. Changes made later in Flow Settings affect only the active flow, while later System Settings changes affect only flows created afterward. To replace the active flow's settings with the current defaults, choose **Reset to System Defaults** in Flow Settings and confirm.
 
 Each group header shows an enabled count and contains a group checkbox. Use:
 
@@ -363,7 +365,7 @@ Run Details displays the execution result, validation, verification, retries, co
 | Click image is not found | Confirm the screenshot exists; use Test Match Now; lower confidence carefully; recapture after DPI, scaling, resolution, theme, or application changes |
 | Click occurs in the wrong place | Prefer image or window-relative targeting; inspect click offsets and coordinate fallback |
 | Recording misses an elevated app | Run the recorder and target at the same elevation level |
-| Add Step category/action is missing | Open Settings → Available Actions and enable its type or group |
+| Add Step category/action is missing | Open Project → Flow Settings → Available Actions and enable its type or group |
 | Existing disabled-type step still runs | This is expected: Available Actions prevents new additions only; disable the step itself to skip it |
 | Flow will not run | Open Validation, double-click the first Error, and correct missing variables, paths, screenshots, scripts, or structural markers |
 | Placeholder remains unresolved | Check spelling/case and define the project variable, runtime input, output, or built-in before that step |

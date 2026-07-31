@@ -16,6 +16,7 @@ from .windowing import normalize_window_target
 from .project_manager import ProjectManager
 from .subflows import mapping_dict, resolve_subflow_project, validate_subflow_dependencies
 from .verification import SUPPORTED_VERIFICATIONS
+from .webhook import build_webhook_request
 
 LEVEL_ERROR = "Error"
 LEVEL_WARNING = "Warning"
@@ -159,7 +160,11 @@ def validate_project_detailed(
             continue
 
         try:
-            resolved = resolve_placeholders_strict(action.data, variables)
+            resolved = (
+                action.data
+                if action.action == ActionType.POWER_AUTOMATE_WEBHOOK.value
+                else resolve_placeholders_strict(action.data, variables)
+            )
         except MissingPlaceholderError as exc:
             issues.append(ValidationIssue(LEVEL_ERROR, step_number, name, f"undefined variable: {exc.variable}"))
             resolved = action.data
@@ -200,7 +205,7 @@ def validate_project_detailed(
         _validate_common(
             action, resolved, step_number, name, issues, len(project.actions), start_index + 1, end_index + 1,
         )
-        _validate_action(action, resolved, project, project_dir, step_number, name, issues)
+        _validate_action(action, resolved, project, project_dir, step_number, name, issues, variables)
         if action.action in _WINDOW_ACTIONS:
             target = normalize_window_target(resolved)
             has_criteria = any(target[key] for key in ("process_name", "window_title", "class_name"))
@@ -397,9 +402,30 @@ def _validate_action(
     project_dir: Path | None,
     number: int,
     name: str,
-    issues: list[ValidationIssue],
+    issues: list[ValidationIssue], variables: dict[str, Any],
 ) -> None:
     action_type = action.action
+    if action_type == ActionType.POWER_AUTOMATE_WEBHOOK.value:
+        try:
+            build_webhook_request(data, variables)
+        except MissingPlaceholderError as exc:
+            _add(issues, LEVEL_ERROR, number, name, f"undefined variable: {exc.variable}")
+        except (TypeError, ValueError) as exc:
+            _add(issues, LEVEL_ERROR, number, name, str(exc))
+        output = str(data.get("output_variable", "")).strip()
+        if output and not VARIABLE_NAME_PATTERN.fullmatch(output):
+            _add(issues, LEVEL_ERROR, number, name, "response variable name is invalid")
+        retry_count = _finite_number(
+            (action.on_failure or {}).get("retry_count", data.get("retry_count", 0))
+        )
+        if retry_count is not None and retry_count > 0:
+            _add(issues, LEVEL_ERROR, number, name, "Power Automate Webhook does not support retries")
+        failure_action = (action.on_failure or {}).get(
+            "failure_action", data.get("failure_action", "stop"),
+        )
+        if str(failure_action).lower() not in {"stop", "continue"}:
+            _add(issues, LEVEL_ERROR, number, name, "webhook failure behavior must be Stop or Continue")
+        return
     if action_type in {
         ActionType.LAUNCH_APPLICATION.value, ActionType.WAIT_PROCESS.value,
         ActionType.ACTIVATE_PROCESS.value, ActionType.CLOSE_PROCESS.value,

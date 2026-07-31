@@ -4,7 +4,9 @@ a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('templates/sharepoint/rpa_run_log_template.xlsx', 'templates/sharepoint'),
+    ],
     hiddenimports=[
         'pynput.keyboard._win32',
         'pynput.mouse._win32',

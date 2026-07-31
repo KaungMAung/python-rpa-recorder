@@ -94,7 +94,9 @@ from rpa.step_editing import (
 )
 from ui.action_editor import ActionEditor
 from ui.action_table import ActionTable
-from ui.dialogs import ManualActionDialog, SettingsDialog, VariablesDialog, load_default_project_settings, show_error
+from ui.dialogs import (
+    ManualActionDialog, SettingsDialog, VariablesDialog, load_system_settings, show_error,
+)
 from ui.recorder_toolbar import FloatingExecutionToolbar, FloatingRecorderToolbar
 from ui.schedule_dialog import ScheduleFlowsDialog
 from ui.run_details_dialog import RunDetailsDialog
@@ -222,7 +224,7 @@ class MainWindow(QMainWindow):
         self.resize(1160, 760)
         self.setMinimumWidth(1120)
         self.manager = ProjectManager()
-        self.project = self.manager.new_project(settings=load_default_project_settings())
+        self.project = self.manager.new_project(settings=load_system_settings())
         self.project_dir: Path | None = None
         self.dirty = False
         self.recorder: RpaRecorder | None = None
@@ -499,7 +501,7 @@ class MainWindow(QMainWindow):
             ("Record Actions", ["Record", "Pause", "Resume", "Stop"]),
             ("Execution", ["Run", "Run Until Breakpoint", "Validate Flow", "Test This Step", "Run From Here", "Run Until Here", "Stop Run", "Schedule Flows", "Generate Python"]),
             ("Step Editing", ["Undo", "Redo", "Copy", "Cut", "Paste", "Toggle Breakpoint", "Add Manual Action", "Add Comment", "Group Selected", "Move Into Group", "Move Out of Group", "Insert Before", "Insert After", "Duplicate", "Delete Action", "Move Up", "Move Down", "Enable Selected", "Disable Selected", "Adjust Wait Before", "Enable/Disable", "Deselect All"]),
-            ("Project", ["Variables", "Settings"]),
+            ("Setting", ["Variables", "Flow Settings", "System Settings"]),
             ("Help", ["About"]),
         ]
         for menu_name, names in menus:
@@ -588,7 +590,8 @@ class MainWindow(QMainWindow):
         self.menu_actions["Deselect All"].triggered.connect(self.clear_step_selection)
         self.menu_actions["Variables"].triggered.connect(self.variables_dialog)
         self.buttons["Variables"].clicked.connect(self.variables_dialog)
-        self.menu_actions["Settings"].triggered.connect(self.settings_dialog)
+        self.menu_actions["Flow Settings"].triggered.connect(self.flow_settings_dialog)
+        self.menu_actions["System Settings"].triggered.connect(self.system_settings_dialog)
         self.menu_actions["About"].triggered.connect(self.about_dialog)
         self.empty_record_btn.clicked.connect(self.start_recording)
         self.empty_open_btn.clicked.connect(self.open_project)
@@ -740,7 +743,7 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 show_error(self, "Open flow failed", str(exc))
                 return False
-        self.project = self.manager.new_project(flow_name, settings=load_default_project_settings())
+        self.project = self.manager.new_project(flow_name, settings=load_system_settings(self.settings))
         self.project_dir = flow_dir
         self._load_latest_evidence()
         self.manager.save(self.project, self.project_dir)
@@ -3076,11 +3079,26 @@ class MainWindow(QMainWindow):
             self.project.output_variables = dialog.output_variables
             self.mark_dirty()
 
-    def settings_dialog(self) -> None:
-        dialog = SettingsDialog(self.project.settings, self, self.project)
+    def flow_settings_dialog(self) -> None:
+        dialog = SettingsDialog(
+            self.project.settings, self, self.project,
+            scope="flow", system_store=self.settings,
+        )
         if dialog.exec() == QDialog.Accepted:
             self._apply_action_availability()
             self.mark_dirty()
+
+    def system_settings_dialog(self) -> None:
+        dialog = SettingsDialog(
+            load_system_settings(self.settings), self,
+            scope="system", system_store=self.settings,
+        )
+        if dialog.exec() == QDialog.Accepted:
+            self.update_status("System Settings saved; new flows will use these defaults")
+
+    def settings_dialog(self) -> None:
+        """Backward-compatible entry point for the active flow settings."""
+        self.flow_settings_dialog()
 
     def _apply_action_availability(self) -> None:
         comment_available = self.project.settings.is_action_available(ActionType.COMMENT.value)

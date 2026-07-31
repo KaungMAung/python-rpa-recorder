@@ -7,6 +7,7 @@ from .execution import ExecutionContext
 from .models import ActionType
 from .tools import FunctionTool, ToolRegistry
 from .utils import normalize_mouse_button
+from .webhook import execute_webhook
 
 
 WINDOW_ACTIONS = {
@@ -55,6 +56,7 @@ def create_builtin_registry() -> ToolRegistry:
     add(ActionType.RUN_PYTHON.value, "Run Python code", _python)
     add(ActionType.PYTHON_CODE.value, "Run Python code", _python)
     add(ActionType.RUN_SUBFLOW.value, "Run another flow", _subflow)
+    add(ActionType.POWER_AUTOMATE_WEBHOOK.value, "Send JSON to Power Automate", _webhook)
     for action_type in WINDOW_ACTIONS:
         add(action_type, "Perform a window operation", _window)
     for action_type in UTILITY_ACTIONS:
@@ -170,3 +172,9 @@ def _subflow(inputs: dict[str, Any], context: ExecutionContext) -> None:
 
 def _utility(inputs: dict[str, Any], context: ExecutionContext) -> None:
     context.helper("native_utility")(_action(context), inputs, context.variables)
+
+
+def _webhook(inputs: dict[str, Any], context: ExecutionContext) -> Any:
+    result = execute_webhook(inputs, context.variables)
+    context.log("Power Automate webhook completed successfully")
+    return result

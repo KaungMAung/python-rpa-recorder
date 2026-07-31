@@ -907,7 +907,11 @@ class ReplayRunner:
         allow_coordinate_fallback: bool = True,
     ) -> None:
         variables = self.runtime_variables if variables is None else variables
-        data = resolve_placeholders_strict(action.data, variables)
+        data = (
+            action.data
+            if action.action == ActionType.POWER_AUTOMATE_WEBHOOK.value
+            else resolve_placeholders_strict(action.data, variables)
+        )
         self.execution_context.variables = variables
         self.execution_context.current_step = step_number
         self.execution_context.current_action = action
@@ -1557,6 +1561,19 @@ class ReplayRunner:
 
     def _failure_settings(self, action: RpaAction, data: dict[str, Any]) -> dict[str, Any]:
         configured = resolve_placeholders_strict(action.on_failure or {}, self.runtime_variables)
+        if action.action == ActionType.POWER_AUTOMATE_WEBHOOK.value:
+            failure_action = str(
+                configured.get("failure_action", data.get("failure_action", "stop"))
+            ).strip().lower()
+            return {
+                "retry_count": 0,
+                "retry_delay_seconds": 0,
+                "fallback_step": None,
+                "ask_user": False,
+                "stop_flow": True,
+                "failure_action": failure_action if failure_action in {"stop", "continue"} else "stop",
+                "failure_jump_step": 0,
+            }
         return {
             "retry_count": configured.get("retry_count", data.get("retry_count", 0)),
             "retry_delay_seconds": configured.get(
