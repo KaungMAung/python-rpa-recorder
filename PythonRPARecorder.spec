@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_all
+
+truststore_datas, truststore_binaries, truststore_hiddenimports = collect_all('truststore')
+
 a = Analysis(
     ['app.py'],
     pathex=[],
-    binaries=[],
+    binaries=truststore_binaries,
     datas=[
         ('templates/sharepoint/rpa_run_log_template.xlsx', 'templates/sharepoint'),
-    ],
+    ] + truststore_datas,
     hiddenimports=[
         'pynput.keyboard._win32',
         'pynput.mouse._win32',
@@ -14,7 +18,7 @@ a = Analysis(
         'cv2',
         'numpy',
         'pyautogui',
-    ],
+    ] + truststore_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

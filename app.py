@@ -5,6 +5,10 @@ import runpy
 import argparse
 from pathlib import Path
 
+import truststore
+
+truststore.inject_into_ssl()
+
 from PySide6.QtWidgets import QApplication
 
 from ui.style import apply_global_style, enable_high_dpi
