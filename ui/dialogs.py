@@ -71,6 +71,9 @@ def load_system_settings(qsettings: QSettings | None = None) -> ProjectSettings:
     defaults = default_system_settings()
     values: dict = {}
     for key, default_value in defaults.__dict__.items():
+        if key == "send_run_log_to_sharepoint":
+            values[key] = False
+            continue
         stored = qsettings.value(key, default_value, type=type(default_value))
         values[key] = stored
     return ProjectSettings.from_dict(values)
@@ -81,6 +84,8 @@ def save_system_settings(settings: ProjectSettings, qsettings: QSettings | None 
     if qsettings is None:
         qsettings = QSettings("PythonRPARecorder", "PythonRPARecorder")
     for key, value in settings.__dict__.items():
+        if key == "send_run_log_to_sharepoint":
+            continue
         qsettings.setValue(key, value)
     qsettings.sync()
 
@@ -1808,6 +1813,11 @@ class SettingsDialog(QDialog):
         self.hide_during_replay.setToolTip("Keeps the recorder out of the way while a floating Stop Run control remains available.")
         self.evidence_retention = self._spin(settings.evidence_retention_runs, 10, 1000)
         self.evidence_retention.setToolTip("Maximum timestamped run-evidence folders retained for this flow.")
+        self.send_run_log = QCheckBox("Send run log to SharePoint")
+        self.send_run_log.setChecked(settings.send_run_log_to_sharepoint)
+        self.run_log_url = QLineEdit(settings.run_log_webhook_url)
+        self.run_log_url.setPlaceholderText("https://...powerautomate.com/...")
+        self.run_log_timeout = self._double(settings.run_log_timeout_seconds, 10, 120)
         self.completion_enabled = QCheckBox("Verify explicit completion criteria")
         self.completion_enabled.setChecked(bool(project and project.success_when))
         self.completion_mode = QComboBox()
@@ -1852,6 +1862,13 @@ class SettingsDialog(QDialog):
         general_layout.addRow("Hide recorder while running", self.hide_during_replay)
         general_layout.addRow("Run evidence retention", self.evidence_retention)
         general_layout.addRow("PyAutoGUI failsafe", self.failsafe)
+        if self.scope == "system":
+            general_layout.addRow("Default run-log webhook URL", self.run_log_url)
+            general_layout.addRow("Default run-log timeout (seconds)", self.run_log_timeout)
+        else:
+            general_layout.addRow("", self.send_run_log)
+            general_layout.addRow("Run-log webhook URL", self.run_log_url)
+            general_layout.addRow("Run-log timeout (seconds)", self.run_log_timeout)
         if self.scope == "flow":
             general_layout.addRow(QLabel("Completion Criteria"))
             general_layout.addRow("", self.completion_enabled)
@@ -1960,6 +1977,9 @@ class SettingsDialog(QDialog):
         self.show_desktop.setChecked(settings.show_desktop_before_recording)
         self.hide_during_replay.setChecked(settings.hide_window_during_replay)
         self.evidence_retention.setValue(settings.evidence_retention_runs)
+        self.send_run_log.setChecked(settings.send_run_log_to_sharepoint)
+        self.run_log_url.setText(settings.run_log_webhook_url)
+        self.run_log_timeout.setValue(settings.run_log_timeout_seconds)
         disabled = set(settings.disabled_action_types)
         for action_type, checkbox in self.action_type_checks.items():
             checkbox.setChecked(action_type not in disabled)
@@ -2008,6 +2028,10 @@ class SettingsDialog(QDialog):
         self.settings.hide_window_during_replay = self.hide_during_replay.isChecked()
         self.settings.evidence_retention_runs = self.evidence_retention.value()
         self.settings.pyautogui_failsafe = self.failsafe.isChecked()
+        self.settings.run_log_webhook_url = self.run_log_url.text().strip()
+        self.settings.run_log_timeout_seconds = self.run_log_timeout.value()
+        if self.scope == "flow":
+            self.settings.send_run_log_to_sharepoint = self.send_run_log.isChecked()
         self.settings.disabled_action_types = [
             action_type
             for action_type, checkbox in self.action_type_checks.items()

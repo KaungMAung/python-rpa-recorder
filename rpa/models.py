@@ -133,6 +133,9 @@ class ProjectSettings:
     hide_window_during_replay: bool = True
     evidence_retention_runs: int = 100
     persist_variable_values: bool = False
+    send_run_log_to_sharepoint: bool = False
+    run_log_webhook_url: str = ""
+    run_log_timeout_seconds: float = 30.0
     disabled_action_types: list[str] = field(default_factory=list)
 
     def is_action_available(self, action_type: str) -> bool:

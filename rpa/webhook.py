@@ -123,6 +123,20 @@ def build_webhook_request(data: dict[str, Any], variables: dict[str, Any]) -> tu
 
 def execute_webhook(data: dict[str, Any], variables: dict[str, Any]) -> Any:
     url, payload, timeout = build_webhook_request(data, variables)
+    result = post_json_webhook(url, payload, timeout)
+    output = str(data.get("output_variable", "")).strip()
+    if output:
+        variables[output] = result
+    return result
+
+
+def post_json_webhook(url: str, payload: Any, timeout: float) -> Any:
+    """POST JSON using the shared Power Automate HTTP and response handling."""
+    if not str(url).strip():
+        raise ValueError("Webhook URL is required.")
+    timeout = float(timeout)
+    if not 10 <= timeout <= 120:
+        raise ValueError("Webhook timeout must be between 10 and 120 seconds.")
     try:
         response = requests.post(url, json=payload, timeout=timeout)
     except requests.Timeout as exc:
@@ -135,9 +149,6 @@ def execute_webhook(data: dict[str, Any], variables: dict[str, Any]) -> Any:
         result = response.json()
     except ValueError:
         result = response.text
-    output = str(data.get("output_variable", "")).strip()
-    if output:
-        variables[output] = result
     return result
 
 

@@ -10,6 +10,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .evidence import RunEvidenceSession
+from .external_run_log import send_external_run_log
 from .execution import (
     COMPLETED_UNVERIFIED, COMPLETED_VERIFIED, FAILED, RECOVERED,
     STOPPED_BY_USER,
@@ -236,6 +237,14 @@ class ScheduledRunController(QObject):
             )
             self.store.set(self.schedule)
             self.store.save()
+            if self.project is not None and self.schedule.history:
+                send_external_run_log(
+                    self.project.settings,
+                    self.project.project.name or self.schedule.flow_name,
+                    self.schedule.history[-1],
+                    result.get("steps") or [],
+                    self._log,
+                )
         if (
             status in {COMPLETED_VERIFIED, COMPLETED_UNVERIFIED, RECOVERED}
             and self.project is not None

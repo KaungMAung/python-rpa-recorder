@@ -48,6 +48,7 @@ from rpa import __version__
 from rpa.generator import generate_python
 from rpa.control_flow import BLOCK_OPENERS, IF_TYPES, LOOP_TYPES, CONTROL_TYPES, NON_EXECUTABLE_TYPES, parse_control_flow
 from rpa.evidence import RunEvidenceSession
+from rpa.external_run_log import send_external_run_log
 from rpa.execution import COMPLETED_UNVERIFIED
 from rpa.execution import FAILED as EXECUTION_FAILED, STOPPED_BY_USER
 from rpa.image_matcher import find_image, find_reference_matches, save_crop_from_image, screenshot_image, virtual_screen_origin
@@ -1148,6 +1149,7 @@ class MainWindow(QMainWindow):
                          run_id=evidence.run_id if evidence else None)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
+            self._post_external_run_log_from_file(project_json, flow_name, schedule)
             self.log(f"[{flow_name}] schedule skipped: already running")
             return
         if self.replay_thread is not None:
@@ -1179,6 +1181,7 @@ class MainWindow(QMainWindow):
                          run_id=evidence.run_id if evidence else None)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
+            self._post_external_run_log_from_file(project_json, flow_name, schedule)
             self.log(f"[{flow_name}] schedule skipped: flow is open and busy")
             return
         try:
@@ -1213,6 +1216,7 @@ class MainWindow(QMainWindow):
             mark_finished(schedule, EXECUTION_FAILED, error=f"Could not create run evidence: {exc}", attempts=0)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
+            self._post_external_run_log(project.settings, flow_name, schedule)
             return
         self.active_evidence = evidence
         self.last_evidence_folder = evidence.folder
@@ -1241,6 +1245,7 @@ class MainWindow(QMainWindow):
                 mark_finished(schedule, "Skipped", error=reason, attempts=0)
                 self.schedule_store.set(schedule)
                 self.schedule_store.save()
+                self._post_external_run_log(project.settings, flow_name, schedule)
                 evidence.finalize("Skipped", error=reason)
                 self.active_evidence = None
                 self.file_logger = None
@@ -1263,6 +1268,7 @@ class MainWindow(QMainWindow):
             mark_finished(schedule, EXECUTION_FAILED, error=reason, attempts=0)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
+            self._post_external_run_log(project.settings, flow_name, schedule)
             self._finalize_evidence(EXECUTION_FAILED, error=reason)
             return
         if getattr(project, "runtime_inputs", {}):
@@ -1280,6 +1286,7 @@ class MainWindow(QMainWindow):
             mark_finished(schedule, EXECUTION_FAILED, error=reason, failed_step=errors[0].step_number, attempts=0)
             self.schedule_store.set(schedule)
             self.schedule_store.save()
+            self._post_external_run_log(project.settings, flow_name, schedule)
             self._finalize_evidence(EXECUTION_FAILED, failed_step=errors[0].step_number, error=reason)
             return
         for warning in warnings:
@@ -1411,6 +1418,10 @@ class MainWindow(QMainWindow):
         )
         self.schedule_store.set(schedule)
         self.schedule_store.save()
+        if runner is not None:
+            self._post_external_run_log(
+                runner.project.settings, flow_name, schedule, getattr(runner, "step_results", None),
+            )
         self.log(f"[{flow_name}] scheduled run {status}")
         if runner is not None:
             self.last_runtime_variables = dict(getattr(runner, "runtime_variables", {}))
@@ -1950,6 +1961,7 @@ class MainWindow(QMainWindow):
         diagnostics = runner.run_diagnostics() if runner else {}
         self._finish_active_history(
             final_status, None, None, getattr(runner, "total_attempts", 0), diagnostics,
+            getattr(runner, "step_results", None),
         )
         self._finalize_evidence(
             final_status, getattr(runner, "step_results", None), getattr(runner, "total_attempts", 0),
@@ -1978,7 +1990,10 @@ class MainWindow(QMainWindow):
         self.last_runtime_variables = dict(getattr(runner, "runtime_variables", {}))
         attempts = getattr(runner, "total_attempts", 0)
         diagnostics = runner.run_diagnostics() if runner else {}
-        self._finish_active_history(STOPPED_BY_USER, "Stopped by user", last_step, attempts, diagnostics)
+        self._finish_active_history(
+            STOPPED_BY_USER, "Stopped by user", last_step, attempts, diagnostics,
+            getattr(runner, "step_results", None),
+        )
         self._finalize_evidence(
             STOPPED_BY_USER, getattr(runner, "step_results", None), attempts, last_step, "Stopped by user",
             diagnostics,
@@ -1998,7 +2013,10 @@ class MainWindow(QMainWindow):
         failed_step = index + 1 if index >= 0 else None
         attempts = getattr(runner, "total_attempts", 0)
         diagnostics = runner.run_diagnostics() if runner else {}
-        self._finish_active_history(EXECUTION_FAILED, message, failed_step, attempts, diagnostics)
+        self._finish_active_history(
+            EXECUTION_FAILED, message, failed_step, attempts, diagnostics,
+            getattr(runner, "step_results", None),
+        )
         self._finalize_evidence(
             EXECUTION_FAILED, getattr(runner, "step_results", None), attempts, failed_step, message,
             diagnostics,
@@ -3474,6 +3492,7 @@ class MainWindow(QMainWindow):
     def _finish_active_history(
         self, status: str, error: str | None, failed_step: int | None, attempts: int,
         diagnostics: dict | None = None,
+        step_results: list[dict] | None = None,
     ) -> None:
         flow_name = self._active_history_flow
         self._active_history_flow = None
@@ -3488,6 +3507,20 @@ class MainWindow(QMainWindow):
         )
         self.schedule_store.set(schedule)
         self.schedule_store.save()
+        self._post_external_run_log(self.project.settings, flow_name, schedule, step_results)
+
+    def _post_external_run_log(
+        self, settings: ProjectSettings, flow_name: str, schedule, step_results: list[dict] | None = None,
+    ) -> None:
+        if schedule.history:
+            send_external_run_log(settings, flow_name, schedule.history[-1], step_results, self.log)
+
+    def _post_external_run_log_from_file(self, project_json: Path, flow_name: str, schedule) -> None:
+        try:
+            settings = ProjectManager().load(project_json).settings
+        except Exception:
+            return
+        self._post_external_run_log(settings, flow_name, schedule)
 
     def _finalize_evidence(
         self,
