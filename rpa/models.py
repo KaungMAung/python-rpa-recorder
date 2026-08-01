@@ -78,6 +78,7 @@ class ActionType(str, Enum):
     RUN_POWERSHELL = "run_powershell"
     RUN_PYTHON_SCRIPT = "run_python_script"
     POWER_AUTOMATE_WEBHOOK = "power_automate_webhook"
+    POWER_AUTOMATE_SEND_EMAIL = "power_automate_send_email"
     SHOW_NOTIFICATION = "show_notification"
     SET_VARIABLE = "set_variable"
     GET_VARIABLE = "get_variable"
@@ -326,6 +327,8 @@ class RpaAction:
             return f"Run Python script {data.get('path') or ''}".strip()
         if self.action == ActionType.POWER_AUTOMATE_WEBHOOK.value:
             return "Send JSON to Power Automate"
+        if self.action == ActionType.POWER_AUTOMATE_SEND_EMAIL.value:
+            return f"Send email to {data.get('to') or 'recipient'}"
         if self.action == ActionType.SHOW_NOTIFICATION.value:
             return f"Show notification: {data.get('title') or 'Python RPA Recorder'}"
         if self.action == ActionType.READ_EXCEL_COLUMN.value:
@@ -579,6 +582,7 @@ FRIENDLY_ACTION_NAMES = {
     ActionType.RUN_POWERSHELL.value: "Run PowerShell Command",
     ActionType.RUN_PYTHON_SCRIPT.value: "Run Python Script",
     ActionType.POWER_AUTOMATE_WEBHOOK.value: "Power Automate Webhook",
+    ActionType.POWER_AUTOMATE_SEND_EMAIL.value: "Power Automate Send Email",
     ActionType.SHOW_NOTIFICATION.value: "Show Desktop Notification",
     ActionType.READ_EXCEL_COLUMN.value: "Read Excel Column",
 }

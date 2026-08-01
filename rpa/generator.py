@@ -18,6 +18,7 @@ UTILITY_ACTION_TYPES = {
     ActionType.DELETE_PATH.value, ActionType.WAIT_PATH.value,
     ActionType.RUN_POWERSHELL.value, ActionType.RUN_PYTHON_SCRIPT.value,
     ActionType.POWER_AUTOMATE_WEBHOOK.value,
+    ActionType.POWER_AUTOMATE_SEND_EMAIL.value,
     ActionType.SHOW_NOTIFICATION.value,
     ActionType.READ_EXCEL_COLUMN.value,
 }

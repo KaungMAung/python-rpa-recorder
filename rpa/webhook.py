@@ -141,6 +141,33 @@ def execute_webhook(data: dict[str, Any], variables: dict[str, Any]) -> Any:
     return result
 
 
+def email_webhook_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Adapt the guided email fields to the existing generic webhook contract."""
+    return {
+        "url": data.get("url", ""),
+        "payload_mode": "builder",
+        "payload_fields": [
+            {"name": "to", "value": data.get("to", ""), "type": "text"},
+            {"name": "cc", "value": data.get("cc", ""), "type": "text"},
+            {"name": "subject", "value": data.get("subject", ""), "type": "text"},
+            {"name": "body", "value": data.get("body", ""), "type": "text"},
+        ],
+        "timeout": data.get("timeout", 60.0),
+        "output_variable": data.get("output_variable", ""),
+        "failure_action": data.get("failure_action", "stop"),
+    }
+
+
+def build_email_webhook_request(
+    data: dict[str, Any], variables: dict[str, Any],
+) -> tuple[str, Any, float]:
+    return build_webhook_request(email_webhook_data(data), variables)
+
+
+def execute_power_automate_email(data: dict[str, Any], variables: dict[str, Any]) -> Any:
+    return execute_webhook(email_webhook_data(data), variables)
+
+
 def _number_value(value: Any, name: str) -> int | float:
     if isinstance(value, bool):
         raise ValueError(f"Payload field '{name}' must resolve to a valid number.")

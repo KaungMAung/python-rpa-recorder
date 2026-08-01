@@ -909,7 +909,10 @@ class ReplayRunner:
         variables = self.runtime_variables if variables is None else variables
         data = (
             action.data
-            if action.action == ActionType.POWER_AUTOMATE_WEBHOOK.value
+            if action.action in {
+                ActionType.POWER_AUTOMATE_WEBHOOK.value,
+                ActionType.POWER_AUTOMATE_SEND_EMAIL.value,
+            }
             else resolve_placeholders_strict(action.data, variables)
         )
         self.execution_context.variables = variables
@@ -1561,7 +1564,10 @@ class ReplayRunner:
 
     def _failure_settings(self, action: RpaAction, data: dict[str, Any]) -> dict[str, Any]:
         configured = resolve_placeholders_strict(action.on_failure or {}, self.runtime_variables)
-        if action.action == ActionType.POWER_AUTOMATE_WEBHOOK.value:
+        if action.action in {
+            ActionType.POWER_AUTOMATE_WEBHOOK.value,
+            ActionType.POWER_AUTOMATE_SEND_EMAIL.value,
+        }:
             failure_action = str(
                 configured.get("failure_action", data.get("failure_action", "stop"))
             ).strip().lower()

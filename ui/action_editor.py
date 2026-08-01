@@ -32,7 +32,7 @@ from ui.condition_editor import ConditionEditor
 from ui.window_target_editor import WindowTargetEditor
 from ui.subflow_editor import SubflowEditor
 from ui.utility_action_editor import UTILITY_ACTIONS, UtilityActionEditor
-from ui.webhook_action_editor import WebhookActionEditor
+from ui.webhook_action_editor import PowerAutomateEmailEditor, WebhookActionEditor
 from ui.target_preview import TargetPreviewWidget
 
 
@@ -341,6 +341,10 @@ class ActionEditor(QWidget):
             webhook = WebhookActionEditor(data, self)
             webhook.changed.connect(lambda: self._set_webhook_data(webhook.data()))
             self.form.addRow(webhook)
+        elif action.action == ActionType.POWER_AUTOMATE_SEND_EMAIL.value:
+            email = PowerAutomateEmailEditor(data, self)
+            email.changed.connect(lambda: self._set_webhook_data(email.data()))
+            self.form.addRow(email)
         elif action.action in UTILITY_ACTIONS:
             utility = UtilityActionEditor(action.action, data, self.available_variables, self)
             utility.changed.connect(lambda: self._set_utility_data(utility.data()))
@@ -431,7 +435,10 @@ class ActionEditor(QWidget):
             self._loading = False
             return
         self._build_expected_result(action)
-        if action.action != ActionType.POWER_AUTOMATE_WEBHOOK.value:
+        if action.action not in {
+            ActionType.POWER_AUTOMATE_WEBHOOK.value,
+            ActionType.POWER_AUTOMATE_SEND_EMAIL.value,
+        }:
             self._build_failure_handling(action)
         else:
             self.failure_button.setVisible(False)

@@ -16,7 +16,7 @@ from .windowing import normalize_window_target
 from .project_manager import ProjectManager
 from .subflows import mapping_dict, resolve_subflow_project, validate_subflow_dependencies
 from .verification import SUPPORTED_VERIFICATIONS
-from .webhook import build_webhook_request
+from .webhook import build_email_webhook_request, build_webhook_request
 
 LEVEL_ERROR = "Error"
 LEVEL_WARNING = "Warning"
@@ -162,7 +162,10 @@ def validate_project_detailed(
         try:
             resolved = (
                 action.data
-                if action.action == ActionType.POWER_AUTOMATE_WEBHOOK.value
+                if action.action in {
+                    ActionType.POWER_AUTOMATE_WEBHOOK.value,
+                    ActionType.POWER_AUTOMATE_SEND_EMAIL.value,
+                }
                 else resolve_placeholders_strict(action.data, variables)
             )
         except MissingPlaceholderError as exc:
@@ -405,6 +408,23 @@ def _validate_action(
     issues: list[ValidationIssue], variables: dict[str, Any],
 ) -> None:
     action_type = action.action
+    if action_type == ActionType.POWER_AUTOMATE_SEND_EMAIL.value:
+        for field, label in (
+            ("url", "Webhook URL"), ("to", "To"), ("subject", "Subject"), ("body", "Body"),
+        ):
+            if not str(data.get(field, "")).strip():
+                _add(issues, LEVEL_ERROR, number, name, f"{label} is required")
+        try:
+            build_email_webhook_request(data, variables)
+        except MissingPlaceholderError as exc:
+            _add(issues, LEVEL_ERROR, number, name, f"undefined variable: {exc.variable}")
+        except (TypeError, ValueError) as exc:
+            _add(issues, LEVEL_ERROR, number, name, str(exc))
+        output = str(data.get("output_variable", "")).strip()
+        if output and not VARIABLE_NAME_PATTERN.fullmatch(output):
+            _add(issues, LEVEL_ERROR, number, name, "response variable name is invalid")
+        _validate_webhook_failure(action, data, number, name, issues)
+        return
     if action_type == ActionType.POWER_AUTOMATE_WEBHOOK.value:
         try:
             build_webhook_request(data, variables)
@@ -415,16 +435,7 @@ def _validate_action(
         output = str(data.get("output_variable", "")).strip()
         if output and not VARIABLE_NAME_PATTERN.fullmatch(output):
             _add(issues, LEVEL_ERROR, number, name, "response variable name is invalid")
-        retry_count = _finite_number(
-            (action.on_failure or {}).get("retry_count", data.get("retry_count", 0))
-        )
-        if retry_count is not None and retry_count > 0:
-            _add(issues, LEVEL_ERROR, number, name, "Power Automate Webhook does not support retries")
-        failure_action = (action.on_failure or {}).get(
-            "failure_action", data.get("failure_action", "stop"),
-        )
-        if str(failure_action).lower() not in {"stop", "continue"}:
-            _add(issues, LEVEL_ERROR, number, name, "webhook failure behavior must be Stop or Continue")
+        _validate_webhook_failure(action, data, number, name, issues)
         return
     if action_type in {
         ActionType.LAUNCH_APPLICATION.value, ActionType.WAIT_PROCESS.value,
@@ -768,6 +779,22 @@ def _validate_utility_action(
         value = str(data.get(field, "")).strip()
         if value and not VARIABLE_NAME_PATTERN.fullmatch(value):
             _add(issues, LEVEL_ERROR, number, name, f"{label} name is invalid")
+
+
+def _validate_webhook_failure(
+    action: RpaAction, data: dict[str, Any], number: int, name: str,
+    issues: list[ValidationIssue],
+) -> None:
+    retry_count = _finite_number(
+        (action.on_failure or {}).get("retry_count", data.get("retry_count", 0))
+    )
+    if retry_count is not None and retry_count > 0:
+        _add(issues, LEVEL_ERROR, number, name, "Power Automate webhook actions do not support retries")
+    failure_action = (action.on_failure or {}).get(
+        "failure_action", data.get("failure_action", "stop"),
+    )
+    if str(failure_action).lower() not in {"stop", "continue"}:
+        _add(issues, LEVEL_ERROR, number, name, "webhook failure behavior must be Stop or Continue")
 
 
 def _validate_coordinates(

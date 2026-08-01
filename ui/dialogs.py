@@ -45,7 +45,7 @@ from ui.condition_editor import ConditionEditor
 from ui.window_target_editor import WindowTargetEditor
 from ui.subflow_editor import SubflowEditor
 from ui.utility_action_editor import UTILITY_ACTIONS, UtilityActionEditor
-from ui.webhook_action_editor import WebhookActionEditor
+from ui.webhook_action_editor import PowerAutomateEmailEditor, WebhookActionEditor
 import shiboken6
 
 
@@ -172,6 +172,7 @@ class ManualActionDialog(QDialog):
             ("Run a Python script", ActionType.RUN_PYTHON_SCRIPT.value),
             ("Run Python code", ActionType.PYTHON_CODE.value),
             ("Power Automate Webhook — Send JSON to Power Automate and wait for its response.", ActionType.POWER_AUTOMATE_WEBHOOK.value),
+            ("Power Automate Send Email — Send an email through a user-provided Power Automate webhook.", ActionType.POWER_AUTOMATE_SEND_EMAIL.value),
         ]),
     ]
 
@@ -273,6 +274,7 @@ class ManualActionDialog(QDialog):
             ("Run PowerShell Command", ActionType.RUN_POWERSHELL.value),
             ("Run Python Script", ActionType.RUN_PYTHON_SCRIPT.value),
             ("Power Automate Webhook", ActionType.POWER_AUTOMATE_WEBHOOK.value),
+            ("Power Automate Send Email", ActionType.POWER_AUTOMATE_SEND_EMAIL.value),
             ("Show Desktop Notification", ActionType.SHOW_NOTIFICATION.value),
             ("Read Excel Column", ActionType.READ_EXCEL_COLUMN.value),
             ("Run Python", ActionType.RUN_PYTHON.value),
@@ -612,6 +614,7 @@ class ManualActionDialog(QDialog):
             "subflow_editor",
             "utility_editor",
             "webhook_editor",
+            "email_editor",
         ):
             if hasattr(self, name):
                 delattr(self, name)
@@ -821,6 +824,10 @@ class ManualActionDialog(QDialog):
             self.webhook_editor = WebhookActionEditor(parent=self)
             self.webhook_editor.changed.connect(self._update_summary)
             self.form.addRow(self.webhook_editor)
+        elif kind == ActionType.POWER_AUTOMATE_SEND_EMAIL.value:
+            self.email_editor = PowerAutomateEmailEditor(parent=self)
+            self.email_editor.changed.connect(self._update_summary)
+            self.form.addRow(self.email_editor)
         elif kind in UTILITY_ACTIONS:
             self.utility_editor = UtilityActionEditor(
                 kind, variables=list(self.variables), parent=self, guided=self._guided_mode,
@@ -988,6 +995,8 @@ class ManualActionDialog(QDialog):
             return "Choose the saved flow to run."
         if action.action == ActionType.POWER_AUTOMATE_WEBHOOK.value:
             return self.webhook_editor.validation_error()
+        if action.action == ActionType.POWER_AUTOMATE_SEND_EMAIL.value:
+            return self.email_editor.validation_error()
         if action.action in {
             ActionType.SET_VARIABLE.value, ActionType.GET_VARIABLE.value,
             ActionType.INCREMENT_VARIABLE.value, ActionType.APPEND_VARIABLE.value,
@@ -1144,6 +1153,8 @@ class ManualActionDialog(QDialog):
             return RpaAction(kind, self.subflow_editor.data())
         if kind == ActionType.POWER_AUTOMATE_WEBHOOK.value:
             return RpaAction(kind, self.webhook_editor.data())
+        if kind == ActionType.POWER_AUTOMATE_SEND_EMAIL.value:
+            return RpaAction(kind, self.email_editor.data())
         if kind in UTILITY_ACTIONS:
             return RpaAction(kind, self.utility_editor.data())
         defaults = {

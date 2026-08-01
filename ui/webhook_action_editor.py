@@ -198,3 +198,79 @@ class WebhookActionEditor(QWidget):
 
     def _items_changed(self, _item: QTableWidgetItem) -> None:
         self.changed.emit()
+
+
+class PowerAutomateEmailEditor(QWidget):
+    changed = Signal()
+
+    def __init__(self, data: dict | None = None, parent=None) -> None:
+        super().__init__(parent)
+        initial = dict(data or {})
+        self.url = QLineEdit(str(initial.get("url", "")))
+        self.url.setPlaceholderText("https://...logic.azure.com/...")
+        self.to = QLineEdit(str(initial.get("to", "")))
+        self.to.setPlaceholderText("recipient@example.com or {{recipient}}")
+        self.cc = QLineEdit(str(initial.get("cc", "")))
+        self.cc.setPlaceholderText("Optional")
+        self.subject = QLineEdit(str(initial.get("subject", "")))
+        self.subject.setPlaceholderText("Run {{run_id}} completed")
+        self.body = QPlainTextEdit(str(initial.get("body", "")))
+        self.body.setPlaceholderText("Plain text or HTML; {{variables}} are supported")
+        self.body.setMinimumHeight(190)
+        self.timeout = QDoubleSpinBox()
+        self.timeout.setRange(10, 120)
+        self.timeout.setDecimals(1)
+        self.timeout.setSuffix(" s")
+        self.timeout.setValue(float(initial.get("timeout", 60.0)))
+        self.output_variable = QLineEdit(str(initial.get("output_variable", "")))
+        self.output_variable.setPlaceholderText("Optional variable name")
+        self.failure_action = QComboBox()
+        self.failure_action.addItem("Stop flow", "stop")
+        self.failure_action.addItem("Continue flow", "continue")
+        self.failure_action.setCurrentIndex(max(
+            0, self.failure_action.findData(initial.get("failure_action", "stop")),
+        ))
+        note = QLabel("Send an email through a user-provided Power Automate webhook.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #64748b;")
+        form = QFormLayout(self)
+        form.addRow(note)
+        form.addRow("Webhook URL", self.url)
+        form.addRow("To", self.to)
+        form.addRow("CC", self.cc)
+        form.addRow("Subject", self.subject)
+        form.addRow("Body", self.body)
+        form.addRow("Timeout", self.timeout)
+        form.addRow("Save response as", self.output_variable)
+        form.addRow("On failure", self.failure_action)
+        for field in (self.url, self.to, self.cc, self.subject, self.output_variable):
+            field.textChanged.connect(self.changed)
+        self.body.textChanged.connect(self.changed)
+        self.timeout.valueChanged.connect(self.changed)
+        self.failure_action.currentIndexChanged.connect(self.changed)
+
+    def data(self) -> dict:
+        return {
+            "url": self.url.text().strip(),
+            "to": self.to.text().strip(),
+            "cc": self.cc.text().strip(),
+            "subject": self.subject.text(),
+            "body": self.body.toPlainText(),
+            "timeout": self.timeout.value(),
+            "output_variable": self.output_variable.text().strip(),
+            "failure_action": str(self.failure_action.currentData()),
+        }
+
+    def validation_error(self) -> str | None:
+        for field, message in (
+            (self.url.text(), "Enter the Power Automate webhook URL."),
+            (self.to.text(), "Enter at least one recipient in To."),
+            (self.subject.text(), "Enter the email subject."),
+            (self.body.toPlainText(), "Enter the email body."),
+        ):
+            if not field.strip():
+                return message
+        output = self.output_variable.text().strip()
+        if output and not VARIABLE_NAME_PATTERN.fullmatch(output):
+            return "Save response as must be a valid variable name."
+        return None
