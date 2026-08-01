@@ -771,16 +771,42 @@ class MainWindow(QMainWindow):
         self.update_status()
 
     def save_as_project(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Save project as")
-        if not folder:
+        root = flows_root()
+        current_name = self.project.project.name or (self.project_dir.name if self.project_dir else "Flow")
+        name, ok = QInputDialog.getText(
+            self,
+            "Save Flow As",
+            f"New flow name\n\nSave location: {root}",
+            QLineEdit.Normal,
+            f"{current_name}_Copy",
+        )
+        if not ok:
             return
-        self.manager.save_as(self.project, self.project_dir, Path(folder))
-        self.project_dir = Path(folder)
-        self._load_latest_evidence()
-        self.dirty = False
-        self._remember_project_path()
-        self.log("project saved as")
-        self.update_status()
+        flow_name = sanitize_flow_name(name)
+        if not flow_name:
+            show_error(self, "Invalid flow name", "Enter a flow name using letters, numbers, spaces, dashes, or underscores.")
+            return
+        target_dir = root / flow_name
+        if self.project_dir and target_dir.resolve() == Path(self.project_dir).resolve():
+            show_error(self, "Flow exists", "Choose a different name for the copied flow.")
+            return
+        if (target_dir / "project.json").exists() and QMessageBox.question(
+            self,
+            "Flow exists",
+            f"Replace existing flow '{flow_name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            project_path = self.manager.save_as(self.project, self.project_dir, target_dir)
+            self.open_project_path(project_path)
+            if self.project_dir is None or Path(self.project_dir).resolve() != target_dir.resolve():
+                return
+            self.log("project saved as")
+        except (OSError, TypeError, ValueError) as exc:
+            show_error(self, "Save As failed", str(exc))
 
     def start_recording(self) -> None:
         if not self.ensure_project_dir():

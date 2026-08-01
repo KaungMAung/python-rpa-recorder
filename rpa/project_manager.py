@@ -31,15 +31,13 @@ class ProjectManager:
 
     def save_as(self, project: RpaProject, source_dir: Path | None, target_dir: Path) -> Path:
         target_dir = Path(target_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
         ensure_project_dirs(target_dir)
         if source_dir and Path(source_dir).exists() and Path(source_dir).resolve() != target_dir.resolve():
-            src = Path(source_dir) / "screenshots"
-            dst = target_dir / "screenshots"
-            if src.exists():
-                for item in src.glob("*"):
-                    if item.is_file():
-                        shutil.copy2(item, dst / item.name)
-        return self.save(project, target_dir)
+            shutil.copytree(Path(source_dir), target_dir, dirs_exist_ok=True)
+        copied_project = deepcopy(project)
+        copied_project.project.name = target_dir.name
+        return self.save(copied_project, target_dir)
 
     def load(self, project_json: Path) -> RpaProject:
         project_json = Path(project_json)
