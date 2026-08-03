@@ -71,9 +71,45 @@ def test_payload_uses_canonical_history_and_step_results(monkeypatch) -> None:
         "finished_at": "2026-08-01T01:00:02+00:00", "duration_seconds": 2.0,
         "machine_name": "PC-01", "user_name": "operator", "source": "Manual",
         "error": "target missing", "failed_step": 2, "attempts": 3,
-        "retry_count": 1, "fallback_executed": True, "step_count": 3,
+        "retry_count": 1, "fallback_executed": "True", "evidence_path": "",
+        "step_count": 3,
         "completed_step_count": 1, "failed_step_count": 1, "skipped_step_count": 1,
     }
+
+
+def test_payload_normalizes_null_and_boolean_values_for_webhook_schema(monkeypatch) -> None:
+    """failed_step/error/evidence_path default safely and fallback_executed is a string."""
+    monkeypatch.setattr("rpa.external_run_log.platform.node", lambda: "PC-01")
+    monkeypatch.setattr("rpa.external_run_log.getpass.getuser", lambda: "operator")
+    entry = RunHistoryEntry(
+        started_at="2026-08-01T01:00:00+00:00",
+        finished_at="2026-08-01T01:00:02+00:00",
+        duration_seconds=2.0,
+        status="COMPLETED_VERIFIED",
+        failed_step=None,
+        error=None,
+        attempts=1,
+        source="Manual",
+        run_id="run-456",
+        evidence_path=None,
+        retry_count=0,
+        fallback_executed=False,
+    )
+    payload = build_run_log_payload("Flow A", entry, [])
+    assert payload["failed_step"] == 0
+    assert payload["error"] == ""
+    assert payload["evidence_path"] == ""
+    assert payload["fallback_executed"] == "False"
+    assert isinstance(payload["fallback_executed"], str)
+    assert isinstance(payload["attempts"], int)
+    assert isinstance(payload["retry_count"], int)
+    assert isinstance(payload["duration_seconds"], (int, float))
+    assert isinstance(payload["started_at"], str)
+    assert isinstance(payload["finished_at"], str)
+    assert isinstance(payload["flow_name"], str)
+    assert isinstance(payload["run_id"], str)
+    assert isinstance(payload["source"], str)
+    assert isinstance(payload["status"], str)
 
 
 @pytest.mark.parametrize("status", ["COMPLETED_VERIFIED", "Failed"])

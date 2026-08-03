@@ -804,7 +804,7 @@ class MainWindow(QMainWindow):
             self.open_project_path(project_path)
             if self.project_dir is None or Path(self.project_dir).resolve() != target_dir.resolve():
                 return
-            self.log("project saved as")
+            self.log(f"project saved as: {target_dir}")
         except (OSError, TypeError, ValueError) as exc:
             show_error(self, "Save As failed", str(exc))
 
